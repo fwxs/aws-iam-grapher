@@ -36,6 +36,16 @@ const WHO_CAN_QUERY: &str = "
           })
     WHERE e.account_id = $account_id
     RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type
+    UNION
+    MATCH (u:User)-[:MEMBER_OF]->(g:Group)
+          -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
+          -[:GRANTS]->(perm:Permission {
+              action: $action,
+              effect: 'Allow',
+              snapshot_id: $snapshot_id
+          })
+    WHERE u.account_id = $account_id
+    RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
 ";
 
 /// Return all entities that have permission to perform `action` in this snapshot.

@@ -3,10 +3,10 @@ mod helpers;
 use iam_graph::{GraphIngester, IngestConfig};
 use uuid::Uuid;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_creates_account_and_snapshot_nodes() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let snapshot_id = config.snapshot_id.clone();
     let account_id = config.account_id.clone();
@@ -24,9 +24,9 @@ async fn ingest_creates_account_and_snapshot_nodes() {
                 .param("id", account_id.as_str()),
         )
         .await
-        .unwrap();
+        .expect("account query must succeed");
     assert!(!rows.is_empty(), "AwsAccount must exist");
-    let id: String = rows[0].get("id").unwrap();
+    let id: String = rows[0].get("id").expect("id field must exist");
     assert_eq!(id, account_id);
 
     let rows = ingester
@@ -36,16 +36,16 @@ async fn ingest_creates_account_and_snapshot_nodes() {
                 .param("id", snapshot_id.as_str()),
         )
         .await
-        .unwrap();
+        .expect("snapshot query must succeed");
     assert!(!rows.is_empty(), "Snapshot must exist");
-    let snap: String = rows[0].get("id").unwrap();
+    let snap: String = rows[0].get("id").expect("id field must exist");
     assert_eq!(snap, snapshot_id);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_creates_policy_nodes_with_correct_uid() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let snapshot_id = config.snapshot_id.clone();
 
@@ -63,18 +63,18 @@ async fn ingest_creates_policy_nodes_with_correct_uid() {
             .param("uid", expected_uid.as_str()),
         )
         .await
-        .unwrap();
+        .expect("policy query must succeed");
     assert!(!rows.is_empty(), "Policy must exist");
-    let uid: String = rows[0].get("uid").unwrap();
-    let is_aws: bool = rows[0].get("aws").unwrap();
+    let uid: String = rows[0].get("uid").expect("uid field must exist");
+    let is_aws: bool = rows[0].get("aws").expect("aws field must exist");
     assert_eq!(uid, expected_uid);
     assert!(!is_aws);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_creates_permission_nodes_without_wildcards() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let snapshot_id = config.snapshot_id.clone();
 
@@ -93,15 +93,15 @@ async fn ingest_creates_permission_nodes_without_wildcards() {
             .param("snap", snapshot_id.as_str()),
         )
         .await
-        .unwrap();
-    let cnt: i64 = rows[0].get("cnt").unwrap();
+        .expect("wildcard query must succeed");
+    let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert_eq!(cnt, 0, "No permission node should have wildcard in action");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_creates_role_to_policy_relationship() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let snapshot_id = config.snapshot_id.clone();
 
@@ -119,15 +119,15 @@ async fn ingest_creates_role_to_policy_relationship() {
             .param("snap", snapshot_id.as_str()),
         )
         .await
-        .unwrap();
-    let cnt: i64 = rows[0].get("cnt").unwrap();
+        .expect("relationship query must succeed");
+    let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert!(cnt > 0, "HAS_ATTACHED_POLICY relationship must exist");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_creates_instance_profile_to_role_relationship() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let snapshot_id = config.snapshot_id.clone();
 
@@ -145,15 +145,15 @@ async fn ingest_creates_instance_profile_to_role_relationship() {
             .param("snap", snapshot_id.as_str()),
         )
         .await
-        .unwrap();
-    let cnt: i64 = rows[0].get("cnt").unwrap();
+        .expect("relationship query must succeed");
+    let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert!(cnt > 0, "CONTAINS_ROLE relationship must exist");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_handles_empty_collected_data() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("111122223333");
     let ingester = GraphIngester::new(client, config);
     ingester
@@ -162,14 +162,14 @@ async fn ingest_handles_empty_collected_data() {
         .expect("empty ingest must not fail");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_respects_batch_size() {
     use chrono::Utc;
     use iam_models::IamPolicy;
     use std::collections::HashMap;
 
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = IngestConfig {
         batch_size: 500,
         snapshot_id: Uuid::new_v4().to_string(),
@@ -218,7 +218,7 @@ async fn ingest_respects_batch_size() {
                 .param("snap", snapshot_id.as_str()),
         )
         .await
-        .unwrap();
-    let cnt: i64 = rows[0].get("cnt").unwrap();
+        .expect("count query must succeed");
+    let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert_eq!(cnt, 1500, "All 1500 policies must be present");
 }

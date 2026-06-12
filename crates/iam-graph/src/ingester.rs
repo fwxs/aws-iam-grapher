@@ -308,7 +308,19 @@ impl GraphIngester {
             }
         }
 
+        let group_arn_by_name: std::collections::HashMap<&str, &str> = data
+            .groups
+            .iter()
+            .map(|g| (g.group_name.as_str(), g.arn.as_str()))
+            .collect();
+
         for u in &data.users {
+            for group_name in &u.group_list {
+                if let Some(group_arn) = group_arn_by_name.get(group_name.as_str()) {
+                    phase6.push(relationships::member_of_query(snap_id, &u.arn, group_arn));
+                    rel_count += 1;
+                }
+            }
             for attached in &u.attached_managed_policies {
                 phase6.push(relationships::has_attached_policy_query(
                     snap_id,
@@ -324,6 +336,27 @@ impl GraphIngester {
                     &inline.policy_name,
                 ));
                 rel_count += 1;
+                for stmt in &inline.policy_document.statement {
+                    let eff = effect_str(&stmt.effect);
+                    let resources = if stmt.resource.is_empty() {
+                        vec!["*".to_string()]
+                    } else {
+                        stmt.resource.clone()
+                    };
+                    for action in &stmt.action {
+                        for resource in &resources {
+                            phase6.push(relationships::inline_grants_query(
+                                snap_id,
+                                &u.arn,
+                                &inline.policy_name,
+                                eff,
+                                action,
+                                resource,
+                            ));
+                            rel_count += 1;
+                        }
+                    }
+                }
             }
             if let Some(boundary) = &u.permissions_boundary {
                 phase6.push(relationships::bounded_by_query(
@@ -351,6 +384,27 @@ impl GraphIngester {
                     &inline.policy_name,
                 ));
                 rel_count += 1;
+                for stmt in &inline.policy_document.statement {
+                    let eff = effect_str(&stmt.effect);
+                    let resources = if stmt.resource.is_empty() {
+                        vec!["*".to_string()]
+                    } else {
+                        stmt.resource.clone()
+                    };
+                    for action in &stmt.action {
+                        for resource in &resources {
+                            phase6.push(relationships::inline_grants_query(
+                                snap_id,
+                                &g.arn,
+                                &inline.policy_name,
+                                eff,
+                                action,
+                                resource,
+                            ));
+                            rel_count += 1;
+                        }
+                    }
+                }
             }
         }
 

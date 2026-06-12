@@ -4,38 +4,97 @@
 use chrono::Utc;
 use iam_collector::{CollectedData, CollectorMode};
 use iam_graph::{GraphClient, IngestConfig};
+use std::sync::OnceLock;
+use std::time::Duration;
 use testcontainers_modules::{
     neo4j::{Neo4j, Neo4jImage},
-    testcontainers::{runners::AsyncRunner, ContainerAsync},
+    testcontainers::{
+        core::WaitFor,
+        runners::AsyncRunner,
+        ContainerAsync, ImageExt as _,
+    },
 };
 use uuid::Uuid;
 
-/// Start a Neo4j Community container and return a connected GraphClient.
-/// The container is kept alive as long as the returned handle is in scope.
-pub async fn start_neo4j() -> (GraphClient, ContainerAsync<Neo4jImage>) {
-    let container = Neo4j::default().start().await.expect("Neo4j must start");
-    let host = container.get_host().await.expect("host must be available");
-    let port = container
-        .image()
-        .bolt_port_ipv4()
-        .expect("bolt port must be available");
-    let uri = format!("bolt://{}:{}", host, port);
-    let user = container.image().user().expect("default user is set");
-    let pass = container
-        .image()
-        .password()
-        .expect("default password is set");
+// ---------------------------------------------------------------------------
+// Shared container (one per test binary)
+// ---------------------------------------------------------------------------
 
-    let client = GraphClient::connect(&uri, user, pass)
-        .await
-        .expect("GraphClient must connect");
-    client
-        .initialize_schema()
-        .await
-        .expect("schema init must succeed");
-
-    (client, container)
+struct ContainerInfo {
+    uri: String,
+    user: String,
+    pass: String,
 }
+
+static NEO4J_CONTAINER: OnceLock<ContainerInfo> = OnceLock::new();
+
+fn init_container() -> &'static ContainerInfo {
+    NEO4J_CONTAINER.get_or_init(|| {
+        // block_in_place lets us call block_on from inside a multi-thread tokio runtime.
+        // All Docker-gated tests must use #[tokio::test(flavor = "multi_thread")].
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let container: ContainerAsync<Neo4jImage> = Neo4j::default()
+                    .with_ready_conditions(vec![
+                        WaitFor::message_on_either_std("Bolt enabled on"),
+                        WaitFor::message_on_either_std("Started."),
+                    ])
+                    .with_startup_timeout(Duration::from_secs(180))
+                    .start()
+                    .await
+                    .expect("Neo4j must start");
+
+                let host = container.get_host().await.expect("host must be available");
+                let port = container
+                    .image()
+                    .bolt_port_ipv4()
+                    .expect("bolt port must be available");
+                let uri = format!("bolt://{}:{}", host, port);
+                let user = container.image().user().expect("default user is set").to_string();
+                let pass = container
+                    .image()
+                    .password()
+                    .expect("default password is set")
+                    .to_string();
+
+                // Leak the container so it is never dropped during the test run.
+                // The Docker daemon manages the container lifecycle; cleanup happens
+                // via ryuk (if enabled) or `docker container prune` after the process exits.
+                Box::leak(Box::new(container));
+
+                // Initialize schema once here so concurrent shared_client() calls
+                // don't race on CREATE INDEX — Neo4j throws EquivalentSchemaRuleAlreadyExists
+                // even with IF NOT EXISTS when multiple connections hit it simultaneously.
+                let bootstrap = GraphClient::connect(&uri, &user, &pass)
+                    .await
+                    .expect("GraphClient must connect for schema init");
+                bootstrap
+                    .initialize_schema()
+                    .await
+                    .expect("schema init must succeed");
+
+                ContainerInfo { uri, user, pass }
+            })
+        })
+    })
+}
+
+/// Return a GraphClient connected to the shared Neo4j container for this test binary.
+///
+/// The container is started once on the first call and reused for all subsequent calls.
+/// Schema is initialized exactly once inside `init_container()`.
+///
+/// Requires `#[tokio::test(flavor = "multi_thread")]` on the calling test.
+pub async fn shared_client() -> GraphClient {
+    let info = init_container();
+    GraphClient::connect(&info.uri, &info.user, &info.pass)
+        .await
+        .expect("GraphClient must connect to shared Neo4j container")
+}
+
+// ---------------------------------------------------------------------------
+// IngestConfig factory
+// ---------------------------------------------------------------------------
 
 /// Create an IngestConfig with a fresh snapshot ID for the given account.
 pub fn test_config(account_id: &str) -> IngestConfig {
@@ -47,6 +106,10 @@ pub fn test_config(account_id: &str) -> IngestConfig {
         dry_run: false,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Data fixtures
+// ---------------------------------------------------------------------------
 
 /// Minimal CollectedData with no entities.
 pub fn empty_data(account_id: &str) -> CollectedData {
@@ -206,6 +269,115 @@ pub fn data_with_instance_profile(account_id: &str) -> CollectedData {
         collection_timestamp: Utc::now(),
         roles: vec![role],
         instance_profiles: vec![profile],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a group+user (group-derived) and a second user with an inline policy.
+///
+/// Grant paths for `s3:DeleteObject`:
+/// - Group `Auditors` → attached managed policy `GroupPolicy` → Allow s3:DeleteObject
+/// - User `carol` → member of `Auditors` (group-derived)
+/// - User `dave` → inline policy `DaveInline` → Allow s3:DeleteObject (no group)
+pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
+    use iam_models::{
+        Effect, IamGroup, IamInlinePolicy, IamPolicy, IamUser, PolicyDocument, PolicyRef,
+        PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let policy_arn = format!("arn:aws:iam::{}:policy/GroupPolicy", account_id);
+    let group_arn = format!("arn:aws:iam::{}:group/Auditors", account_id);
+    let carol_arn = format!("arn:aws:iam::{}:user/carol", account_id);
+    let dave_arn = format!("arn:aws:iam::{}:user/dave", account_id);
+
+    let allow_s3_delete = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec!["s3:DeleteObject".to_string()],
+            not_action: vec![],
+            resource: vec!["*".to_string()],
+            not_resource: vec![],
+            principal: None,
+            condition: None,
+        }],
+    };
+
+    let managed_policy = IamPolicy {
+        arn: policy_arn.clone(),
+        policy_id: "ANPAGROUPTEST".to_string(),
+        policy_name: "GroupPolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 1,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(allow_s3_delete.clone()),
+        tags: HashMap::new(),
+    };
+
+    let group = IamGroup {
+        arn: group_arn.clone(),
+        group_id: "AGPAAUDITORS".to_string(),
+        group_name: "Auditors".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![PolicyRef {
+            policy_arn: policy_arn.clone(),
+            policy_name: "GroupPolicy".to_string(),
+        }],
+        inline_policies: vec![],
+    };
+
+    let carol = IamUser {
+        arn: carol_arn.clone(),
+        user_id: "AIDACAROL".to_string(),
+        user_name: "carol".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![],
+        group_list: vec!["Auditors".to_string()],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    let dave_inline = IamInlinePolicy {
+        policy_name: "DaveInline".to_string(),
+        policy_document: allow_s3_delete,
+    };
+
+    let dave = IamUser {
+        arn: dave_arn.clone(),
+        user_id: "AIDADAVE".to_string(),
+        user_name: "dave".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![dave_inline],
+        group_list: vec![],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        policies: vec![managed_policy],
+        groups: vec![group],
+        users: vec![carol, dave],
         ..Default::default()
     }
 }

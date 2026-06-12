@@ -7,21 +7,89 @@ Collect AWS IAM permissions into a Neo4j graph and run security analysis queries
 ## Prerequisites
 
 - **Rust 1.82.0 or higher** — install via [rustup](https://rustup.rs)
-- **Docker** — to run Neo4j Community Edition
-- **AWS credentials configured** — required for live and hybrid modes (`~/.aws/credentials`, environment variables, or IAM role)
-- **Neo4j Community Edition** running locally or accessible via Bolt
+- **Docker** — required to run Neo4j Community Edition and the integration test suite
+- **AWS credentials** — required for live and hybrid collection modes (`~/.aws/credentials`, environment variables, or an IAM role)
+- **Neo4j Community Edition** — running locally or accessible via the Bolt protocol
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/<usuario>/aws-iam-grapher
+git clone https://github.com/<user>/aws-iam-grapher
 cd aws-iam-grapher
 cargo build --release
 ```
 
-The binary is at `target/release/aws-iam-grapher`.
+The compiled binary is located at `target/release/aws-iam-grapher`.
+
+---
+
+## Running Tests
+
+### Unit tests
+
+Unit tests have no external dependencies and run entirely in-process:
+
+```bash
+cargo test --workspace
+```
+
+### Integration tests (requires Docker)
+
+Integration tests in `crates/iam-graph/tests/` start a real Neo4j container using [testcontainers-rs](https://github.com/testcontainers/testcontainers-rs). They are annotated with `#[ignore = "requires Docker"]` so they don't run by default — you need to opt in explicitly.
+
+#### Running on macOS with Colima
+
+Colima exposes the Docker socket at a non-standard path, and its default profile restricts container privileges. You need to set two environment variables before running the tests:
+
+```bash
+# Point testcontainers at the Colima socket
+export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+
+# Disable ryuk — it requires privileged mode that Colima does not allow
+export TESTCONTAINERS_RYUK_DISABLED=true
+```
+
+If you are using a named Colima profile instead of `default`, adjust the socket path accordingly:
+
+```bash
+export DOCKER_HOST="unix://${HOME}/.colima/<profile-name>/docker.sock"
+```
+
+Once the variables are set, run the integration tests:
+
+```bash
+# All Docker-gated tests across the workspace
+cargo test --workspace -- --ignored
+
+# Only the iam-graph integration tests
+cargo test -p iam-graph -- --ignored
+```
+
+#### How containers are managed
+
+Each test binary (one per file in `tests/`) starts a single shared Neo4j container. The container is initialized once, the schema is set up exactly once, and then all tests in that binary reuse the same running instance. Tests remain isolated from each other because each test creates its own `snapshot_id` inside `IngestConfig` — data written by one test is never visible to another.
+
+In total, four containers are started (one per test binary), rather than one per test function.
+
+#### Verifying containers are running
+
+While the tests are executing, you can check which containers are active:
+
+```bash
+DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
+  docker ps --filter ancestor=neo4j
+```
+
+#### Cleaning up after the test run
+
+Because ryuk is disabled, containers are not removed automatically when the tests finish. Remove them manually when you are done:
+
+```bash
+DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
+  docker container prune -f
+```
 
 ---
 
@@ -39,15 +107,15 @@ aws-iam-grapher collect \
 ### Scenario B — Avoid CloudTrail noise (offline)
 
 ```bash
-# Step 1: generate the file using your credentials (one API call)
+# Step 1: export IAM authorization details (single API call, no ongoing access required)
 aws iam get-account-authorization-details \
     --output json > account-auth-details.json
 
-# Step 2 (optional): instance profiles
+# Step 2 (optional): export instance profiles
 aws iam list-instance-profiles \
     --output json > instance-profiles.json
 
-# Step 3: ingest without further API calls
+# Step 3: ingest the exported data without any further AWS API calls
 export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect \
     --mode offline \
@@ -56,7 +124,7 @@ aws-iam-grapher collect \
     --account-alias production
 ```
 
-### Scenario C — Automatic (tries live, prompts for file if 403)
+### Scenario C — Automatic (tries live, prompts for file on access denied)
 
 ```bash
 export NEO4J_PASSWORD=your-password
@@ -67,14 +135,14 @@ aws-iam-grapher collect --mode hybrid --account-alias production
 
 ## Data Coverage by Collection Mode
 
-This table describes what data is available in each mode. Missing data silently skews analysis results — read this before interpreting the graph.
+The table below shows what data is available in each mode. Missing data can silently skew analysis results — review this before interpreting the graph output.
 
 | Field / Entity | Live Mode | Offline Mode |
 |---|---|---|
-| Users | ✓ complete | ✓ if in `get-account-authorization-details` |
-| Roles | ✓ complete | ✓ if in `get-account-authorization-details` |
-| Managed policies | ✓ complete | ✓ if in `get-account-authorization-details` |
-| Inline policies | ✓ complete | ✓ if in `get-account-authorization-details` |
+| Users | ✓ complete | ✓ if present in `get-account-authorization-details` |
+| Roles | ✓ complete | ✓ if present in `get-account-authorization-details` |
+| Managed policies | ✓ complete | ✓ if present in `get-account-authorization-details` |
+| Inline policies | ✓ complete | ✓ if present in `get-account-authorization-details` |
 | Instance Profiles | ✓ via `list-instance-profiles` | ⚠ requires `--profiles-file` |
 | Wildcard expansion | ✓ via awsiamactions.io | ✓ via awsiamactions.io |
 | `create_date` of entities | ✓ | ✓ |
@@ -87,7 +155,7 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 ## Query Commands
 
-All query commands require `--neo4j-pass` (or `NEO4J_PASSWORD` env var) and `--account-id`. If `--snapshot-id` is omitted, the most recent snapshot for the account is used.
+All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable) and `--account-id`. If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
 
 ### Who can perform an action?
 
@@ -216,7 +284,7 @@ docker run \
 
 The Neo4j Browser is then available at `http://localhost:7474`. The Bolt endpoint used by this tool is `bolt://localhost:7687`.
 
-**Note:** Neo4j Community allows only a single database. Account isolation is logical (by `account_id` property), not physical. See [`docs/limitations.md`](docs/limitations.md) for implications.
+**Note:** Neo4j Community supports only a single database. Account isolation is logical (enforced via the `account_id` property on each node), not physical. See [`docs/limitations.md`](docs/limitations.md) for the implications of this design.
 
 ---
 
@@ -248,7 +316,7 @@ aws-iam-grapher/
 | Crate | Type | Responsibility |
 |---|---|---|
 | `iam-models` | lib | Core IAM entity types: `IamRole`, `IamUser`, `IamPolicy`, `IamGroup`, `IamInstanceProfile`, `PolicyDocument` |
-| `iam-expander` | lib | Expands wildcard IAM actions (`s3:*`) to their full list via awsiamactions.io |
-| `iam-collector` | lib | Collects IAM data from live AWS API, offline JSON files, or hybrid mode |
-| `iam-graph` | lib | Ingests collected data into Neo4j and runs Cypher analysis queries |
-| `iam-grapher` | bin | CLI binary: `collect` and `query` subcommands |
+| `iam-expander` | lib | Expands wildcard IAM actions (`s3:*`) to their full enumerated list via awsiamactions.io |
+| `iam-collector` | lib | Collects IAM data from the live AWS API, offline JSON exports, or a hybrid combination of both |
+| `iam-graph` | lib | Ingests collected data into Neo4j and executes Cypher analysis queries |
+| `iam-grapher` | bin | CLI entry point providing the `collect` and `query` subcommands |

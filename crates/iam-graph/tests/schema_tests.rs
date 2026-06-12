@@ -1,10 +1,10 @@
 mod helpers;
 
 /// Verify that all expected constraints exist after initialize_schema().
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn constraints_are_created_on_initialize_schema() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
 
     let rows = client
         .fetch_all(neo4rs::query("SHOW CONSTRAINTS"))
@@ -44,11 +44,11 @@ async fn constraints_are_created_on_initialize_schema() {
 }
 
 /// Calling initialize_schema() twice must not fail.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn schema_initialization_is_idempotent() {
-    let (client, _container) = helpers::start_neo4j().await;
-    // Called once in start_neo4j(); call again — must not error
+    let client = helpers::shared_client().await;
+    // shared_client() already called initialize_schema(); call again — must not error.
     client
         .initialize_schema()
         .await

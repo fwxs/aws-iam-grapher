@@ -2,10 +2,10 @@ mod helpers;
 
 use iam_graph::{privilege_escalation_paths, who_can, GraphIngester, QueryContext};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn who_can_returns_correct_entities() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("222233334444");
     let snapshot_id = config.snapshot_id.clone();
     let account_id = config.account_id.clone();
@@ -29,10 +29,10 @@ async fn who_can_returns_correct_entities() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn who_can_does_not_leak_across_accounts() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
 
     // Ingest account A
     let config_a = helpers::test_config("ACCOUNT_A");
@@ -44,11 +44,10 @@ async fn who_can_does_not_leak_across_accounts() {
         .await
         .expect("ingest A must succeed");
 
-    // Ingest account B using same GraphClient through a second ingester
-    let graph_client = ingester_a.into_client();
+    // Second client to same shared container for account B
+    let client_b = helpers::shared_client().await;
     let config_b = helpers::test_config("ACCOUNT_B");
-    let _snap_b = config_b.snapshot_id.clone();
-    let ingester_b = GraphIngester::new(graph_client, config_b);
+    let ingester_b = GraphIngester::new(client_b, config_b);
     let data_b = helpers::data_with_role_action("ACCOUNT_B", "s3:GetObject", true);
     ingester_b
         .ingest(&data_b)
@@ -59,19 +58,19 @@ async fn who_can_does_not_leak_across_accounts() {
     let ctx_a = QueryContext::new(&snap_a, "ACCOUNT_A");
     let entities = who_can(ingester_b.client().inner(), &ctx_a, "s3:GetObject")
         .await
-        .unwrap();
-    for e in &entities {
+        .expect("who_can must succeed");
+    for entity in &entities {
         assert!(
-            !e.arn.contains("ACCOUNT_B"),
+            !entity.arn.contains("ACCOUNT_B"),
             "Account B entity leaked into A query"
         );
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn privilege_escalation_finds_iam_passrole() {
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let config = helpers::test_config("333344445555");
     let snapshot_id = config.snapshot_id.clone();
     let account_id = config.account_id.clone();
@@ -97,12 +96,12 @@ async fn privilege_escalation_finds_iam_passrole() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn diff_permissions_detects_new_permissions() {
     use iam_graph::diff_permissions;
 
-    let (client, _container) = helpers::start_neo4j().await;
+    let client = helpers::shared_client().await;
     let account_id = "444455556666";
 
     // Snapshot A — no s3:DeleteObject
@@ -116,10 +115,10 @@ async fn diff_permissions_detects_new_permissions() {
         .expect("ingest A must succeed");
 
     // Snapshot B — adds s3:DeleteObject
-    let graph_client = ingester_a.into_client();
+    let client_b = helpers::shared_client().await;
     let config_b = helpers::test_config(account_id);
     let snap_b = config_b.snapshot_id.clone();
-    let ingester_b = GraphIngester::new(graph_client, config_b);
+    let ingester_b = GraphIngester::new(client_b, config_b);
     let data_b = helpers::data_with_role_action(account_id, "s3:DeleteObject", true);
     ingester_b
         .ingest(&data_b)
@@ -133,5 +132,36 @@ async fn diff_permissions_detects_new_permissions() {
     assert!(
         diff.added.iter().any(|p| p.action == "s3:DeleteObject"),
         "s3:DeleteObject must appear as added permission"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_sees_group_and_inline_user_paths() {
+    let client = helpers::shared_client().await;
+    let account_id = "555566667777";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+        .await
+        .expect("who_can must succeed");
+
+    assert!(
+        entities.iter().any(|e| e.name == "dave"),
+        "inline-on-user grant is missing (GRANTS edge not written for user inline policies)"
+    );
+    assert!(
+        entities.iter().any(|e| e.name == "carol"),
+        "group-derived grant is missing (MEMBER_OF not ingested or not traversed)"
+    );
+    assert!(
+        entities.iter().any(|e| e.name == "Auditors"),
+        "group itself is missing from who_can results"
     );
 }
