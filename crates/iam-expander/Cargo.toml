@@ -1,0 +1,15 @@
+[package]
+name = "iam-expander"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+reqwest      = { version = "0.12", features = ["json"] }
+tokio        = { workspace = true }
+thiserror    = { workspace = true }
+clap         = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

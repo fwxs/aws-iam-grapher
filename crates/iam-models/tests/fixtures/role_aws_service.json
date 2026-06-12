@@ -1,0 +1,20 @@
+{
+  "RoleId": "AROAYYYYYYYYYYYYYYYY",
+  "RoleName": "AWSServiceRoleForElasticLoadBalancing",
+  "Arn": "arn:aws:iam::123456789012:role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForElasticLoadBalancing",
+  "Path": "/aws-service-role/elasticloadbalancing.amazonaws.com/",
+  "CreateDate": "2019-08-01T00:00:00Z",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": { "Service": "elasticloadbalancing.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "AttachedManagedPolicies": [],
+  "RolePolicyList": [],
+  "Tags": []
+}

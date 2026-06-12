@@ -1,0 +1,142 @@
+{
+  "UserDetailList": [
+    {
+      "Arn": "arn:aws:iam::123456789012:user/alice",
+      "UserId": "AIDAAAAAAAAAAAAAAALICE",
+      "UserName": "alice",
+      "Path": "/",
+      "CreateDate": "2023-01-01T00:00:00Z",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyArn": "arn:aws:iam::123456789012:policy/ReadOnlyS3",
+          "PolicyName": "ReadOnlyS3"
+        }
+      ],
+      "UserPolicyList": [
+        {
+          "PolicyName": "AliceInlinePolicy",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["ec2:DescribeInstances"],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ],
+      "GroupList": ["Developers"],
+      "Tags": [
+        {"Key": "team", "Value": "platform"}
+      ]
+    },
+    {
+      "Arn": "arn:aws:iam::123456789012:user/bob",
+      "UserId": "AIDAAAAAAAAAAAAAAAAABOB",
+      "UserName": "bob",
+      "Path": "/",
+      "CreateDate": "2023-02-01T00:00:00Z",
+      "AttachedManagedPolicies": [],
+      "UserPolicyList": [],
+      "GroupList": []
+    }
+  ],
+  "GroupDetailList": [
+    {
+      "Arn": "arn:aws:iam::123456789012:group/Developers",
+      "GroupId": "AGPAAAAAAAAAAAAAADEVELOPERS",
+      "GroupName": "Developers",
+      "Path": "/",
+      "CreateDate": "2023-01-01T00:00:00Z",
+      "AttachedManagedPolicies": [
+        {
+          "PolicyArn": "arn:aws:iam::aws:policy/ReadOnlyAccess",
+          "PolicyName": "ReadOnlyAccess"
+        }
+      ],
+      "GroupPolicyList": []
+    }
+  ],
+  "RoleDetailList": [
+    {
+      "Arn": "arn:aws:iam::123456789012:role/EC2InstanceRole",
+      "RoleId": "AROAAAAAAAAAAAAAAAAEC2",
+      "RoleName": "EC2InstanceRole",
+      "Path": "/",
+      "CreateDate": "2023-01-15T00:00:00Z",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "AttachedManagedPolicies": [
+        {
+          "PolicyArn": "arn:aws:iam::123456789012:policy/ReadOnlyS3",
+          "PolicyName": "ReadOnlyS3"
+        }
+      ],
+      "RolePolicyList": [],
+      "Description": "Role for EC2 instances",
+      "MaxSessionDuration": 3600,
+      "Tags": [
+        {"Key": "env", "Value": "prod"}
+      ]
+    },
+    {
+      "Arn": "arn:aws:iam::123456789012:role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForElasticLoadBalancing",
+      "RoleId": "AROAAAAAAAAAAAAAAAAELB",
+      "RoleName": "AWSServiceRoleForElasticLoadBalancing",
+      "Path": "/aws-service-role/elasticloadbalancing.amazonaws.com/",
+      "CreateDate": "2022-06-01T00:00:00Z",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {"Service": "elasticloadbalancing.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "AttachedManagedPolicies": [],
+      "RolePolicyList": []
+    }
+  ],
+  "Policies": [
+    {
+      "Arn": "arn:aws:iam::123456789012:policy/ReadOnlyS3",
+      "PolicyId": "ANPAAAAAAAAAAAAAAAAAS3",
+      "PolicyName": "ReadOnlyS3",
+      "Path": "/",
+      "CreateDate": "2023-01-01T00:00:00Z",
+      "UpdateDate": "2023-01-01T00:00:00Z",
+      "AttachmentCount": 2,
+      "IsAttachable": true,
+      "DefaultVersionId": "v1",
+      "Description": "Read-only access to S3",
+      "PolicyVersionList": [
+        {
+          "VersionId": "v1",
+          "IsDefaultVersion": true,
+          "Document": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:ListBucket"],
+                "Resource": "*"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "UserId": "AIDAXXXXXXXXXXXXXXXXX",
+  "UserName": "alice",
+  "Arn": "arn:aws:iam::123456789012:user/alice",
+  "Path": "/",
+  "CreateDate": "2020-01-15T08:00:00Z",
+  "PasswordLastUsed": "2024-01-10T12:00:00Z",
+  "AttachedManagedPolicies": [
+    {
+      "PolicyName": "IAMReadOnlyAccess",
+      "PolicyArn": "arn:aws:iam::aws:policy/IAMReadOnlyAccess"
+    }
+  ],
+  "UserPolicyList": [],
+  "GroupList": ["Developers"],
+  "Tags": [{ "Key": "Department", "Value": "Engineering" }]
+}

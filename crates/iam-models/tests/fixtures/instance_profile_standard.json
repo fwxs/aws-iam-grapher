@@ -1,0 +1,29 @@
+{
+  "InstanceProfileId": "AIPAXXXXXXXXXXXXXXXXXXX",
+  "InstanceProfileName": "WebServerProfile",
+  "Arn": "arn:aws:iam::123456789012:instance-profile/WebServerProfile",
+  "Path": "/",
+  "CreateDate": "2021-07-01T12:00:00Z",
+  "Roles": [
+    {
+      "RoleId": "AROAXXXXXXXXXXXXXXXXX",
+      "RoleName": "AppServerRole",
+      "Arn": "arn:aws:iam::123456789012:role/AppServerRole",
+      "Path": "/",
+      "CreateDate": "2021-04-10T14:30:00Z",
+      "AssumeRolePolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": { "Service": "ec2.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "AttachedManagedPolicies": [],
+      "RolePolicyList": [],
+      "Tags": []
+    }
+  ]
+}

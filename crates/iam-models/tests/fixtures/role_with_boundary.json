@@ -1,0 +1,24 @@
+{
+  "RoleId": "AROAZZZZZZZZZZZZZZZZ",
+  "RoleName": "BoundedRole",
+  "Arn": "arn:aws:iam::123456789012:role/BoundedRole",
+  "Path": "/",
+  "CreateDate": "2022-06-01T09:00:00Z",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": { "Service": "lambda.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "AttachedManagedPolicies": [],
+  "RolePolicyList": [],
+  "PermissionsBoundary": {
+    "PermissionsBoundaryType": "PermissionsBoundaryPolicy",
+    "PermissionsBoundaryArn": "arn:aws:iam::123456789012:policy/BoundaryPolicy"
+  },
+  "Tags": []
+}

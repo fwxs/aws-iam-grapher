@@ -1,0 +1,26 @@
+{
+  "RoleId": "AROAXXXXXXXXXXXXXXXXX",
+  "RoleName": "AppServerRole",
+  "Arn": "arn:aws:iam::123456789012:role/AppServerRole",
+  "Path": "/",
+  "CreateDate": "2021-04-10T14:30:00Z",
+  "AssumeRolePolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Principal": { "Service": "ec2.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+  "AttachedManagedPolicies": [
+    {
+      "PolicyName": "AmazonS3ReadOnlyAccess",
+      "PolicyArn": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+    }
+  ],
+  "RolePolicyList": [],
+  "MaxSessionDuration": 3600,
+  "Tags": [{ "Key": "Env", "Value": "prod" }]
+}

@@ -1,0 +1,32 @@
+{
+  "InstanceProfiles": [
+    {
+      "Arn": "arn:aws:iam::123456789012:instance-profile/EC2InstanceRole",
+      "InstanceProfileId": "AIPAAAAAAAAAAAAAAAAEC2",
+      "InstanceProfileName": "EC2InstanceRole",
+      "Path": "/",
+      "CreateDate": "2023-01-15T00:00:00Z",
+      "Roles": [
+        {
+          "Arn": "arn:aws:iam::123456789012:role/EC2InstanceRole",
+          "RoleId": "AROAAAAAAAAAAAAAAAAEC2",
+          "RoleName": "EC2InstanceRole",
+          "Path": "/",
+          "CreateDate": "2023-01-15T00:00:00Z",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {"Service": "ec2.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          },
+          "AttachedManagedPolicies": [],
+          "RolePolicyList": []
+        }
+      ]
+    }
+  ]
+}

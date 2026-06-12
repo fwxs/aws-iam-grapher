@@ -1,0 +1,15 @@
+{
+  "UserId": "AIDAYYYYYYYYYYYYYYYY",
+  "UserName": "bob",
+  "Arn": "arn:aws:iam::123456789012:user/bob",
+  "Path": "/",
+  "CreateDate": "2021-05-20T10:00:00Z",
+  "AttachedManagedPolicies": [],
+  "UserPolicyList": [],
+  "GroupList": [],
+  "PermissionsBoundary": {
+    "PermissionsBoundaryType": "PermissionsBoundaryPolicy",
+    "PermissionsBoundaryArn": "arn:aws:iam::123456789012:policy/UserBoundary"
+  },
+  "Tags": []
+}

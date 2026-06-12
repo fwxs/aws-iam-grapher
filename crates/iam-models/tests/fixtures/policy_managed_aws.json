@@ -1,0 +1,13 @@
+{
+  "PolicyName": "ReadOnlyAccess",
+  "PolicyId": "ANPAXXXXXXXXXXXXXXXXX",
+  "Arn": "arn:aws:iam::aws:policy/ReadOnlyAccess",
+  "Path": "/",
+  "DefaultVersionId": "v16",
+  "AttachmentCount": 3,
+  "IsAttachable": true,
+  "Description": "Provides read-only access to AWS services and resources.",
+  "CreateDate": "2013-06-12T23:52:02Z",
+  "UpdateDate": "2021-09-27T19:52:45Z",
+  "Tags": []
+}

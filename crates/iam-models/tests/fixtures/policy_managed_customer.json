@@ -1,0 +1,15 @@
+{
+  "PolicyName": "EngineeringReadAccess",
+  "PolicyId": "ANPAY7EXAMPLE123456X",
+  "Arn": "arn:aws:iam::123456789012:policy/EngineeringReadAccess",
+  "Path": "/engineering/",
+  "DefaultVersionId": "v2",
+  "AttachmentCount": 1,
+  "IsAttachable": true,
+  "CreateDate": "2022-03-15T10:00:00Z",
+  "UpdateDate": "2023-01-20T08:30:00Z",
+  "Tags": [
+    { "Key": "Team", "Value": "Engineering" },
+    { "Key": "Environment", "Value": "Production" }
+  ]
+}

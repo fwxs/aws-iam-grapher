@@ -1,0 +1,17 @@
+{
+  "UserDetailList": [
+    {
+      "Arn": "arn:aws:iam::123456789012:user/alice",
+      "UserId": "AIDAAAAAAAAAAAAAAALICE",
+      "UserName": "alice",
+      "Path": "/",
+      "CreateDate": "2023-01-01T00:00:00Z",
+      "AttachedManagedPolicies": [],
+      "UserPolicyList": [],
+      "GroupList": []
+    }
+  ],
+  "GroupDetailList": [],
+  "RoleDetailList": [],
+  "Policies": []
+}

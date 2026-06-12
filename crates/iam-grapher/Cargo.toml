@@ -1,0 +1,21 @@
+[package]
+name = "iam-grapher"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aws-iam-grapher"
+path = "src/main.rs"
+
+[dependencies]
+clap               = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = "1"
+uuid               = { version = "1", features = ["v4"] }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+iam-collector      = { path = "../iam-collector" }
+iam-graph          = { path = "../iam-graph" }
+iam-models         = { path = "../iam-models" }

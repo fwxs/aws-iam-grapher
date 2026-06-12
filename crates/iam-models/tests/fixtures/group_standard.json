@@ -1,0 +1,28 @@
+{
+  "GroupId": "AGPAXXXXXXXXXXXXXXXXX",
+  "GroupName": "Developers",
+  "Arn": "arn:aws:iam::123456789012:group/Developers",
+  "Path": "/",
+  "CreateDate": "2019-11-01T10:00:00Z",
+  "AttachedManagedPolicies": [
+    {
+      "PolicyName": "AmazonEC2ReadOnlyAccess",
+      "PolicyArn": "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+    }
+  ],
+  "GroupPolicyList": [
+    {
+      "PolicyName": "DeveloperInlinePolicy",
+      "PolicyDocument": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "cloudwatch:GetMetricData",
+            "Resource": "*"
+          }
+        ]
+      }
+    }
+  ]
+}
