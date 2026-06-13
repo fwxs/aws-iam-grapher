@@ -74,6 +74,7 @@ mod tests {
             neo4j_uri: "bolt://localhost:7687".to_string(),
             neo4j_user: "neo4j".to_string(),
             neo4j_pass: "neo4j".to_string(),
+            account_id: None,
             account_alias: None,
             batch_size: 500,
             dry_run: false,

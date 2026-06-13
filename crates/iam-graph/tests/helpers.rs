@@ -8,11 +8,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use testcontainers_modules::{
     neo4j::{Neo4j, Neo4jImage},
-    testcontainers::{
-        core::WaitFor,
-        runners::AsyncRunner,
-        ContainerAsync, ImageExt as _,
-    },
+    testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, ImageExt as _},
 };
 use uuid::Uuid;
 
@@ -50,7 +46,11 @@ fn init_container() -> &'static ContainerInfo {
                     .bolt_port_ipv4()
                     .expect("bolt port must be available");
                 let uri = format!("bolt://{}:{}", host, port);
-                let user = container.image().user().expect("default user is set").to_string();
+                let user = container
+                    .image()
+                    .user()
+                    .expect("default user is set")
+                    .to_string();
                 let pass = container
                     .image()
                     .password()

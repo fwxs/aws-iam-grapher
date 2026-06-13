@@ -43,6 +43,11 @@ pub struct CollectArgs {
     #[arg(long, env = "NEO4J_PASSWORD")]
     pub neo4j_pass: String,
 
+    /// AWS account ID (12-digit number). If omitted, derived automatically from entity ARNs
+    /// in the collected data. Required when no entities are present (e.g. empty account).
+    #[arg(long)]
+    pub account_id: Option<String>,
+
     /// Human-readable alias for this account.
     #[arg(long)]
     pub account_alias: Option<String>,
@@ -100,12 +105,23 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         .await
         .context("failed to initialize Neo4j schema")?;
 
+    // Precedence: explicit --account-id flag → derived from entity ARNs → error.
+    // Never fall back to "unknown" — every snapshot must be filed under a real account ID
+    // because all analysis queries filter on account_id for tenant isolation.
+    let account_id = args
+        .account_id
+        .clone()
+        .or_else(|| data.account_id.clone())
+        .with_context(|| {
+            "could not determine AWS account ID: no entities were collected and \
+             --account-id was not provided.\n\n\
+             Pass the account ID explicitly:\n\n    \
+             aws-iam-grapher collect --account-id 123456789012 ..."
+        })?;
+
     let config = IngestConfig {
         snapshot_id: snapshot_id.clone(),
-        account_id: data
-            .account_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
+        account_id,
         account_alias: args.account_alias.clone(),
         batch_size: args.batch_size,
         dry_run: false,

@@ -2,6 +2,7 @@ use crate::errors::{CollectorError, CollectorWarning};
 use crate::raw::auth_details::AccountAuthorizationDetails;
 use crate::raw::instance_profiles::ListInstanceProfilesResponse;
 use crate::traits::{CollectedData, CollectorMode, IamDataSource};
+use crate::util::account_id_from_arns;
 use chrono::Utc;
 use iam_models::{
     IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy, IamRole, IamUser, PolicyDocument,
@@ -135,9 +136,21 @@ impl IamDataSource for OfflineCollector {
             "offline collection complete"
         );
 
+        // Prefer customer entity ARNs (users, roles, groups) over managed-policy ARNs,
+        // which use the literal "aws" as their account segment.
+        let account_id = account_id_from_arns(
+            users
+                .iter()
+                .map(|u| u.arn.as_str())
+                .chain(roles.iter().map(|r| r.arn.as_str()))
+                .chain(groups.iter().map(|g| g.arn.as_str()))
+                .chain(instance_profiles.iter().map(|ip| ip.arn.as_str()))
+                .chain(policies.iter().map(|p| p.arn.as_str())),
+        );
+
         Ok(CollectedData {
             source: CollectorMode::Offline,
-            account_id: None,
+            account_id,
             policies,
             roles,
             users,
