@@ -10,15 +10,15 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
-uuid          = { version = "1", features = ["v4"] }
+uuid          = { version = "^1.23.3", features = ["v4"] }
 iam-models    = { path = "../iam-models" }
 iam-collector = { path = "../iam-collector" }
 
 [dev-dependencies]
-testcontainers         = "0.27"
-testcontainers-modules = { version = "0.15", features = ["neo4j"] }
+testcontainers         = "^0.27.3"
+testcontainers-modules = { version = "^0.15.0", features = ["neo4j"] }
 tokio                  = { workspace = true }
 pretty_assertions      = { workspace = true }
 chrono                 = { workspace = true }
 neo4rs                 = { workspace = true }
-uuid                   = { version = "1", features = ["v4"] }
+uuid                   = { version = "^1.23.3", features = ["v4"] }
