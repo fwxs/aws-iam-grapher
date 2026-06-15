@@ -233,16 +233,20 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
 
-    // Arrange — non-excluded action: entity must appear
+    // Act — non-excluded action: entity must appear, must not be flagged full-admin
     let included = who_can(ingester.client().inner(), &ctx, "ec2:DescribeInstances")
         .await
         .expect("who_can must succeed");
+    let not_action_entity = included
+        .iter()
+        .find(|e| e.name == "NotActionRole")
+        .expect("NotActionRole must appear in who_can for ec2:DescribeInstances (not excluded)");
     assert!(
-        included.iter().any(|e| e.name == "NotActionRole"),
-        "NotActionRole must appear in who_can for ec2:DescribeInstances (not excluded)"
+        !not_action_entity.is_full_admin,
+        "NotAction (allow-all-except) entity must NOT be flagged full-admin"
     );
 
-    // Arrange — excluded action: entity must NOT appear
+    // Act — excluded action: entity must NOT appear
     let excluded = who_can(ingester.client().inner(), &ctx, excluded_action)
         .await
         .expect("who_can must succeed");
