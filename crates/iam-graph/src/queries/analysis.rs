@@ -8,6 +8,9 @@ pub struct EntityRef {
     pub arn: String,
     pub name: String,
     pub entity_type: String,
+    /// True when the entity holds an unqualified `Action: "*"` Allow — i.e. full-admin access.
+    /// Such entities match *every* specific-action query even without an explicit permission node.
+    pub is_full_admin: bool,
 }
 
 /// A single permission row with named fields.
@@ -27,26 +30,7 @@ pub struct RiskyInstanceProfile {
     pub risky_actions: Vec<String>,
 }
 
-const WHO_CAN_QUERY: &str = "
-    MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {
-              action: $action,
-              effect: 'Allow',
-              snapshot_id: $snapshot_id
-          })
-    WHERE e.account_id = $account_id
-    RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type
-    UNION
-    MATCH (u:User)-[:MEMBER_OF]->(g:Group)
-          -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {
-              action: $action,
-              effect: 'Allow',
-              snapshot_id: $snapshot_id
-          })
-    WHERE u.account_id = $account_id
-    RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
-";
+const WHO_CAN_QUERY: &str = include_str!("../../queries/who_can.cypher");
 
 /// Return all entities that have permission to perform `action` in this snapshot.
 pub async fn who_can(
@@ -63,7 +47,7 @@ pub async fn who_can(
         )
         .await?;
 
-    let mut results = Vec::new();
+    let mut raw: Vec<EntityRef> = Vec::new();
     while let Some(row) = stream.next().await? {
         let arn: String = row
             .get("arn")
@@ -74,20 +58,34 @@ pub async fn who_can(
         let entity_type: String = row
             .get("entity_type")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        results.push(EntityRef {
+        let is_full_admin: bool = row
+            .get("is_full_admin")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        raw.push(EntityRef {
             arn,
             name,
             entity_type,
+            is_full_admin,
         });
     }
+
+    // Deduplicate by ARN (UNION arms can return the same entity via different paths).
+    // If an entity appears as both specific-action and full-admin, keep is_full_admin: true.
+    let mut by_arn: std::collections::HashMap<String, EntityRef> = std::collections::HashMap::new();
+    for entity in raw {
+        let entry = by_arn
+            .entry(entity.arn.clone())
+            .or_insert_with(|| entity.clone());
+        if entity.is_full_admin {
+            entry.is_full_admin = true;
+        }
+    }
+    let mut results: Vec<EntityRef> = by_arn.into_values().collect();
+    results.sort_by(|a, b| a.arn.cmp(&b.arn));
     Ok(results)
 }
 
-const ENTITY_PERMISSIONS_QUERY: &str = "
-    MATCH (e {uid: $uid})-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {snapshot_id: $snapshot_id})
-    RETURN perm.action AS action, perm.effect AS effect, perm.resource AS resource
-";
+const ENTITY_PERMISSIONS_QUERY: &str = include_str!("../../queries/entity_permissions.cypher");
 
 /// Return all permissions for a specific entity UID.
 pub async fn entity_permissions(
@@ -123,17 +121,8 @@ pub async fn entity_permissions(
     Ok(results)
 }
 
-const INSTANCE_PROFILES_WITH_ACTION_QUERY: &str = "
-    MATCH (ip:InstanceProfile {account_id: $account_id, snapshot_id: $snapshot_id})
-          -[:CONTAINS_ROLE]->(r:Role)
-          -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {
-              action: $action,
-              effect: 'Allow',
-              snapshot_id: $snapshot_id
-          })
-    RETURN DISTINCT ip.arn AS arn, ip.name AS name
-";
+const INSTANCE_PROFILES_WITH_ACTION_QUERY: &str =
+    include_str!("../../queries/instance_profiles_with_action.cypher");
 
 /// Return instance profiles whose associated roles grant the given action.
 pub async fn instance_profiles_with_action(
@@ -151,19 +140,8 @@ pub async fn instance_profiles_with_action(
     .await
 }
 
-const RISKY_INSTANCE_PROFILES_QUERY: &str = "
-    MATCH (ip:InstanceProfile {account_id: $account_id, snapshot_id: $snapshot_id})
-          -[:CONTAINS_ROLE]->(r:Role)
-          -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-    WHERE perm.action IN [
-        'iam:CreatePolicyVersion', 'iam:SetDefaultPolicyVersion',
-        'iam:AttachRolePolicy', 'iam:AttachUserPolicy',
-        'iam:PassRole', 'iam:PutRolePolicy', 'iam:PutUserPolicy',
-        'iam:CreateAccessKey', 'iam:CreateLoginProfile'
-    ]
-    RETURN ip.arn AS arn, ip.name AS name, collect(perm.action) AS risky_actions
-";
+const RISKY_INSTANCE_PROFILES_QUERY: &str =
+    include_str!("../../queries/risky_instance_profiles.cypher");
 
 /// Return instance profiles whose roles have privilege-escalation permissions,
 /// including the specific risky actions found.
@@ -217,6 +195,7 @@ async fn collect_instance_profile_refs(
             arn,
             name,
             entity_type: "InstanceProfile".to_string(),
+            is_full_admin: false,
         });
     }
     Ok(results)

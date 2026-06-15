@@ -1,4 +1,4 @@
-use crate::nodes::uid::{entity_uid, inline_policy_uid, permission_uid};
+use crate::nodes::uid::{entity_uid, excluded_permission_uid, inline_policy_uid, permission_uid};
 use neo4rs::{query, Query};
 
 const SNAPSHOT_INCLUDES: &str = "
@@ -120,6 +120,42 @@ pub fn inline_grants_query(
         .param(
             "perm_uid",
             permission_uid(snapshot_id, effect, action, resource),
+        )
+}
+
+/// GRANTS from managed policy to an allow-all-except Permission node.
+pub fn policy_grants_excluded_query(
+    snapshot_id: &str,
+    policy_arn: &str,
+    effect: &str,
+    resource: &str,
+    excluded: &[String],
+) -> Query {
+    query(POLICY_GRANTS)
+        .param("policy_uid", entity_uid(snapshot_id, policy_arn))
+        .param(
+            "perm_uid",
+            excluded_permission_uid(snapshot_id, effect, resource, excluded),
+        )
+}
+
+/// GRANTS from inline policy to an allow-all-except Permission node.
+pub fn inline_grants_excluded_query(
+    snapshot_id: &str,
+    owner_arn: &str,
+    inline_name: &str,
+    effect: &str,
+    resource: &str,
+    excluded: &[String],
+) -> Query {
+    query(INLINE_GRANTS)
+        .param(
+            "inline_uid",
+            inline_policy_uid(snapshot_id, owner_arn, inline_name),
+        )
+        .param(
+            "perm_uid",
+            excluded_permission_uid(snapshot_id, effect, resource, excluded),
         )
 }
 

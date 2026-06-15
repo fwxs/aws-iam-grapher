@@ -8,14 +8,10 @@ pub struct SnapshotRecord {
     pub account_id: String,
     pub collected_at: String,
     pub is_partial: bool,
+    pub partial_reasons: Vec<String>,
 }
 
-const LIST_SNAPSHOTS_QUERY: &str = "
-    MATCH (s:Snapshot {account_id: $account_id})
-    RETURN s.id AS id, s.account_id AS account_id,
-           s.collected_at AS collected_at, s.is_partial AS is_partial
-    ORDER BY s.collected_at DESC
-";
+const LIST_SNAPSHOTS_QUERY: &str = include_str!("../../queries/list_snapshots.cypher");
 
 /// Return all snapshots for the given account, newest first.
 pub async fn list_snapshots(
@@ -40,27 +36,21 @@ pub async fn list_snapshots(
         let is_partial: bool = row
             .get("is_partial")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
         results.push(SnapshotRecord {
             id,
             account_id,
             collected_at,
             is_partial,
+            partial_reasons,
         });
     }
     Ok(results)
 }
 
-const DELETE_SNAPSHOT_QUERY: &str = "
-    MATCH (n {snapshot_id: $snapshot_id})
-    DETACH DELETE n
-    RETURN count(n) AS deleted
-";
+const DELETE_SNAPSHOT_QUERY: &str = include_str!("../../queries/delete_snapshot.cypher");
 
-const DELETE_SNAPSHOT_NODE_QUERY: &str = "
-    MATCH (s:Snapshot {id: $snapshot_id})
-    DETACH DELETE s
-    RETURN count(s) AS deleted
-";
+const DELETE_SNAPSHOT_NODE_QUERY: &str = include_str!("../../queries/delete_snapshot_node.cypher");
 
 /// Delete all nodes belonging to `snapshot_id` (except AwsAccount and AwsService).
 /// Returns the number of nodes deleted.
@@ -101,35 +91,9 @@ pub struct PermissionRecord {
     pub effect: String,
 }
 
-const DIFF_ADDED_QUERY: &str = "
-    MATCH (perm:Permission {snapshot_id: $snapshot_b, account_id: $account_id})
-    WHERE NOT EXISTS {
-        MATCH (:Permission {
-            action: perm.action,
-            resource: perm.resource,
-            effect: perm.effect,
-            snapshot_id: $snapshot_a,
-            account_id: $account_id
-        })
-    }
-    RETURN perm.action AS action, perm.resource AS resource, perm.effect AS effect
-    ORDER BY perm.action
-";
+const DIFF_ADDED_QUERY: &str = include_str!("../../queries/diff_added.cypher");
 
-const DIFF_REMOVED_QUERY: &str = "
-    MATCH (perm:Permission {snapshot_id: $snapshot_a, account_id: $account_id})
-    WHERE NOT EXISTS {
-        MATCH (:Permission {
-            action: perm.action,
-            resource: perm.resource,
-            effect: perm.effect,
-            snapshot_id: $snapshot_b,
-            account_id: $account_id
-        })
-    }
-    RETURN perm.action AS action, perm.resource AS resource, perm.effect AS effect
-    ORDER BY perm.action
-";
+const DIFF_REMOVED_QUERY: &str = include_str!("../../queries/diff_removed.cypher");
 
 /// Compute added/removed permissions between two snapshots of the same account.
 pub async fn diff_permissions(

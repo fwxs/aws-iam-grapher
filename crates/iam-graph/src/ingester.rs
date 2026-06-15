@@ -4,7 +4,7 @@ use crate::nodes::{
     account, group, instance_profile, permission, policy, relationships, role, uid, user,
 };
 use iam_collector::CollectedData;
-use iam_models::{Effect, IamInlinePolicy};
+use iam_models::{Effect, IamInlinePolicy, PolicyStatement};
 use neo4rs::Query;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -98,8 +98,39 @@ impl GraphIngester {
         // Phase 2 — snapshot node
         info!(phase = 2, "ingesting snapshot node");
         let collected_at = data.collection_timestamp.to_rfc3339();
+        let is_partial = data.warnings.iter().any(|w| {
+            matches!(
+                w,
+                iam_collector::CollectorWarning::InstanceProfilesMissing
+                    | iam_collector::CollectorWarning::InlinePoliciesNotResolved
+                    | iam_collector::CollectorWarning::WildcardsNotExpanded
+                    | iam_collector::CollectorWarning::PartialData(_)
+            )
+        });
+        let partial_reasons: Vec<String> = data
+            .warnings
+            .iter()
+            .map(|w| match w {
+                iam_collector::CollectorWarning::InstanceProfilesMissing => {
+                    "instance profiles missing".to_string()
+                }
+                iam_collector::CollectorWarning::InlinePoliciesNotResolved => {
+                    "some inline policies not resolved".to_string()
+                }
+                iam_collector::CollectorWarning::WildcardsNotExpanded => {
+                    "some wildcards not expanded".to_string()
+                }
+                iam_collector::CollectorWarning::PartialData(msg) => msg.clone(),
+            })
+            .collect();
         let phase2 = vec![
-            account::merge_snapshot_query(snap_id, acct_id, &collected_at, false),
+            account::merge_snapshot_query(
+                snap_id,
+                acct_id,
+                &collected_at,
+                is_partial,
+                partial_reasons,
+            ),
             account::snapshot_of_account_query(snap_id, acct_id),
         ];
         self.execute_batch(2, phase2).await?;
@@ -163,11 +194,7 @@ impl GraphIngester {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
                     let effect_str = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
@@ -180,6 +207,18 @@ impl GraphIngester {
                             perm_count += 1;
                         }
                     }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase4.push(permission::merge_excluded_permission_query(
+                                snap_id,
+                                acct_id,
+                                effect_str,
+                                resource,
+                                &stmt.not_action,
+                            ));
+                            perm_count += 1;
+                        }
+                    }
                 }
             }
         }
@@ -187,11 +226,7 @@ impl GraphIngester {
             for inline in inlines {
                 for stmt in &inline.policy_document.statement {
                     let effect_str = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
@@ -200,6 +235,18 @@ impl GraphIngester {
                             let prefix = permission::service_prefix(action).to_string();
                             phase4.push(permission::permission_on_service_query(
                                 snap_id, effect_str, action, resource, &prefix,
+                            ));
+                            perm_count += 1;
+                        }
+                    }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase4.push(permission::merge_excluded_permission_query(
+                                snap_id,
+                                acct_id,
+                                effect_str,
+                                resource,
+                                &stmt.not_action,
                             ));
                             perm_count += 1;
                         }
@@ -285,25 +332,14 @@ impl GraphIngester {
             // GRANTS from inline policies
             for inline in &r.inline_policies {
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &r.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &r.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
         }
@@ -337,25 +373,14 @@ impl GraphIngester {
                 ));
                 rel_count += 1;
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &u.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &u.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
             if let Some(boundary) = &u.permissions_boundary {
@@ -385,25 +410,14 @@ impl GraphIngester {
                 ));
                 rel_count += 1;
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &g.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &g.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
         }
@@ -420,15 +434,23 @@ impl GraphIngester {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
                     let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase6.push(relationships::policy_grants_query(
                                 snap_id, &p.arn, eff, action, resource,
+                            ));
+                            rel_count += 1;
+                        }
+                    }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase6.push(relationships::policy_grants_excluded_query(
+                                snap_id,
+                                &p.arn,
+                                eff,
+                                resource,
+                                &stmt.not_action,
                             ));
                             rel_count += 1;
                         }
@@ -550,6 +572,54 @@ fn role_user_group_inline_sources(data: &CollectedData) -> Vec<&[IamInlinePolicy
         out.push(&g.inline_policies);
     }
     out
+}
+
+/// Resources for a statement, defaulting to `["*"]` when none are listed.
+fn statement_resources(stmt: &PolicyStatement) -> Vec<String> {
+    if stmt.resource.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        stmt.resource.clone()
+    }
+}
+
+/// Push GRANTS queries (action + NotAction-excluded) for one inline-policy statement.
+fn push_inline_statement_grants(
+    phase6: &mut Vec<Query>,
+    rel_count: &mut u64,
+    snap_id: &str,
+    owner_arn: &str,
+    inline_name: &str,
+    stmt: &PolicyStatement,
+) {
+    let eff = effect_str(&stmt.effect);
+    let resources = statement_resources(stmt);
+    for action in &stmt.action {
+        for resource in &resources {
+            phase6.push(relationships::inline_grants_query(
+                snap_id,
+                owner_arn,
+                inline_name,
+                eff,
+                action,
+                resource,
+            ));
+            *rel_count += 1;
+        }
+    }
+    if !stmt.not_action.is_empty() {
+        for resource in &resources {
+            phase6.push(relationships::inline_grants_excluded_query(
+                snap_id,
+                owner_arn,
+                inline_name,
+                eff,
+                resource,
+                &stmt.not_action,
+            ));
+            *rel_count += 1;
+        }
+    }
 }
 
 /// Extract string principal IDs from a serde_json principal block.

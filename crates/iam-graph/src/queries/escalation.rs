@@ -11,24 +11,7 @@ pub struct EscalationPath {
     pub risky_actions: Vec<String>,
 }
 
-const ESCALATION_QUERY: &str = "
-    MATCH (e {account_id: $account_id, snapshot_id: $snapshot_id})
-          -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-          -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-    WHERE perm.action IN [
-        'iam:CreatePolicyVersion',
-        'iam:SetDefaultPolicyVersion',
-        'iam:AttachRolePolicy',
-        'iam:AttachUserPolicy',
-        'iam:PassRole',
-        'iam:PutRolePolicy',
-        'iam:PutUserPolicy',
-        'iam:CreateAccessKey',
-        'iam:CreateLoginProfile'
-    ]
-    RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
-           collect(perm.action) AS risky_actions
-";
+const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
 
 /// Return all entities with at least one privilege-escalation permission.
 pub async fn privilege_escalation_paths(

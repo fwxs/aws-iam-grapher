@@ -62,6 +62,55 @@ Privilege escalation analysis traverses `CAN_ASSUME` relationships. V1 follows a
 
 **Workaround:** Run the `privilege-escalation` query iteratively on the entities it returns to extend the chain manually.
 
+### `NotAction` — implemented as allow-all-except (query-time exclusion)
+
+IAM `NotAction` statements (e.g. `Allow NotAction: ["s3:*"]` — allow everything *except* the
+listed actions) are fully supported using a sentinel + query-time exclusion model:
+
+1. **Wildcard expansion:** wildcards *inside* the `NotAction` list (e.g. `s3:*`) are expanded
+   to a concrete, wildcard-free list of excluded actions at collection time, exactly like `Action`
+   wildcards. The excluded list is bounded (service-scoped); the allowed complement is not
+   materialized.
+
+2. **Graph representation:** one `Permission` node is created per resource with `action = '*'` and
+   an `excluded_actions` list property carrying the concrete excluded actions. This node is distinct
+   from a true full-admin `*` node (its UID encodes the excluded set, preventing collisions).
+
+3. **Query evaluation:** `who_can(action)` matches allow-all-except grants and applies
+   `WHERE NOT $action IN excluded_actions` — so an entity with `Allow NotAction: ["s3:*"]` appears
+   in `who_can("ec2:DescribeInstances")` (not excluded) and is absent from `who_can("s3:DeleteObject")`
+   (excluded). True full-admin nodes (no `excluded_actions`) are unchanged — `coalesce([], [])` makes
+   them match every action.
+
+**Remaining approximations:**
+- `Deny NotAction` (deny-all-except): the node is stored in the graph but the deny-all-except
+  semantic is not evaluated. `who_can` and `privilege_escalation_paths` only subtract Deny nodes
+  where `action` is an exact match or a true full-admin `*` (i.e. `excluded_actions IS NULL`).
+  A `Deny NotAction: ["s3:GetObject"]` would not suppress any action — the denied complement
+  is not computed. This may over-report access in the rare deny-all-except pattern.
+- The resource scope of an allow-all-except grant is not intersected with the queried resource
+  (same approximation as for full-admin `*` grants — see below).
+- Condition evaluation on `NotAction` statements is not implemented (same limitation as all
+  permission nodes — see "Policy conditions not evaluated").
+
+### Deny scope is approximate
+
+Explicit Deny subtraction uses action-exact matching. A Deny with a wildcard action
+(e.g. `Deny: s3:Delete*`) that covers the queried action does **not** suppress the Allow result
+unless the Deny is `action: '*'` (full-admin deny) or exactly matches the queried action string.
+
+Additionally, group-inherited Deny for a user is not evaluated: if a group policy Denies an
+action, that Deny does not suppress Allow grants on the user's own policies and vice-versa. The
+approximation is conservative — we prefer over-reporting access (false positives for Deny
+misses) over under-reporting.
+
+### `Action: "*"` resource scope not intersected
+
+Entities holding `Action: "*"` (full-admin) are returned by `who_can` with `is_full_admin: true`.
+The resource scope of the `*` grant is not intersected with the queried resource, so a principal
+with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` appears in `who_can("s3:DeleteObject")`
+even though the grant is bucket-scoped, not object-scoped.
+
 ---
 
 ## V2 Roadmap
@@ -75,3 +124,5 @@ These limitations are targeted for resolution in a future major version:
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
 | Deep transitive assume-role | Switch `privilege-escalation` to variable-length path queries (`[:CAN_ASSUME*1..]`) with cycle detection |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
+| `Deny NotAction` evaluation | Evaluate deny-all-except statements in `who_can` (currently stored but not subtracted) |
+| Wildcard-action Deny | Match Deny actions with IAM glob semantics against queried action to correctly suppress wildcard Deny statements |

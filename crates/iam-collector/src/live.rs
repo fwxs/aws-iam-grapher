@@ -1,4 +1,5 @@
 use crate::errors::{CollectorError, CollectorWarning};
+use crate::expand::expand_collected_data;
 use crate::traits::{CollectedData, CollectorMode, IamDataSource};
 use crate::util::account_id_from_arns;
 use aws_sdk_iam::error::SdkError;
@@ -125,7 +126,7 @@ impl IamDataSource for LiveCollector {
                 .chain(policies.iter().map(|p| p.arn.as_str())),
         );
 
-        Ok(CollectedData {
+        let mut data = CollectedData {
             source: CollectorMode::Live,
             account_id,
             policies,
@@ -135,7 +136,11 @@ impl IamDataSource for LiveCollector {
             instance_profiles,
             collection_timestamp: Utc::now(),
             warnings,
-        })
+        };
+
+        expand_collected_data(&mut data).await;
+
+        Ok(data)
     }
 }
 

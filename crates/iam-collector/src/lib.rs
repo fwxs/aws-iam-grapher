@@ -1,4 +1,5 @@
 mod errors;
+mod expand;
 mod hybrid;
 mod live;
 mod offline;

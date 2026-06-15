@@ -165,3 +165,94 @@ async fn who_can_sees_group_and_inline_user_paths() {
         "group itself is missing from who_can results"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_deny_overrides_allow() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000001";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_allow_and_deny(account_id, "s3:DeleteObject");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+        .await
+        .expect("who_can must succeed");
+
+    assert!(
+        !entities.iter().any(|e| e.name == "DenyTestRole"),
+        "DenyTestRole must not appear — explicit Deny overrides Allow"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_full_admin_wildcard_matches_any_action() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000002";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_full_admin_role(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+        .await
+        .expect("who_can must succeed");
+
+    let admin_entity = entities.iter().find(|e| e.name == "FullAdminRole");
+    assert!(
+        admin_entity.is_some(),
+        "FullAdminRole with Action:* must appear in who_can for any specific action"
+    );
+    assert!(
+        admin_entity.unwrap().is_full_admin,
+        "FullAdminRole must be flagged as full-admin"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000004";
+    // Excluded action is s3:DeleteObject; any non-S3 action must be granted.
+    let excluded_action = "s3:DeleteObject";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_allow_not_action(account_id, excluded_action);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+
+    // Act — non-excluded action: entity must appear, must not be flagged full-admin
+    let included = who_can(ingester.client().inner(), &ctx, "ec2:DescribeInstances")
+        .await
+        .expect("who_can must succeed");
+    let not_action_entity = included
+        .iter()
+        .find(|e| e.name == "NotActionRole")
+        .expect("NotActionRole must appear in who_can for ec2:DescribeInstances (not excluded)");
+    assert!(
+        !not_action_entity.is_full_admin,
+        "NotAction (allow-all-except) entity must NOT be flagged full-admin"
+    );
+
+    // Act — excluded action: entity must NOT appear
+    let excluded = who_can(ingester.client().inner(), &ctx, excluded_action)
+        .await
+        .expect("who_can must succeed");
+    assert!(
+        !excluded.iter().any(|e| e.name == "NotActionRole"),
+        "NotActionRole must NOT appear in who_can for {} (excluded by NotAction)",
+        excluded_action
+    );
+}

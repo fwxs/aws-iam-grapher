@@ -72,7 +72,17 @@ async fn expand_one_statement(
     stmt: &mut Value,
     cache: &mut ActionCache,
 ) -> Result<(), ExpanderError> {
-    let raw_actions: Vec<String> = match stmt.get("Action") {
+    expand_action_list(stmt, "Action", cache).await?;
+    expand_action_list(stmt, "NotAction", cache).await?;
+    Ok(())
+}
+
+async fn expand_action_list(
+    stmt: &mut Value,
+    key: &str,
+    cache: &mut ActionCache,
+) -> Result<(), ExpanderError> {
+    let raw_actions: Vec<String> = match stmt.get(key) {
         Some(Value::String(s)) => vec![s.clone()],
         Some(Value::Array(arr)) => arr
             .iter()
@@ -86,7 +96,7 @@ async fn expand_one_statement(
         expanded.extend(expand_one_action(&action, cache).await?);
     }
 
-    stmt["Action"] = Value::Array(expanded.into_iter().map(Value::String).collect());
+    stmt[key] = Value::Array(expanded.into_iter().map(Value::String).collect());
     Ok(())
 }
 
@@ -94,25 +104,67 @@ async fn expand_one_action(
     action: &str,
     cache: &mut ActionCache,
 ) -> Result<Vec<String>, ExpanderError> {
-    if !action.contains('*') {
+    if !action.contains('*') && !action.contains('?') {
         return Ok(vec![action.to_string()]);
     }
 
-    if let Some(colon) = action.find(':') {
-        let service = &action[..colon];
-        let suffix = &action[colon + 1..];
+    let Some(colon) = action.find(':') else {
+        // No colon — wildcard in service position, not expandable
+        return Ok(vec![action.to_string()]);
+    };
 
-        // Only expand trailing wildcards: "svc:*" or "svc:Prefix*"
-        if suffix == "*" {
-            return expand_actions_with_cache(service, None, cache).await;
-        }
-        if let Some(prefix) = suffix.strip_suffix('*') {
-            return expand_actions_with_cache(service, Some(prefix), cache).await;
-        }
+    let service = &action[..colon];
+
+    // Wildcard in service position (e.g. "*:Describe*") — not expandable.
+    // Callers should treat these as literal action strings.
+    if service.contains('*') || service.contains('?') {
+        return Ok(vec![action.to_string()]);
     }
 
-    // Wildcard in an unsupported position — return unchanged
-    Ok(vec![action.to_string()])
+    let suffix = &action[colon + 1..];
+
+    // Fast path: "svc:*" — return all actions for this service
+    if suffix == "*" {
+        return expand_actions_with_cache(service, None, cache).await;
+    }
+
+    // Fast path: "svc:Prefix*" — single trailing wildcard, no other wildcards
+    if suffix.ends_with('*') && !suffix[..suffix.len() - 1].contains(['*', '?']) {
+        let prefix = &suffix[..suffix.len() - 1];
+        return expand_actions_with_cache(service, Some(prefix), cache).await;
+    }
+
+    // General case: interior or multi-position wildcards (e.g. "s3:*Object", "iam:*Group*").
+    // Fetch all actions for the service and filter with IAM glob semantics.
+    let all = expand_actions_with_cache(service, None, cache).await?;
+    Ok(all
+        .into_iter()
+        .filter(|a| {
+            let a_suffix = a.split_once(':').map(|(_, s)| s).unwrap_or("");
+            glob_match(suffix, a_suffix)
+        })
+        .collect())
+}
+
+/// IAM wildcard match: `*` matches any sequence of characters, `?` matches one character.
+/// Matching is case-insensitive, consistent with AWS IAM policy evaluation.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
+    let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
+    glob_match_inner(&p, &t)
+}
+
+fn glob_match_inner(p: &[char], t: &[char]) -> bool {
+    match (p.first(), t.first()) {
+        (None, None) => true,
+        (Some('*'), _) => {
+            // * matches zero characters or consumes one text character
+            glob_match_inner(&p[1..], t) || (!t.is_empty() && glob_match_inner(p, &t[1..]))
+        }
+        (Some('?'), Some(_)) => glob_match_inner(&p[1..], &t[1..]),
+        (Some(pc), Some(tc)) if pc == tc => glob_match_inner(&p[1..], &t[1..]),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +206,146 @@ mod tests {
             .expect("should expand");
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|a| a.starts_with("s3:Get")));
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_suffix_wildcard_s3_object() {
+        let mut cache = make_cache_with(
+            "s3",
+            &[
+                "GetObject",
+                "PutObject",
+                "DeleteObject",
+                "CopyObject",
+                "GetBucketAcl",
+            ],
+        );
+        let result = expand_one_action("s3:*Object", &mut cache)
+            .await
+            .expect("should expand");
+        assert!(result.contains(&"s3:GetObject".to_string()));
+        assert!(result.contains(&"s3:PutObject".to_string()));
+        assert!(result.contains(&"s3:DeleteObject".to_string()));
+        assert!(result.contains(&"s3:CopyObject".to_string()));
+        assert!(!result.contains(&"s3:GetBucketAcl".to_string()));
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_interior_wildcard_iam_group() {
+        let mut cache = make_cache_with(
+            "iam",
+            &["CreateGroup", "DeleteGroup", "ListGroups", "CreateUser"],
+        );
+        let result = expand_one_action("iam:*Group", &mut cache)
+            .await
+            .expect("should expand");
+        assert!(result.contains(&"iam:CreateGroup".to_string()));
+        assert!(result.contains(&"iam:DeleteGroup".to_string()));
+        assert!(!result.contains(&"iam:ListGroups".to_string())); // ends with 's'
+        assert!(!result.contains(&"iam:CreateUser".to_string()));
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_literal_unchanged() {
+        let mut cache = make_cache_with("s3", &["GetObject"]);
+        let result = expand_one_action("s3:GetObject", &mut cache)
+            .await
+            .expect("should pass through");
+        assert_eq!(result, vec!["s3:GetObject".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_wildcard_service_position_unchanged() {
+        let mut cache = make_cache_with("s3", &["GetObject"]);
+        let result = expand_one_action("*:GetObject", &mut cache)
+            .await
+            .expect("should return unchanged");
+        assert_eq!(result, vec!["*:GetObject".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_question_mark_wildcard() {
+        let mut cache = make_cache_with("s3", &["GetObject", "PutObject", "GetObjects"]);
+        let result = expand_one_action("s3:?etObject", &mut cache)
+            .await
+            .expect("should expand");
+        // '?' at position 0 matches 'G', then "etObject" matches — GetObject matches
+        assert!(result.contains(&"s3:GetObject".to_string()));
+        // 'P' matches '?' but 'u' ≠ 'e' — PutObject does not match
+        assert!(!result.contains(&"s3:PutObject".to_string()));
+        // GetObjects has one extra char — length mismatch, does not match
+        assert!(!result.contains(&"s3:GetObjects".to_string()));
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_all_star() {
+        let mut cache = make_cache_with("ec2", &["DescribeInstances", "DescribeVpcs", "CreateVpc"]);
+        let result = expand_one_action("ec2:*", &mut cache)
+            .await
+            .expect("should expand all");
+        assert_eq!(result.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn expand_one_action_prefix_star() {
+        let mut cache = make_cache_with("ec2", &["DescribeInstances", "DescribeVpcs", "CreateVpc"]);
+        let result = expand_one_action("ec2:Describe*", &mut cache)
+            .await
+            .expect("should expand prefix");
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|a| a.starts_with("ec2:Describe")));
+    }
+
+    #[tokio::test]
+    async fn expand_not_action_wildcard_expands_to_concrete_list() {
+        let mut cache = make_cache_with(
+            "s3",
+            &["GetObject", "PutObject", "DeleteObject", "ListBuckets"],
+        );
+        let mut stmt: serde_json::Value = serde_json::json!({
+            "Effect": "Allow",
+            "NotAction": ["s3:*"],
+            "Resource": "*"
+        });
+
+        // Act
+        expand_one_statement(&mut stmt, &mut cache)
+            .await
+            .expect("should expand");
+
+        // Assert — NotAction is now a concrete wildcard-free list
+        let not_actions = stmt["NotAction"].as_array().expect("must be array");
+        assert!(
+            not_actions.iter().all(|v| {
+                let s = v.as_str().unwrap_or("");
+                !s.contains('*') && !s.contains('?')
+            }),
+            "NotAction must be wildcard-free after expansion"
+        );
+        assert!(not_actions.len() >= 4, "all s3 actions must be present");
+        // Action key absent → must remain absent
+        assert!(stmt.get("Action").is_none());
+    }
+
+    #[tokio::test]
+    async fn expand_not_action_absent_statement_unchanged() {
+        let mut cache = make_cache_with("s3", &["GetObject"]);
+        let mut stmt: serde_json::Value = serde_json::json!({
+            "Effect": "Allow",
+            "Action": ["s3:GetObject"],
+            "Resource": "*"
+        });
+
+        expand_one_statement(&mut stmt, &mut cache)
+            .await
+            .expect("should succeed");
+
+        assert!(
+            stmt.get("NotAction").is_none(),
+            "no NotAction must be added"
+        );
+        let actions = stmt["Action"].as_array().expect("Action must remain");
+        assert_eq!(actions.len(), 1);
     }
 
     #[tokio::test]
