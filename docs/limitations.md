@@ -62,17 +62,33 @@ Privilege escalation analysis traverses `CAN_ASSUME` relationships. V1 follows a
 
 **Workaround:** Run the `privilege-escalation` query iteratively on the entities it returns to extend the chain manually.
 
-### `NotAction` statements not expanded into grants
+### `NotAction` — implemented as allow-all-except (query-time exclusion)
 
-IAM policy statements using `NotAction` (e.g. `"Allow": { "NotAction": "s3:*" }` — allow
-everything *except* S3) are parsed into the data model but not converted into `Permission` nodes.
-As a result, queries will **under-report** access granted via `NotAction`: a principal holding
-`"Allow NotAction: s3:*"` effectively has every non-S3 action, but none of those actions will
-appear in `who_can` results.
+IAM `NotAction` statements (e.g. `Allow NotAction: ["s3:*"]` — allow everything *except* the
+listed actions) are fully supported using a sentinel + query-time exclusion model:
 
-Full `NotAction` evaluation requires enumerating the complete AWS action universe (~20 000+
-actions across 400+ services) and intersecting with each statement's resource and condition scope.
-This is computationally tractable but out of scope for V1.
+1. **Wildcard expansion:** wildcards *inside* the `NotAction` list (e.g. `s3:*`) are expanded
+   to a concrete, wildcard-free list of excluded actions at collection time, exactly like `Action`
+   wildcards. The excluded list is bounded (service-scoped); the allowed complement is not
+   materialized.
+
+2. **Graph representation:** one `Permission` node is created per resource with `action = '*'` and
+   an `excluded_actions` list property carrying the concrete excluded actions. This node is distinct
+   from a true full-admin `*` node (its UID encodes the excluded set, preventing collisions).
+
+3. **Query evaluation:** `who_can(action)` matches allow-all-except grants and applies
+   `WHERE NOT $action IN excluded_actions` — so an entity with `Allow NotAction: ["s3:*"]` appears
+   in `who_can("ec2:DescribeInstances")` (not excluded) and is absent from `who_can("s3:DeleteObject")`
+   (excluded). True full-admin nodes (no `excluded_actions`) are unchanged — `coalesce([], [])` makes
+   them match every action.
+
+**Remaining approximations:**
+- `Deny NotAction` (deny-all-except) is stored but not evaluated in `who_can`; it is treated
+  generically like other Deny nodes. This may under-subtract access in rare deny-all-except policies.
+- The resource scope of an allow-all-except grant is not intersected with the queried resource
+  (same approximation as for full-admin `*` grants — see below).
+- Condition evaluation on `NotAction` statements is not implemented (same limitation as all
+  permission nodes — see "Policy conditions not evaluated").
 
 ### Deny scope is approximate
 
@@ -105,5 +121,5 @@ These limitations are targeted for resolution in a future major version:
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
 | Deep transitive assume-role | Switch `privilege-escalation` to variable-length path queries (`[:CAN_ASSUME*1..]`) with cycle detection |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
-| `NotAction` expansion | Enumerate the AWS action universe and expand `NotAction` into explicit Allow grants at collection time |
+| `Deny NotAction` evaluation | Evaluate deny-all-except statements in `who_can` (currently stored but not subtracted) |
 | Wildcard-action Deny | Match Deny actions with IAM glob semantics against queried action to correctly suppress wildcard Deny statements |
