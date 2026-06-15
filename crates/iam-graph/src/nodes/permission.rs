@@ -1,4 +1,4 @@
-use crate::nodes::uid::permission_uid;
+use crate::nodes::uid::{excluded_permission_uid, permission_uid};
 use neo4rs::{query, Query};
 
 const MERGE_AWS_SERVICE: &str = "
@@ -19,6 +19,16 @@ const PERMISSION_ON_SERVICE: &str = "
     MATCH (perm:Permission {uid: $uid})
     MATCH (svc:AwsService {prefix: $prefix})
     MERGE (perm)-[:ON_SERVICE]->(svc)
+";
+
+const MERGE_EXCLUDED_PERMISSION: &str = "
+    MERGE (perm:Permission {uid: $uid})
+    SET perm.action = '*',
+        perm.resource = $resource,
+        perm.effect = $effect,
+        perm.account_id = $account_id,
+        perm.snapshot_id = $snapshot_id,
+        perm.excluded_actions = $excluded_actions
 ";
 
 /// Build a query to MERGE an AwsService node.
@@ -45,6 +55,28 @@ pub fn merge_permission_query(
         .param("effect", effect)
         .param("account_id", account_id)
         .param("snapshot_id", snapshot_id)
+}
+
+/// Build a query to MERGE an allow-all-except Permission node (from a `NotAction` statement).
+///
+/// The node stores `action = '*'` with an `excluded_actions` list. `who_can` matches it for
+/// any queried action that is NOT in `excluded_actions`. No `ON_SERVICE` edge — the `*`
+/// action belongs to no single service prefix.
+pub fn merge_excluded_permission_query(
+    snapshot_id: &str,
+    account_id: &str,
+    effect: &str,
+    resource: &str,
+    excluded: &[String],
+) -> Query {
+    let uid = excluded_permission_uid(snapshot_id, effect, resource, excluded);
+    query(MERGE_EXCLUDED_PERMISSION)
+        .param("uid", uid)
+        .param("resource", resource)
+        .param("effect", effect)
+        .param("account_id", account_id)
+        .param("snapshot_id", snapshot_id)
+        .param("excluded_actions", excluded.to_vec())
 }
 
 /// Build a query to link a Permission to its AwsService.
