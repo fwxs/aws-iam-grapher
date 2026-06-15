@@ -62,6 +62,36 @@ Privilege escalation analysis traverses `CAN_ASSUME` relationships. V1 follows a
 
 **Workaround:** Run the `privilege-escalation` query iteratively on the entities it returns to extend the chain manually.
 
+### `NotAction` statements not expanded into grants
+
+IAM policy statements using `NotAction` (e.g. `"Allow": { "NotAction": "s3:*" }` — allow
+everything *except* S3) are parsed into the data model but not converted into `Permission` nodes.
+As a result, queries will **under-report** access granted via `NotAction`: a principal holding
+`"Allow NotAction: s3:*"` effectively has every non-S3 action, but none of those actions will
+appear in `who_can` results.
+
+Full `NotAction` evaluation requires enumerating the complete AWS action universe (~20 000+
+actions across 400+ services) and intersecting with each statement's resource and condition scope.
+This is computationally tractable but out of scope for V1.
+
+### Deny scope is approximate
+
+Explicit Deny subtraction uses action-exact matching. A Deny with a wildcard action
+(e.g. `Deny: s3:Delete*`) that covers the queried action does **not** suppress the Allow result
+unless the Deny is `action: '*'` (full-admin deny) or exactly matches the queried action string.
+
+Additionally, group-inherited Deny for a user is not evaluated: if a group policy Denies an
+action, that Deny does not suppress Allow grants on the user's own policies and vice-versa. The
+approximation is conservative — we prefer over-reporting access (false positives for Deny
+misses) over under-reporting.
+
+### `Action: "*"` resource scope not intersected
+
+Entities holding `Action: "*"` (full-admin) are returned by `who_can` with `is_full_admin: true`.
+The resource scope of the `*` grant is not intersected with the queried resource, so a principal
+with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` appears in `who_can("s3:DeleteObject")`
+even though the grant is bucket-scoped, not object-scoped.
+
 ---
 
 ## V2 Roadmap
@@ -75,3 +105,5 @@ These limitations are targeted for resolution in a future major version:
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
 | Deep transitive assume-role | Switch `privilege-escalation` to variable-length path queries (`[:CAN_ASSUME*1..]`) with cycle detection |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
+| `NotAction` expansion | Enumerate the AWS action universe and expand `NotAction` into explicit Allow grants at collection time |
+| Wildcard-action Deny | Match Deny actions with IAM glob semantics against queried action to correctly suppress wildcard Deny statements |
