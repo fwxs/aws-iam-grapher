@@ -25,7 +25,8 @@ WHERE e.account_id = $account_id
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
             })
-      WHERE deny.action IN [$action, '*']
+      WHERE deny.action = $action
+         OR (deny.action = '*' AND deny.excluded_actions IS NULL)
   }
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type, false AS is_full_admin
 UNION
@@ -43,7 +44,8 @@ WHERE u.account_id = $account_id
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
             })
-      WHERE deny.action IN [$action, '*']
+      WHERE deny.action = $action
+         OR (deny.action = '*' AND deny.excluded_actions IS NULL)
   }
 RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type, false AS is_full_admin
 UNION
@@ -61,7 +63,8 @@ WHERE e.account_id = $account_id
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
             })
-      WHERE deny.action IN [$action, '*']
+      WHERE deny.action = $action
+         OR (deny.action = '*' AND deny.excluded_actions IS NULL)
   }
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
        perm.excluded_actions IS NULL AS is_full_admin

@@ -1,5 +1,5 @@
 // name: privilege_escalation_paths
-// description: Entities with at least one of the 9 risky IAM actions via attached/inline policy, excluding entities denied by an Action:'*' Deny.
+// description: Entities with at least one of the 9 risky IAM actions via attached/inline policy, excluding entities with a true full-admin Deny (action='*' AND excluded_actions IS NULL).
 // param $account_id: account scope for tenant isolation
 // param $snapshot_id: snapshot scope
 
@@ -20,10 +20,10 @@ WHERE perm.action IN [
   AND NOT EXISTS {
       MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
             -[:GRANTS]->(deny:Permission {
-                action: '*',
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
             })
+      WHERE deny.action = '*' AND deny.excluded_actions IS NULL
   }
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
        collect(perm.action) AS risky_actions

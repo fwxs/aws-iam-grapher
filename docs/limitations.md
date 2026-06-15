@@ -83,8 +83,11 @@ listed actions) are fully supported using a sentinel + query-time exclusion mode
    them match every action.
 
 **Remaining approximations:**
-- `Deny NotAction` (deny-all-except) is stored but not evaluated in `who_can`; it is treated
-  generically like other Deny nodes. This may under-subtract access in rare deny-all-except policies.
+- `Deny NotAction` (deny-all-except): the node is stored in the graph but the deny-all-except
+  semantic is not evaluated. `who_can` and `privilege_escalation_paths` only subtract Deny nodes
+  where `action` is an exact match or a true full-admin `*` (i.e. `excluded_actions IS NULL`).
+  A `Deny NotAction: ["s3:GetObject"]` would not suppress any action — the denied complement
+  is not computed. This may over-report access in the rare deny-all-except pattern.
 - The resource scope of an allow-all-except grant is not intersected with the queried resource
   (same approximation as for full-admin `*` grants — see below).
 - Condition evaluation on `NotAction` statements is not implemented (same limitation as all
