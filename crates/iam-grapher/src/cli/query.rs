@@ -139,6 +139,24 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 resolve_snapshot_id(args.snapshot_id.as_deref(), &client, account_id).await?;
             let ctx = QueryContext::new(snapshot_id.clone(), account_id);
 
+            // Warn if the queried snapshot is marked partial so analysts know results may
+            // be incomplete before reading them.
+            if let Ok(snaps) = list_snapshots(client.inner(), account_id).await {
+                if let Some(snap) = snaps.iter().find(|s| s.id == snapshot_id) {
+                    if snap.is_partial {
+                        let detail = if snap.partial_reasons.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", snap.partial_reasons.join(", "))
+                        };
+                        eprintln!(
+                            "[!] snapshot is PARTIAL{} — results may understate access",
+                            detail
+                        );
+                    }
+                }
+            }
+
             match cmd {
                 QueryCommand::WhoCan { action } => {
                     let results = who_can(client.inner(), &ctx, action)
@@ -162,7 +180,14 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
                     let rows: Vec<Vec<String>> = results
                         .iter()
-                        .map(|e| vec![e.entity_type.clone(), e.arn.clone()])
+                        .map(|e| {
+                            let type_label = if e.is_full_admin {
+                                format!("{} [full-admin]", e.entity_type)
+                            } else {
+                                e.entity_type.clone()
+                            };
+                            vec![type_label, e.arn.clone()]
+                        })
                         .collect();
                     print!("{}", table::format_table(&["TYPE", "ARN"], &rows));
                 }
