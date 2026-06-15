@@ -90,3 +90,64 @@ async fn delete_snapshot_preserves_aws_service_nodes() {
         "AwsService nodes must not be deleted with snapshot"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_with_warning_marks_snapshot_partial() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000003";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_missing_profiles_warning(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let snapshots = list_snapshots(ingester.client().inner(), account_id)
+        .await
+        .expect("list must succeed");
+
+    let snap = snapshots
+        .iter()
+        .find(|s| s.id == snapshot_id)
+        .expect("snapshot must exist");
+
+    assert!(snap.is_partial, "snapshot must be marked partial");
+    assert!(
+        snap.partial_reasons
+            .contains(&"instance profiles missing".to_string()),
+        "partial_reasons must include the missing profiles reason"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_with_wildcards_not_expanded_warning_marks_snapshot_partial() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000005";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_wildcards_not_expanded_warning(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let snapshots = list_snapshots(ingester.client().inner(), account_id)
+        .await
+        .expect("list must succeed");
+
+    let snap = snapshots
+        .iter()
+        .find(|s| s.id == snapshot_id)
+        .expect("snapshot must exist");
+
+    assert!(
+        snap.is_partial,
+        "snapshot must be marked partial when wildcards were not expanded"
+    );
+    assert!(
+        snap.partial_reasons
+            .contains(&"some wildcards not expanded".to_string()),
+        "partial_reasons must include the wildcards reason"
+    );
+}
