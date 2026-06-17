@@ -54,6 +54,18 @@ IAM policy statements may include `Condition` keys (e.g., `aws:RequestedRegion`,
 
 **Workaround:** After identifying high-risk entities via `who-can` or `privilege-escalation`, check the `Permission.condition` property in Neo4j Browser to determine whether conditions gate access.
 
+### Trust policy evaluation is approximate
+
+`CAN_ASSUME` edges represent that a principal *may* be able to assume a role based on the trust policy structure. Three approximations apply at the single-hop level:
+
+1. **Conditions are recorded but not evaluated.** When a trust policy statement carries a `Condition` block (e.g. `sts:ExternalId`, `aws:MultiFactorAuthPresent`), the `CAN_ASSUME` relationship is stored with `conditional = true`. The condition is *not* evaluated — the edge is asserted even if the condition would block assumption at runtime. Downstream queries can filter on `conditional` to flag these edges.
+
+2. **`NotPrincipal` is recorded but not evaluated.** A trust policy statement using `NotPrincipal` (allow all principals *except* the listed ones) is parsed; the resulting `CAN_ASSUME` edge is marked `conditional = true`. The exclusion logic is not applied — entities listed under `NotPrincipal` may appear as able to assume the role when in fact they are blocked.
+
+3. **Principal kind is read from block key, not inferred from id string.** `{"Service": "ec2.amazonaws.com"}` produces a `Service`-typed `Principal` node; `{"AWS": "arn:...:root"}` produces an `IamEntity`-typed node. The kind accurately reflects the trust policy intent.
+
+**Implication for privilege escalation:** `CAN_ASSUME` edges with `conditional = true` may over-report assume-role access. An entity returned by `privilege_escalation_paths` should be checked for conditional edges before treating the path as exploitable.
+
 ### Transitive `sts:AssumeRole` limited to 2 levels
 
 Privilege escalation analysis traverses `CAN_ASSUME` relationships. V1 follows at most 2 hops: entity → role-A → role-B. Chains longer than 2 levels are not detected.

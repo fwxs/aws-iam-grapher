@@ -1,6 +1,7 @@
 mod helpers;
 
 use iam_graph::{GraphIngester, IngestConfig};
+use iam_models::{Effect, IamRole, PolicyDocument, PolicyStatement};
 use uuid::Uuid;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -221,4 +222,86 @@ async fn ingest_respects_batch_size() {
         .expect("count query must succeed");
     let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert_eq!(cnt, 1500, "All 1500 policies must be present");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_trust_policy_with_condition_marks_can_assume_conditional() {
+    use chrono::Utc;
+    use iam_collector::{CollectedData, CollectorMode};
+    use std::collections::HashMap;
+
+    let client = helpers::shared_client().await;
+    let config = helpers::test_config("444455556666");
+    let snap_id = config.snapshot_id.clone();
+
+    let role_arn = "arn:aws:iam::444455556666:role/CondRole";
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"AWS": "arn:aws:iam::444455556666:root"})),
+            not_principal: None,
+            condition: Some(std::collections::HashMap::from([(
+                "StringEquals".to_string(),
+                std::collections::HashMap::from([(
+                    "sts:ExternalId".to_string(),
+                    vec!["secret".to_string()],
+                )]),
+            )])),
+        }],
+    };
+    let role = IamRole {
+        arn: role_arn.to_string(),
+        role_id: "AROATEST_COND".to_string(),
+        role_name: "CondRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies: vec![],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some("444455556666".to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    };
+
+    let ingester = GraphIngester::new(client, config);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (pr:Principal)-[ca:CAN_ASSUME]->(r:Role {uid: $uid})
+                 RETURN ca.conditional AS conditional",
+            )
+            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+        )
+        .await
+        .expect("CAN_ASSUME query must succeed");
+
+    assert!(!rows.is_empty(), "CAN_ASSUME relationship must exist");
+    let conditional: bool = rows[0]
+        .get("conditional")
+        .expect("conditional property must be present");
+    assert!(
+        conditional,
+        "CAN_ASSUME edge must be marked conditional when trust policy has Condition block"
+    );
 }

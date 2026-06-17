@@ -321,9 +321,16 @@ impl GraphIngester {
             // Trust policy principals
             if let Some(doc) = &r.assume_role_policy_document {
                 for stmt in &doc.statement {
+                    let conditional = stmt.condition.is_some() || stmt.not_principal.is_some();
                     if let Some(principal) = &stmt.principal {
-                        for id in extract_principal_ids(principal) {
-                            phase6.push(relationships::can_assume_query(snap_id, &id, &r.arn));
+                        for (kind, id) in extract_principal_ids(principal) {
+                            phase6.push(relationships::can_assume_query(
+                                snap_id,
+                                &kind,
+                                &id,
+                                &r.arn,
+                                conditional,
+                            ));
                             rel_count += 1;
                         }
                     }
@@ -622,27 +629,143 @@ fn push_inline_statement_grants(
     }
 }
 
-/// Extract string principal IDs from a serde_json principal block.
-fn extract_principal_ids(principal: &serde_json::Value) -> Vec<String> {
-    let mut ids = Vec::new();
+/// Extract `(kind, id)` pairs from a trust-policy principal block.
+///
+/// Reads the block key (`AWS`, `Service`, `Federated`, `CanonicalUser`) to set
+/// the kind accurately rather than re-inferring it from the id string shape.
+fn extract_principal_ids(principal: &serde_json::Value) -> Vec<(String, String)> {
+    let mut results = Vec::new();
     match principal {
-        serde_json::Value::String(s) => ids.push(s.clone()),
+        serde_json::Value::String(s) => {
+            let kind = if s == "*" { "Wildcard" } else { "Unknown" };
+            results.push((kind.to_string(), s.clone()));
+        }
         serde_json::Value::Object(map) => {
-            for val in map.values() {
-                match val {
-                    serde_json::Value::String(s) => ids.push(s.clone()),
-                    serde_json::Value::Array(arr) => {
-                        for item in arr {
-                            if let serde_json::Value::String(s) = item {
-                                ids.push(s.clone());
-                            }
-                        }
-                    }
-                    _ => {}
+            for (key, val) in map {
+                let raw_ids: Vec<String> = match val {
+                    serde_json::Value::String(s) => vec![s.clone()],
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                    _ => continue,
+                };
+                for id in raw_ids {
+                    results.push((principal_kind(key, &id), id));
                 }
             }
         }
         _ => {}
     }
-    ids
+    results
+}
+
+/// Derive principal kind from the trust policy block key and the id value.
+fn principal_kind(key: &str, id: &str) -> String {
+    match key {
+        "Service" => "Service",
+        "Federated" => "Federated",
+        "CanonicalUser" => "CanonicalUser",
+        "AWS" if id == "*" => "Wildcard",
+        "AWS" if id.contains(":assumed-role/") => "AssumedRole",
+        "AWS" => "IamEntity",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_principals_service_key_returns_service_kind() {
+        let principal = serde_json::json!({"Service": "ec2.amazonaws.com"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![("Service".to_string(), "ec2.amazonaws.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn extract_principals_aws_root_returns_iam_entity_kind() {
+        let principal = serde_json::json!({"AWS": "arn:aws:iam::123456789012:root"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "IamEntity".to_string(),
+                "arn:aws:iam::123456789012:root".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_aws_wildcard_returns_wildcard_kind() {
+        let principal = serde_json::json!({"AWS": "*"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results, vec![("Wildcard".to_string(), "*".to_string())]);
+    }
+
+    #[test]
+    fn extract_principals_federated_returns_federated_kind() {
+        let principal = serde_json::json!({"Federated": "cognito-identity.amazonaws.com"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "Federated".to_string(),
+                "cognito-identity.amazonaws.com".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_assumed_role_arn_returns_assumed_role_kind() {
+        let principal =
+            serde_json::json!({"AWS": "arn:aws:sts::123456789012:assumed-role/MyRole/session"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "AssumedRole".to_string(),
+                "arn:aws:sts::123456789012:assumed-role/MyRole/session".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_root_string_wildcard_returns_wildcard_kind() {
+        let principal = serde_json::json!("*");
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results, vec![("Wildcard".to_string(), "*".to_string())]);
+    }
+
+    #[test]
+    fn extract_principals_array_value_returns_multiple_entries() {
+        let principal = serde_json::json!({
+            "AWS": [
+                "arn:aws:iam::111:root",
+                "arn:aws:iam::222:root"
+            ]
+        });
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(kind, _)| kind == "IamEntity"));
+    }
 }

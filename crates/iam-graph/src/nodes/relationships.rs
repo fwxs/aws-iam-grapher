@@ -41,7 +41,7 @@ const CAN_ASSUME: &str = "
     MERGE (pr:Principal {id: $principal_id, type: $principal_type})
     WITH pr
     MATCH (r:Role {uid: $role_uid})
-    MERGE (pr)-[:CAN_ASSUME]->(r)
+    MERGE (pr)-[:CAN_ASSUME {conditional: $conditional}]->(r)
 ";
 
 const CONTAINS_ROLE: &str = "
@@ -160,12 +160,23 @@ pub fn inline_grants_excluded_query(
 }
 
 /// CAN_ASSUME from a principal to a role (trust policy).
-pub fn can_assume_query(snapshot_id: &str, principal_id: &str, role_arn: &str) -> Query {
-    let (principal_type, id) = classify_principal(principal_id);
+///
+/// `principal_kind` should come from the trust policy block key (`AWS`, `Service`,
+/// `Federated`, `CanonicalUser`) rather than being re-inferred from the id string.
+/// `conditional` is `true` when the trust policy statement carries a `Condition` or
+/// `NotPrincipal` block — the edge is asserted but may not always hold at runtime.
+pub fn can_assume_query(
+    snapshot_id: &str,
+    principal_kind: &str,
+    principal_id: &str,
+    role_arn: &str,
+    conditional: bool,
+) -> Query {
     query(CAN_ASSUME)
-        .param("principal_id", id)
-        .param("principal_type", principal_type)
+        .param("principal_id", principal_id)
+        .param("principal_type", principal_kind)
         .param("role_uid", entity_uid(snapshot_id, role_arn))
+        .param("conditional", conditional)
 }
 
 /// CONTAINS_ROLE from InstanceProfile to Role.
@@ -180,19 +191,4 @@ pub fn bounded_by_query(snapshot_id: &str, entity_arn: &str, boundary_arn: &str)
     query(BOUNDED_BY)
         .param("entity_uid", entity_uid(snapshot_id, entity_arn))
         .param("policy_uid", entity_uid(snapshot_id, boundary_arn))
-}
-
-/// Classify a principal ID string into (type, id).
-fn classify_principal(principal: &str) -> (String, String) {
-    if principal.contains(":assumed-role/") {
-        ("AssumedRole".to_string(), principal.to_string())
-    } else if principal.contains(":iam::") {
-        ("IamEntity".to_string(), principal.to_string())
-    } else if principal.ends_with(".amazonaws.com") {
-        ("Service".to_string(), principal.to_string())
-    } else if principal == "*" {
-        ("Wildcard".to_string(), "*".to_string())
-    } else {
-        ("Unknown".to_string(), principal.to_string())
-    }
 }
