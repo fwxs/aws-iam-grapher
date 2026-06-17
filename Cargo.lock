@@ -1810,6 +1810,8 @@ dependencies = [
  "aws-config",
  "aws-sdk-iam",
  "aws-smithy-mocks",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "chrono",
  "iam-expander",
  "iam-models",

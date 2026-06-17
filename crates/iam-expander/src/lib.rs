@@ -37,10 +37,26 @@ pub async fn expand_actions(
 ///
 /// Replaces patterns like `"s3:*"` or `"iam:Create*"` with their concrete
 /// action names.  Statements without wildcards are left unchanged.
+///
+/// Loads a fresh [`ActionCache`] on every call.  When expanding many documents
+/// in a single run, prefer [`expand_policy_document_with_cache`] to share one
+/// cache load across all calls.
 pub async fn expand_policy_document(policy_json: &str) -> Result<String, ExpanderError> {
-    let mut policy: Value = serde_json::from_str(policy_json)?;
     let mut cache = ActionCache::load().await?;
-    expand_statements(&mut policy, &mut cache).await?;
+    expand_policy_document_with_cache(policy_json, &mut cache).await
+}
+
+/// Expands all wildcards in a JSON policy document using a caller-provided cache.
+///
+/// Use this to share a single [`ActionCache`] across many documents in one run:
+/// call [`ActionCache::load`] once, pass `&mut cache` to each document, then
+/// call [`ActionCache::flush`] once at the end.
+pub async fn expand_policy_document_with_cache(
+    policy_json: &str,
+    cache: &mut ActionCache,
+) -> Result<String, ExpanderError> {
+    let mut policy: Value = serde_json::from_str(policy_json)?;
+    expand_statements(&mut policy, cache).await?;
     Ok(serde_json::to_string_pretty(&policy)?)
 }
 
@@ -346,6 +362,36 @@ mod tests {
         );
         let actions = stmt["Action"].as_array().expect("Action must remain");
         assert_eq!(actions.len(), 1);
+    }
+
+    /// Confirms that expanding N documents with a shared cache performs no additional
+    /// cache loads.  `expand_policy_document_with_cache` never calls `ActionCache::load`;
+    /// the caller supplies the cache, so N documents share a single loaded instance.
+    #[tokio::test]
+    async fn expand_n_documents_with_shared_cache_no_extra_loads() {
+        let mut cache = make_cache_with("s3", &["GetObject", "PutObject", "DeleteObject"]);
+
+        let policy_json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["s3:Get*"], "Resource": "*"}]
+        }"#;
+
+        // Expand 10 documents using the same cache; no disk or network I/O occurs
+        // because the cache was injected pre-seeded (from_parts uses a nonexistent path).
+        for _ in 0..10 {
+            let result = expand_policy_document_with_cache(policy_json, &mut cache)
+                .await
+                .expect("should expand without error");
+
+            let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+            let actions = parsed["Statement"][0]["Action"].as_array().unwrap();
+            assert_eq!(
+                actions.len(),
+                1,
+                "s3:Get* should expand to s3:GetObject only"
+            );
+            assert_eq!(actions[0].as_str().unwrap(), "s3:GetObject");
+        }
     }
 
     #[tokio::test]
