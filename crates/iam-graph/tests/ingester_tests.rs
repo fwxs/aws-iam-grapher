@@ -398,7 +398,7 @@ async fn ingest_trust_policy_with_condition_marks_can_assume_conditional() {
                 "StringEquals".to_string(),
                 std::collections::HashMap::from([(
                     "sts:ExternalId".to_string(),
-                    vec!["secret".to_string()],
+                    iam_models::ConditionValues(vec!["secret".to_string()]),
                 )]),
             )])),
         }],
