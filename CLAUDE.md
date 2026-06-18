@@ -1,0 +1,87 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+# Format (must pass before commit)
+cargo fmt --all
+
+# Lint (all warnings are errors)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Unit tests (no Docker required)
+cargo test --workspace
+
+# Run a single test by name
+cargo test -p iam-graph test_name
+
+# Docker-gated integration tests (Neo4j via testcontainers)
+DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
+  TESTCONTAINERS_RYUK_DISABLED=true \
+  cargo test --workspace -- --ignored
+
+# Release build (catches cfg/feature issues)
+cargo build --release
+```
+
+All four commands must pass before any task is considered complete.
+
+## Architecture
+
+Five crates in a Cargo workspace with a strict dependency direction:
+
+```
+iam-models  ←  iam-expander
+    ↓               ↓
+iam-collector  (uses both)
+    ↓
+iam-graph  (uses iam-collector + iam-models)
+    ↓
+iam-grapher  (binary, uses all four)
+```
+
+**iam-models** — Core IAM entity types (`IamRole`, `IamUser`, `IamPolicy`, `IamGroup`, `IamInstanceProfile`, `PolicyDocument`). No async, no network.
+
+**iam-expander** — Expands wildcard IAM action strings (`s3:*`, `iam:*Group`) to concrete action lists via awsiamactions.io. Results are cached in `~/.cache/iam-expander/`. Falls back gracefully on network errors. Supports trailing wildcards via a trie and interior/suffix wildcards via glob matching (`glob_match`).
+
+**iam-collector** — Three collection modes:
+- `LiveCollector` — calls AWS SDK `GetAccountAuthorizationDetails` and `ListInstanceProfiles`
+- `OfflineCollector` / `OfflineCollectorBuilder` — parses JSON exports from those same CLI commands
+- `HybridCollector` — tries live, prompts for a file on 403
+
+All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before returning so wildcard expansion is mode-symmetric. Returns `CollectedData` which carries `account_id: Option<String>` derived from entity ARNs (skipping ARNs where the account segment is the literal `"aws"`, which are AWS-managed policies).
+
+**iam-graph** — Two concerns:
+
+*Ingestion* (`src/ingester.rs`): `GraphIngester::ingest()` runs 6 sequential phases:
+1. `AwsAccount` + `AwsService` nodes
+2. `Snapshot` node (carries `is_partial`, `partial_reasons` derived from `data.warnings`)
+3. Entity nodes (Policy, Role, User, Group, InstanceProfile + their inline policies)
+4. Permission nodes + `ON_SERVICE` relationships
+5. `Snapshot -[:INCLUDES]→` entity relationships
+6. Entity relationships: `HAS_ATTACHED_POLICY`, `HAS_INLINE_POLICY`, `GRANTS`, `MEMBER_OF`, `CONTAINS_ROLE`, `CAN_ASSUME`, `BOUNDED_BY`
+
+*Queries* (`src/queries/`): All queries require `QueryContext` (snapshot_id + account_id) for tenant isolation. Key queries:
+- `who_can(action)` — returns entities with Allow for the action, excluding those with an explicit Deny; also matches entities holding `Action: "*"` (flagged `is_full_admin: true`)
+- `privilege_escalation_paths()` — entities with any of 9 risky IAM actions
+- `diff_permissions(snap_a, snap_b)` — permission delta between snapshots
+- `list_snapshots(account_id)` — returns `SnapshotRecord` including `is_partial` and `partial_reasons`
+
+**iam-grapher** — CLI binary. Two subcommands: `collect` and `query`. Account ID resolution order for `collect`: explicit `--account-id` flag → derived from entity ARNs → fatal error (never silently uses a fallback).
+
+## Neo4j Graph Model
+
+Every entity node carries `uid` (`"snapshot_id|arn"`), `snapshot_id`, and `account_id` — all three are required for queries to be correctly scoped. `Permission` nodes carry `action`, `effect` (`"Allow"` or `"Deny"`), `resource`, `snapshot_id`, and `account_id`. The schema (constraints + indexes) is defined in `src/schema.rs` and must be initialized via `GraphClient::initialize_schema()` before ingestion.
+
+## Integration Test Pattern
+
+Tests in `crates/iam-graph/tests/` share one Neo4j container per test binary (four binaries → four containers). The container is started once via `OnceLock<ContainerInfo>` in `helpers.rs`, leaked so it is never dropped, and all tests in the binary connect to it via `shared_client()`. Test isolation is via unique `snapshot_id` per test, not separate containers. All Docker-gated tests require `#[tokio::test(flavor = "multi_thread")]` because `block_in_place` is used inside `init_container()`. Add `#[ignore = "requires Docker"]` to every Docker-gated test.
+
+## Key Constraints
+
+- `account_id` scope: every analysis query filters on both `account_id` and `snapshot_id`. Omitting either causes cross-tenant data leaks. Neo4j Community has one database; isolation is logical only.
+- `Action: "*"` (unqualified full-admin) is stored as a literal `Permission` node with `action = "*"`. The `who_can` query has an explicit UNION arm to match it.
+- Explicit Deny evaluation is approximate: only exact-action Denies and `action = "*"` Denies are subtracted. Wildcard-action Denies (e.g. `s3:Delete*`) are not expanded at query time. See `limitations.md`.
+- `NotAction` statements are parsed but not expanded into grants — queries under-report access granted via `NotAction`. See `docs/limitations.md`.

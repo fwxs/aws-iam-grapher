@@ -1,6 +1,6 @@
 [package]
 name = "iam-grapher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -12,8 +12,8 @@ clap               = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-anyhow             = "1"
-uuid               = { version = "1", features = ["v4"] }
+anyhow             = "^1.0.102"
+uuid               = { version = "^1.23.3", features = ["v4"] }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 iam-collector      = { path = "../iam-collector" }

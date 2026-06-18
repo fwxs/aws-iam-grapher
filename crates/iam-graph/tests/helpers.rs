@@ -137,6 +137,7 @@ pub fn data_with_policy(account_id: &str) -> (CollectedData, String) {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -183,6 +184,7 @@ pub fn data_with_role_and_policy(account_id: &str) -> CollectedData {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -301,6 +303,7 @@ pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -382,6 +385,181 @@ pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
     }
 }
 
+/// Build CollectedData with a role that has both Allow AND Deny for the same action.
+/// Used to verify explicit Deny overrides Allow in `who_can` queries.
+pub fn data_with_allow_and_deny(account_id: &str, action: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/DenyTestRole", account_id);
+    let make_stmt = |effect: Effect| PolicyStatement {
+        sid: None,
+        effect,
+        action: vec![action.to_string()],
+        not_action: vec![],
+        resource: vec!["*".to_string()],
+        not_resource: vec![],
+        principal: None,
+        not_principal: None,
+        condition: None,
+    };
+    let inline = IamInlinePolicy {
+        policy_name: "AllowAndDenyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![make_stmt(Effect::Allow), make_stmt(Effect::Deny)],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_DENY".to_string(),
+        role_name: "DenyTestRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a role that holds `Action: "*"` Allow (full-admin).
+pub fn data_with_full_admin_role(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/FullAdminRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "FullAdminPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["*".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_ADMIN".to_string(),
+        role_name: "FullAdminRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData carrying a InstanceProfilesMissing warning.
+pub fn data_with_missing_profiles_warning(account_id: &str) -> CollectedData {
+    use iam_collector::CollectorWarning;
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        warnings: vec![CollectorWarning::InstanceProfilesMissing],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData carrying a WildcardsNotExpanded warning (simulates awsiamactions.io failure).
+pub fn data_with_wildcards_not_expanded_warning(account_id: &str) -> CollectedData {
+    use iam_collector::CollectorWarning;
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        warnings: vec![CollectorWarning::WildcardsNotExpanded],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a role whose inline policy has `Allow NotAction: [excluded_action]`.
+///
+/// The excluded list is passed pre-expanded (no wildcards) — callers specify exact action strings.
+/// The role ARN is `arn:aws:iam::<account_id>:role/NotActionRole`.
+pub fn data_with_allow_not_action(account_id: &str, excluded_action: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/NotActionRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "NotActionPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec![],
+                not_action: vec![excluded_action.to_string()],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_NOTACTION".to_string(),
+        role_name: "NotActionRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData with a role that has the given action in an inline policy.
 pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool) -> CollectedData {
     use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
@@ -405,6 +583,7 @@ pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool)
                 resource: vec!["*".to_string()],
                 not_resource: vec![],
                 principal: None,
+                not_principal: None,
                 condition: None,
             }],
         },

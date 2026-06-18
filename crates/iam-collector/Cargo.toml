@@ -1,26 +1,28 @@
 [package]
 name = "iam-collector"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-aws-config   = { workspace = true }
-aws-sdk-iam  = { workspace = true }
+async-trait  = { workspace = true }
+aws-config        = { workspace = true }
+aws-sdk-iam       = { workspace = true }
+aws-smithy-types  = { workspace = true }
 chrono       = { workspace = true }
+iam-expander = { path = "../iam-expander" }
+iam-models   = { path = "../iam-models" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
-tokio        = { workspace = true }
-async-trait  = { workspace = true }
 thiserror    = { workspace = true }
+tokio        = { workspace = true }
 tracing      = { workspace = true }
-iam-models   = { path = "../iam-models" }
-iam-expander = { path = "../iam-expander" }
 
 [dev-dependencies]
-aws-smithy-mocks  = { workspace = true }
-aws-sdk-iam       = { workspace = true, features = ["test-util"] }
-tokio             = { workspace = true }
-pretty_assertions = { workspace = true }
+aws-sdk-iam            = { workspace = true, features = ["test-util"] }
+aws-smithy-mocks       = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
 chrono            = { workspace = true }
-testcontainers    = "0.27"
-reqwest           = { version = "0.12", features = ["json"] }
+pretty_assertions = { workspace = true }
+reqwest           = { workspace = true }
+testcontainers    = "^0.27.3"
+tokio             = { workspace = true }

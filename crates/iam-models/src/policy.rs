@@ -164,6 +164,9 @@ pub struct PolicyStatement {
     /// Optional principal block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<serde_json::Value>,
+    /// Optional NotPrincipal block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_principal: Option<serde_json::Value>,
     /// Optional condition block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<Condition>,

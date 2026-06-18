@@ -4,7 +4,7 @@ use crate::nodes::{
     account, group, instance_profile, permission, policy, relationships, role, uid, user,
 };
 use iam_collector::CollectedData;
-use iam_models::{Effect, IamInlinePolicy};
+use iam_models::{Effect, IamInlinePolicy, PolicyStatement};
 use neo4rs::Query;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -98,8 +98,39 @@ impl GraphIngester {
         // Phase 2 — snapshot node
         info!(phase = 2, "ingesting snapshot node");
         let collected_at = data.collection_timestamp.to_rfc3339();
+        let is_partial = data.warnings.iter().any(|w| {
+            matches!(
+                w,
+                iam_collector::CollectorWarning::InstanceProfilesMissing
+                    | iam_collector::CollectorWarning::InlinePoliciesNotResolved
+                    | iam_collector::CollectorWarning::WildcardsNotExpanded
+                    | iam_collector::CollectorWarning::PartialData(_)
+            )
+        });
+        let partial_reasons: Vec<String> = data
+            .warnings
+            .iter()
+            .map(|w| match w {
+                iam_collector::CollectorWarning::InstanceProfilesMissing => {
+                    "instance profiles missing".to_string()
+                }
+                iam_collector::CollectorWarning::InlinePoliciesNotResolved => {
+                    "some inline policies not resolved".to_string()
+                }
+                iam_collector::CollectorWarning::WildcardsNotExpanded => {
+                    "some wildcards not expanded".to_string()
+                }
+                iam_collector::CollectorWarning::PartialData(msg) => msg.clone(),
+            })
+            .collect();
         let phase2 = vec![
-            account::merge_snapshot_query(snap_id, acct_id, &collected_at, false),
+            account::merge_snapshot_query(
+                snap_id,
+                acct_id,
+                &collected_at,
+                is_partial,
+                partial_reasons,
+            ),
             account::snapshot_of_account_query(snap_id, acct_id),
         ];
         self.execute_batch(2, phase2).await?;
@@ -163,11 +194,7 @@ impl GraphIngester {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
                     let effect_str = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
@@ -180,6 +207,18 @@ impl GraphIngester {
                             perm_count += 1;
                         }
                     }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase4.push(permission::merge_excluded_permission_query(
+                                snap_id,
+                                acct_id,
+                                effect_str,
+                                resource,
+                                &stmt.not_action,
+                            ));
+                            perm_count += 1;
+                        }
+                    }
                 }
             }
         }
@@ -187,11 +226,7 @@ impl GraphIngester {
             for inline in inlines {
                 for stmt in &inline.policy_document.statement {
                     let effect_str = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
@@ -200,6 +235,18 @@ impl GraphIngester {
                             let prefix = permission::service_prefix(action).to_string();
                             phase4.push(permission::permission_on_service_query(
                                 snap_id, effect_str, action, resource, &prefix,
+                            ));
+                            perm_count += 1;
+                        }
+                    }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase4.push(permission::merge_excluded_permission_query(
+                                snap_id,
+                                acct_id,
+                                effect_str,
+                                resource,
+                                &stmt.not_action,
                             ));
                             perm_count += 1;
                         }
@@ -274,9 +321,16 @@ impl GraphIngester {
             // Trust policy principals
             if let Some(doc) = &r.assume_role_policy_document {
                 for stmt in &doc.statement {
+                    let conditional = stmt.condition.is_some() || stmt.not_principal.is_some();
                     if let Some(principal) = &stmt.principal {
-                        for id in extract_principal_ids(principal) {
-                            phase6.push(relationships::can_assume_query(snap_id, &id, &r.arn));
+                        for (kind, id) in extract_principal_ids(principal) {
+                            phase6.push(relationships::can_assume_query(
+                                snap_id,
+                                &kind,
+                                &id,
+                                &r.arn,
+                                conditional,
+                            ));
                             rel_count += 1;
                         }
                     }
@@ -285,25 +339,14 @@ impl GraphIngester {
             // GRANTS from inline policies
             for inline in &r.inline_policies {
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &r.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &r.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
         }
@@ -337,25 +380,14 @@ impl GraphIngester {
                 ));
                 rel_count += 1;
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &u.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &u.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
             if let Some(boundary) = &u.permissions_boundary {
@@ -385,25 +417,14 @@ impl GraphIngester {
                 ));
                 rel_count += 1;
                 for stmt in &inline.policy_document.statement {
-                    let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            phase6.push(relationships::inline_grants_query(
-                                snap_id,
-                                &g.arn,
-                                &inline.policy_name,
-                                eff,
-                                action,
-                                resource,
-                            ));
-                            rel_count += 1;
-                        }
-                    }
+                    push_inline_statement_grants(
+                        &mut phase6,
+                        &mut rel_count,
+                        snap_id,
+                        &g.arn,
+                        &inline.policy_name,
+                        stmt,
+                    );
                 }
             }
         }
@@ -420,15 +441,23 @@ impl GraphIngester {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
                     let eff = effect_str(&stmt.effect);
-                    let resources = if stmt.resource.is_empty() {
-                        vec!["*".to_string()]
-                    } else {
-                        stmt.resource.clone()
-                    };
+                    let resources = statement_resources(stmt);
                     for action in &stmt.action {
                         for resource in &resources {
                             phase6.push(relationships::policy_grants_query(
                                 snap_id, &p.arn, eff, action, resource,
+                            ));
+                            rel_count += 1;
+                        }
+                    }
+                    if !stmt.not_action.is_empty() {
+                        for resource in &resources {
+                            phase6.push(relationships::policy_grants_excluded_query(
+                                snap_id,
+                                &p.arn,
+                                eff,
+                                resource,
+                                &stmt.not_action,
                             ));
                             rel_count += 1;
                         }
@@ -552,27 +581,191 @@ fn role_user_group_inline_sources(data: &CollectedData) -> Vec<&[IamInlinePolicy
     out
 }
 
-/// Extract string principal IDs from a serde_json principal block.
-fn extract_principal_ids(principal: &serde_json::Value) -> Vec<String> {
-    let mut ids = Vec::new();
+/// Resources for a statement, defaulting to `["*"]` when none are listed.
+fn statement_resources(stmt: &PolicyStatement) -> Vec<String> {
+    if stmt.resource.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        stmt.resource.clone()
+    }
+}
+
+/// Push GRANTS queries (action + NotAction-excluded) for one inline-policy statement.
+fn push_inline_statement_grants(
+    phase6: &mut Vec<Query>,
+    rel_count: &mut u64,
+    snap_id: &str,
+    owner_arn: &str,
+    inline_name: &str,
+    stmt: &PolicyStatement,
+) {
+    let eff = effect_str(&stmt.effect);
+    let resources = statement_resources(stmt);
+    for action in &stmt.action {
+        for resource in &resources {
+            phase6.push(relationships::inline_grants_query(
+                snap_id,
+                owner_arn,
+                inline_name,
+                eff,
+                action,
+                resource,
+            ));
+            *rel_count += 1;
+        }
+    }
+    if !stmt.not_action.is_empty() {
+        for resource in &resources {
+            phase6.push(relationships::inline_grants_excluded_query(
+                snap_id,
+                owner_arn,
+                inline_name,
+                eff,
+                resource,
+                &stmt.not_action,
+            ));
+            *rel_count += 1;
+        }
+    }
+}
+
+/// Extract `(kind, id)` pairs from a trust-policy principal block.
+///
+/// Reads the block key (`AWS`, `Service`, `Federated`, `CanonicalUser`) to set
+/// the kind accurately rather than re-inferring it from the id string shape.
+fn extract_principal_ids(principal: &serde_json::Value) -> Vec<(String, String)> {
+    let mut results = Vec::new();
     match principal {
-        serde_json::Value::String(s) => ids.push(s.clone()),
+        serde_json::Value::String(s) => {
+            let kind = if s == "*" { "Wildcard" } else { "Unknown" };
+            results.push((kind.to_string(), s.clone()));
+        }
         serde_json::Value::Object(map) => {
-            for val in map.values() {
-                match val {
-                    serde_json::Value::String(s) => ids.push(s.clone()),
-                    serde_json::Value::Array(arr) => {
-                        for item in arr {
-                            if let serde_json::Value::String(s) = item {
-                                ids.push(s.clone());
-                            }
-                        }
-                    }
-                    _ => {}
+            for (key, val) in map {
+                let raw_ids: Vec<String> = match val {
+                    serde_json::Value::String(s) => vec![s.clone()],
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect(),
+                    _ => continue,
+                };
+                for id in raw_ids {
+                    results.push((principal_kind(key, &id), id));
                 }
             }
         }
         _ => {}
     }
-    ids
+    results
+}
+
+/// Derive principal kind from the trust policy block key and the id value.
+fn principal_kind(key: &str, id: &str) -> String {
+    match key {
+        "Service" => "Service",
+        "Federated" => "Federated",
+        "CanonicalUser" => "CanonicalUser",
+        "AWS" if id == "*" => "Wildcard",
+        "AWS" if id.contains(":assumed-role/") => "AssumedRole",
+        "AWS" => "IamEntity",
+        _ => "Unknown",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_principals_service_key_returns_service_kind() {
+        let principal = serde_json::json!({"Service": "ec2.amazonaws.com"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![("Service".to_string(), "ec2.amazonaws.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn extract_principals_aws_root_returns_iam_entity_kind() {
+        let principal = serde_json::json!({"AWS": "arn:aws:iam::123456789012:root"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "IamEntity".to_string(),
+                "arn:aws:iam::123456789012:root".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_aws_wildcard_returns_wildcard_kind() {
+        let principal = serde_json::json!({"AWS": "*"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results, vec![("Wildcard".to_string(), "*".to_string())]);
+    }
+
+    #[test]
+    fn extract_principals_federated_returns_federated_kind() {
+        let principal = serde_json::json!({"Federated": "cognito-identity.amazonaws.com"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "Federated".to_string(),
+                "cognito-identity.amazonaws.com".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_assumed_role_arn_returns_assumed_role_kind() {
+        let principal =
+            serde_json::json!({"AWS": "arn:aws:sts::123456789012:assumed-role/MyRole/session"});
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(
+            results,
+            vec![(
+                "AssumedRole".to_string(),
+                "arn:aws:sts::123456789012:assumed-role/MyRole/session".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_principals_root_string_wildcard_returns_wildcard_kind() {
+        let principal = serde_json::json!("*");
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results, vec![("Wildcard".to_string(), "*".to_string())]);
+    }
+
+    #[test]
+    fn extract_principals_array_value_returns_multiple_entries() {
+        let principal = serde_json::json!({
+            "AWS": [
+                "arn:aws:iam::111:root",
+                "arn:aws:iam::222:root"
+            ]
+        });
+
+        let results = extract_principal_ids(&principal);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(kind, _)| kind == "IamEntity"));
+    }
 }

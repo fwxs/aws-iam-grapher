@@ -10,7 +10,8 @@ const MERGE_SNAPSHOT: &str = "
     MERGE (s:Snapshot {id: $id})
     SET s.account_id = $account_id,
         s.collected_at = $collected_at,
-        s.is_partial = $is_partial
+        s.is_partial = $is_partial,
+        s.partial_reasons = $partial_reasons
 ";
 
 const SNAPSHOT_OF_ACCOUNT: &str = "
@@ -32,12 +33,14 @@ pub fn merge_snapshot_query(
     account_id: &str,
     collected_at: &str,
     is_partial: bool,
+    partial_reasons: Vec<String>,
 ) -> Query {
     query(MERGE_SNAPSHOT)
         .param("id", snapshot_id)
         .param("account_id", account_id)
         .param("collected_at", collected_at)
         .param("is_partial", is_partial)
+        .param("partial_reasons", partial_reasons)
 }
 
 /// Build a query to create the Snapshot → AwsAccount relationship.
