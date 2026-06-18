@@ -137,6 +137,7 @@ pub fn data_with_policy(account_id: &str) -> (CollectedData, String) {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -183,6 +184,7 @@ pub fn data_with_role_and_policy(account_id: &str) -> CollectedData {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -301,6 +303,7 @@ pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
             resource: vec!["*".to_string()],
             not_resource: vec![],
             principal: None,
+            not_principal: None,
             condition: None,
         }],
     };
@@ -397,6 +400,7 @@ pub fn data_with_allow_and_deny(account_id: &str, action: &str) -> CollectedData
         resource: vec!["*".to_string()],
         not_resource: vec![],
         principal: None,
+        not_principal: None,
         condition: None,
     };
     let inline = IamInlinePolicy {
@@ -449,6 +453,7 @@ pub fn data_with_full_admin_role(account_id: &str) -> CollectedData {
                 resource: vec!["*".to_string()],
                 not_resource: vec![],
                 principal: None,
+                not_principal: None,
                 condition: None,
             }],
         },
@@ -525,6 +530,7 @@ pub fn data_with_allow_not_action(account_id: &str, excluded_action: &str) -> Co
                 resource: vec!["*".to_string()],
                 not_resource: vec![],
                 principal: None,
+                not_principal: None,
                 condition: None,
             }],
         },
@@ -577,6 +583,7 @@ pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool)
                 resource: vec!["*".to_string()],
                 not_resource: vec![],
                 principal: None,
+                not_principal: None,
                 condition: None,
             }],
         },

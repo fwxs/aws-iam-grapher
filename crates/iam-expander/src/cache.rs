@@ -35,6 +35,8 @@ impl ActionCache {
     }
 
     /// Returns the trie for `service`, fetching from the network when missing.
+    ///
+    /// No longer persists on every miss — call [`flush`] once at end of run.
     pub(crate) async fn get_or_fetch(&mut self, service: &str) -> Result<&Trie, ExpanderError> {
         if !self.tries.contains_key(service) {
             let actions = client::fetch_actions(service).await?;
@@ -44,18 +46,23 @@ impl ActionCache {
             }
             self.raw.actions.insert(service.to_string(), actions);
             self.tries.insert(service.to_string(), trie);
-            self.persist().await?;
         }
         // safe: we just inserted it above if it was missing
         Ok(self.tries.get(service).expect("service was just inserted"))
     }
 
-    async fn persist(&self) -> Result<(), ExpanderError> {
+    /// Atomically persists the cache to disk.
+    ///
+    /// Writes to a `.tmp` file then renames so a crash during write leaves the
+    /// previous cache file intact.  Call once at the end of a collection run.
+    pub async fn flush(&self) -> Result<(), ExpanderError> {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let tmp = self.path.with_extension("tmp");
         let json = serde_json::to_string_pretty(&self.raw)?;
-        tokio::fs::write(&self.path, json).await?;
+        tokio::fs::write(&tmp, &json).await?;
+        tokio::fs::rename(&tmp, &self.path).await?;
         Ok(())
     }
 
