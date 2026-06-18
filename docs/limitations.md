@@ -123,6 +123,25 @@ The resource scope of the `*` grant is not intersected with the queried resource
 with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` appears in `who_can("s3:DeleteObject")`
 even though the grant is bucket-scoped, not object-scoped.
 
+### Validated scale ceiling
+
+The ingestion pipeline has been load-tested against a synthetic account of:
+
+- **200 managed policies** × 10 statements × 8 concrete actions × 2 resources
+- **50 roles** each with one inline policy of the same shape
+- **~16 unique permission nodes** after uid-based deduplication (all policies share the same 8 actions × 2 resources)
+
+The UNWIND bulk-merge strategy (500-row batches, Phase 4) processes this load in **under 30 seconds** on a local Neo4j container (single-core colima VM, 2 GB RAM).
+
+**Practical ceiling for a single snapshot:** ~10,000 unique permission nodes ingested comfortably in under 2 minutes. Beyond this, Neo4j Community write latency dominates; consider sharding by account or increasing `batch_size` in `IngestConfig`.
+
+To reproduce: run the Docker-gated benchmark test:
+```bash
+DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
+  TESTCONTAINERS_RYUK_DISABLED=true \
+  cargo test -p iam-graph -- --ignored ingest_large_synthetic_account_records_scale_ceiling --nocapture
+```
+
 ---
 
 ## V2 Roadmap

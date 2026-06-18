@@ -224,6 +224,153 @@ async fn ingest_respects_batch_size() {
     assert_eq!(cnt, 1500, "All 1500 policies must be present");
 }
 
+/// Scale ceiling benchmark.
+///
+/// Validates the ingestion pipeline against a large synthetic account:
+/// 200 managed policies × 10 statements × 8 concrete actions × 2 resources
+/// = 32,000 permission triples (deduplicated by uid across policies sharing actions).
+///
+/// Run with: DOCKER_HOST=... TESTCONTAINERS_RYUK_DISABLED=true
+///           cargo test -- --ignored ingest_large_synthetic_account_records_scale_ceiling
+///
+/// Record the duration_ms from the tracing output in limitations.md.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_large_synthetic_account_records_scale_ceiling() {
+    use chrono::Utc;
+    use iam_collector::{CollectedData, CollectorMode};
+    use iam_models::{
+        Effect, IamInlinePolicy, IamPolicy, IamRole, PolicyDocument, PolicyStatement,
+    };
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    let client = helpers::shared_client().await;
+    let config = IngestConfig {
+        batch_size: 500,
+        snapshot_id: Uuid::new_v4().to_string(),
+        account_id: "999988887777".to_string(),
+        account_alias: Some("scale-test".to_string()),
+        dry_run: false,
+    };
+
+    let account_id = "999988887777";
+    let actions_per_stmt = 8usize;
+    let stmts_per_policy = 10usize;
+    let policies_count = 200usize;
+    let roles_count = 50usize;
+    let resources = vec!["arn:aws:s3:::my-bucket/*".to_string(), "*".to_string()];
+
+    let base_actions: Vec<String> = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "ec2:DescribeInstances",
+        "iam:GetRole",
+        "iam:ListRoles",
+        "sts:AssumeRole",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let make_doc = || PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: (0..stmts_per_policy)
+            .map(|_| PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: base_actions[..actions_per_stmt].to_vec(),
+                not_action: vec![],
+                resource: resources.clone(),
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            })
+            .collect(),
+    };
+
+    let policies: Vec<IamPolicy> = (0..policies_count)
+        .map(|i| IamPolicy {
+            arn: format!("arn:aws:iam::{}:policy/ScalePolicy{}", account_id, i),
+            policy_id: format!("ANPASCALE{:010}", i),
+            policy_name: format!("ScalePolicy{}", i),
+            path: "/".to_string(),
+            create_date: Utc::now(),
+            update_date: Utc::now(),
+            attachment_count: 0,
+            is_attachable: true,
+            default_version_id: "v1".to_string(),
+            description: None,
+            is_aws_managed: false,
+            document: Some(make_doc()),
+            tags: HashMap::new(),
+        })
+        .collect();
+
+    let roles: Vec<IamRole> = (0..roles_count)
+        .map(|i| IamRole {
+            arn: format!("arn:aws:iam::{}:role/ScaleRole{}", account_id, i),
+            role_id: format!("AROASCALE{:010}", i),
+            role_name: format!("ScaleRole{}", i),
+            path: "/".to_string(),
+            create_date: Utc::now(),
+            assume_role_policy_document: None,
+            attached_managed_policies: vec![],
+            inline_policies: vec![IamInlinePolicy {
+                policy_name: "InlineScale".to_string(),
+                policy_document: make_doc(),
+            }],
+            permissions_boundary: None,
+            role_last_used: None,
+            description: None,
+            max_session_duration: None,
+            is_aws_managed: false,
+            tags: HashMap::new(),
+        })
+        .collect();
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        policies,
+        roles,
+        ..Default::default()
+    };
+
+    let total_triples = actions_per_stmt * stmts_per_policy * resources.len();
+    let ingester = GraphIngester::new(client, config);
+
+    let started = Instant::now();
+    let stats = ingester
+        .ingest(&data)
+        .await
+        .expect("large synthetic ingest must succeed");
+    let elapsed_ms = started.elapsed().as_millis();
+
+    println!(
+        "SCALE CEILING: policies={} roles={} unique_permissions={} duration_ms={}",
+        policies_count, roles_count, stats.permissions_merged, elapsed_ms
+    );
+    println!(
+        "  max_possible_triples={} (before uid dedup)",
+        total_triples
+    );
+
+    assert!(
+        stats.permissions_merged > 0,
+        "some permissions must be merged"
+    );
+    assert!(
+        elapsed_ms < 300_000,
+        "ingest must complete within 5 minutes, took {}ms",
+        elapsed_ms
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
 async fn ingest_trust_policy_with_condition_marks_can_assume_conditional() {
