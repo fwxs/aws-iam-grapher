@@ -164,7 +164,10 @@ async fn expand_one_action(
 
 /// IAM wildcard match: `*` matches any sequence of characters, `?` matches one character.
 /// Matching is case-insensitive, consistent with AWS IAM policy evaluation.
-fn glob_match(pattern: &str, text: &str) -> bool {
+///
+/// `pattern` is the (possibly wildcarded) action string, e.g. a Deny statement's action;
+/// `text` is the concrete action being tested against it.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
     let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
     glob_match_inner(&p, &t)
