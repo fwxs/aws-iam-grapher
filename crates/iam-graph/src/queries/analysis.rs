@@ -31,6 +31,33 @@ pub struct RiskyInstanceProfile {
 }
 
 const WHO_CAN_QUERY: &str = include_str!("../../queries/who_can.cypher");
+const CANDIDATE_DENY_ACTIONS_QUERY: &str =
+    include_str!("../../queries/candidate_deny_actions.cypher");
+
+/// Fetch every distinct Deny action string in this snapshot/account scope, excluding
+/// Deny-NotAction sentinel nodes. Callers match the queried action against this list with
+/// `iam_expander::glob_match` to compute the concrete Deny set that covers it.
+async fn candidate_deny_actions(
+    graph: &Graph,
+    ctx: &QueryContext,
+) -> Result<Vec<String>, GraphError> {
+    let mut stream = graph
+        .execute(
+            neo4rs::query(CANDIDATE_DENY_ACTIONS_QUERY)
+                .param("snapshot_id", ctx.snapshot_id.as_str())
+                .param("account_id", ctx.account_id.as_str()),
+        )
+        .await?;
+
+    let mut actions = Vec::new();
+    while let Some(row) = stream.next().await? {
+        let action: String = row
+            .get("action")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        actions.push(action);
+    }
+    Ok(actions)
+}
 
 /// Return all entities that have permission to perform `action` in this snapshot.
 pub async fn who_can(
@@ -38,12 +65,19 @@ pub async fn who_can(
     ctx: &QueryContext,
     action: &str,
 ) -> Result<Vec<EntityRef>, GraphError> {
+    let candidates = candidate_deny_actions(graph, ctx).await?;
+    let deny_actions: Vec<String> = candidates
+        .into_iter()
+        .filter(|candidate| iam_expander::glob_match(candidate, action))
+        .collect();
+
     let mut stream = graph
         .execute(
             neo4rs::query(WHO_CAN_QUERY)
                 .param("action", action)
                 .param("snapshot_id", ctx.snapshot_id.as_str())
-                .param("account_id", ctx.account_id.as_str()),
+                .param("account_id", ctx.account_id.as_str())
+                .param("deny_actions", deny_actions),
         )
         .await?;
 

@@ -107,14 +107,22 @@ listed actions) are fully supported using a sentinel + query-time exclusion mode
 
 ### Deny scope is approximate
 
-Explicit Deny subtraction uses action-exact matching. A Deny with a wildcard action
-(e.g. `Deny: s3:Delete*`) that covers the queried action does **not** suppress the Allow result
-unless the Deny is `action: '*'` (full-admin deny) or exactly matches the queried action string.
+Explicit Deny subtraction matches Deny actions against the queried/risky action using IAM glob
+semantics (`iam_expander::glob_match`, reusing the same matcher as wildcard `Action` expansion).
+A Deny with a wildcard action (e.g. `Deny: s3:Delete*`) now correctly suppresses an Allow for
+`s3:DeleteObject`, as does an exact match or a true full-admin Deny (`action: '*'`).
 
-Additionally, group-inherited Deny for a user is not evaluated: if a group policy Denies an
-action, that Deny does not suppress Allow grants on the user's own policies and vice-versa. The
-approximation is conservative — we prefer over-reporting access (false positives for Deny
-misses) over under-reporting.
+Group-inherited Deny is evaluated: a user's effective Deny set is the union of Deny permissions
+on its own policies and on every group it is `MEMBER_OF`. A Deny from either side suppresses the
+user's Allow, in `who_can` and `privilege_escalation_paths` alike.
+
+**Remaining approximations:**
+- `Deny NotAction` (deny-all-except) is still not evaluated — see "`NotAction` — implemented as
+  allow-all-except" above. Deny-NotAction sentinel nodes (`action = '*'` with `excluded_actions`
+  set) are excluded from Deny matching entirely.
+- Group results themselves (a `Group` returned directly as `who_can`'s `e`) are not suppressed by
+  a Deny on one of their member users — groups are not IAM principals that take action, so this
+  is out of scope.
 
 ### `Action: "*"` resource scope not intersected
 
@@ -156,4 +164,3 @@ These limitations are targeted for resolution in a future major version:
 | Deep transitive assume-role | Switch `privilege-escalation` to variable-length path queries (`[:CAN_ASSUME*1..]`) with cycle detection |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
 | `Deny NotAction` evaluation | Evaluate deny-all-except statements in `who_can` (currently stored but not subtracted) |
-| Wildcard-action Deny | Match Deny actions with IAM glob semantics against queried action to correctly suppress wildcard Deny statements |

@@ -37,9 +37,28 @@ pub async fn privilege_escalation_paths(
         let entity_type: String = row
             .get("entity_type")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let risky_actions: Vec<String> = row
-            .get("risky_actions")
+        let allowed_actions: Vec<String> = row
+            .get("allowed_actions")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let deny_actions: Vec<String> = row
+            .get("deny_actions")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+
+        // Wildcard- and group-Deny-aware suppression: drop any allowed action covered by
+        // a Deny (exact, wildcard, or full-admin) on the entity's own or a member group's policies.
+        let risky_actions: Vec<String> = allowed_actions
+            .into_iter()
+            .filter(|action| {
+                !deny_actions
+                    .iter()
+                    .any(|deny| iam_expander::glob_match(deny, action))
+            })
+            .collect();
+
+        if risky_actions.is_empty() {
+            continue;
+        }
+
         results.push(EscalationPath {
             arn,
             name,

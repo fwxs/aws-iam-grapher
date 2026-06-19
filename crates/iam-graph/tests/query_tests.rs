@@ -219,6 +219,62 @@ async fn who_can_full_admin_wildcard_matches_any_action() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
+async fn who_can_wildcard_deny_overrides_exact_allow() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000005";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data =
+        helpers::data_with_allow_and_wildcard_deny(account_id, "s3:DeleteObject", "s3:Delete*");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+        .await
+        .expect("who_can must succeed");
+
+    assert!(
+        !entities.iter().any(|e| e.name == "WildcardDenyTestRole"),
+        "WildcardDenyTestRole must not appear — Deny s3:Delete* covers Allow s3:DeleteObject"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_group_inherited_deny_overrides_own_allow() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000006";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_allow_and_group_deny(account_id, "iam:PassRole");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "iam:PassRole")
+        .await
+        .expect("who_can must succeed");
+
+    assert!(
+        !entities.iter().any(|e| e.name == "GroupDeniedUser"),
+        "GroupDeniedUser must not appear — group-inherited Deny overrides the user's own Allow"
+    );
+
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx)
+        .await
+        .expect("escalation query must succeed");
+
+    assert!(
+        !paths.iter().any(|p| p.name == "GroupDeniedUser"),
+        "GroupDeniedUser must not appear in privilege-escalation — group Deny suppresses iam:PassRole"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
 async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
     let client = helpers::shared_client().await;
     let account_id = "900000000004";

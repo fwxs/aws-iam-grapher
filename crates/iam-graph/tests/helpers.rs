@@ -560,6 +560,135 @@ pub fn data_with_allow_not_action(account_id: &str, excluded_action: &str) -> Co
     }
 }
 
+/// Build CollectedData with a role that has `Allow $action` AND `Deny $deny_action_pattern`
+/// (e.g. `s3:Delete*`) in an inline policy. Used to verify wildcard Deny suppresses Allow.
+pub fn data_with_allow_and_wildcard_deny(
+    account_id: &str,
+    action: &str,
+    deny_action_pattern: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/WildcardDenyTestRole", account_id);
+    let make_stmt = |effect: Effect, action: &str| PolicyStatement {
+        sid: None,
+        effect,
+        action: vec![action.to_string()],
+        not_action: vec![],
+        resource: vec!["*".to_string()],
+        not_resource: vec![],
+        principal: None,
+        not_principal: None,
+        condition: None,
+    };
+    let inline = IamInlinePolicy {
+        policy_name: "AllowAndWildcardDenyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                make_stmt(Effect::Allow, action),
+                make_stmt(Effect::Deny, deny_action_pattern),
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_WILDCARD_DENY".to_string(),
+        role_name: "WildcardDenyTestRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a user Allowed `action` on its own inline policy, and a group
+/// (that the user is a member of) Denying the same action via the group's inline policy.
+/// Used to verify group-inherited Deny suppresses a user's own Allow.
+pub fn data_with_user_allow_and_group_deny(account_id: &str, action: &str) -> CollectedData {
+    use iam_models::{
+        Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let user_arn = format!("arn:aws:iam::{}:user/GroupDeniedUser", account_id);
+    let group_arn = format!("arn:aws:iam::{}:group/DenyingGroup", account_id);
+
+    let make_stmt = |effect: Effect| PolicyStatement {
+        sid: None,
+        effect,
+        action: vec![action.to_string()],
+        not_action: vec![],
+        resource: vec!["*".to_string()],
+        not_resource: vec![],
+        principal: None,
+        not_principal: None,
+        condition: None,
+    };
+
+    let group = IamGroup {
+        arn: group_arn.clone(),
+        group_id: "AGPADENYGROUP".to_string(),
+        group_name: "DenyingGroup".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![IamInlinePolicy {
+            policy_name: "GroupDenyPolicy".to_string(),
+            policy_document: PolicyDocument {
+                version: Some("2012-10-17".to_string()),
+                statement: vec![make_stmt(Effect::Deny)],
+            },
+        }],
+    };
+
+    let user = IamUser {
+        arn: user_arn.clone(),
+        user_id: "AIDAGROUPDENIED".to_string(),
+        user_name: "GroupDeniedUser".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![IamInlinePolicy {
+            policy_name: "UserAllowPolicy".to_string(),
+            policy_document: PolicyDocument {
+                version: Some("2012-10-17".to_string()),
+                statement: vec![make_stmt(Effect::Allow)],
+            },
+        }],
+        group_list: vec!["DenyingGroup".to_string()],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        groups: vec![group],
+        users: vec![user],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData with a role that has the given action in an inline policy.
 pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool) -> CollectedData {
     use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
