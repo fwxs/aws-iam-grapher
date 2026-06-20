@@ -1840,10 +1840,11 @@ dependencies = [
 
 [[package]]
 name = "iam-graph"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "iam-collector",
+ "iam-expander",
  "iam-models",
  "neo4rs",
  "pretty_assertions",
@@ -1876,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "iam-models"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "pretty_assertions",

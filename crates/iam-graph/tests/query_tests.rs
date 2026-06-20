@@ -15,7 +15,7 @@ async fn who_can_returns_correct_entities() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, &account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:GetObject")
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:GetObject", None)
         .await
         .expect("who_can must succeed");
 
@@ -56,7 +56,7 @@ async fn who_can_does_not_leak_across_accounts() {
 
     // Query account A — must not see account B's entities
     let ctx_a = QueryContext::new(&snap_a, "ACCOUNT_A");
-    let entities = who_can(ingester_b.client().inner(), &ctx_a, "s3:GetObject")
+    let entities = who_can(ingester_b.client().inner(), &ctx_a, "s3:GetObject", None)
         .await
         .expect("who_can must succeed");
     for entity in &entities {
@@ -148,7 +148,7 @@ async fn who_can_sees_group_and_inline_user_paths() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
         .await
         .expect("who_can must succeed");
 
@@ -179,7 +179,7 @@ async fn who_can_deny_overrides_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
         .await
         .expect("who_can must succeed");
 
@@ -202,7 +202,7 @@ async fn who_can_full_admin_wildcard_matches_any_action() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
         .await
         .expect("who_can must succeed");
 
@@ -214,6 +214,71 @@ async fn who_can_full_admin_wildcard_matches_any_action() {
     assert!(
         admin_entity.unwrap().is_full_admin,
         "FullAdminRole must be flagged as full-admin"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_resource_scoped_admin_excluded_when_resource_not_covered() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000007";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let bucket_resource = "arn:aws:s3:::my-bucket";
+    let data = helpers::data_with_resource_scoped_full_admin_role(account_id, bucket_resource);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        Some("arn:aws:s3:::my-bucket/object"),
+    )
+    .await
+    .expect("who_can must succeed");
+
+    assert!(
+        !entities.iter().any(|e| e.name == "ScopedAdminRole"),
+        "ScopedAdminRole's Action:* grant is bucket-scoped, not object-scoped — \
+         must be excluded when --resource is an object under the bucket"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_resource_scoped_admin_included_when_resource_covered() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000008";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let bucket_resource = "arn:aws:s3:::my-bucket";
+    let data = helpers::data_with_resource_scoped_full_admin_role(account_id, bucket_resource);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:ListBucket",
+        Some(bucket_resource),
+    )
+    .await
+    .expect("who_can must succeed");
+
+    let admin_entity = entities.iter().find(|e| e.name == "ScopedAdminRole");
+    assert!(
+        admin_entity.is_some(),
+        "ScopedAdminRole must be included — the queried resource matches the grant's resource scope"
+    );
+    assert_eq!(
+        admin_entity.unwrap().resource,
+        bucket_resource,
+        "matched resource must be surfaced on the EntityRef"
     );
 }
 
@@ -231,7 +296,7 @@ async fn who_can_wildcard_deny_overrides_exact_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject")
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
         .await
         .expect("who_can must succeed");
 
@@ -254,7 +319,7 @@ async fn who_can_group_inherited_deny_overrides_own_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "iam:PassRole")
+    let entities = who_can(ingester.client().inner(), &ctx, "iam:PassRole", None)
         .await
         .expect("who_can must succeed");
 
@@ -290,9 +355,14 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
     let ctx = QueryContext::new(&snapshot_id, account_id);
 
     // Act — non-excluded action: entity must appear, must not be flagged full-admin
-    let included = who_can(ingester.client().inner(), &ctx, "ec2:DescribeInstances")
-        .await
-        .expect("who_can must succeed");
+    let included = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "ec2:DescribeInstances",
+        None,
+    )
+    .await
+    .expect("who_can must succeed");
     let not_action_entity = included
         .iter()
         .find(|e| e.name == "NotActionRole")
@@ -303,7 +373,7 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
     );
 
     // Act — excluded action: entity must NOT appear
-    let excluded = who_can(ingester.client().inner(), &ctx, excluded_action)
+    let excluded = who_can(ingester.client().inner(), &ctx, excluded_action, None)
         .await
         .expect("who_can must succeed");
     assert!(

@@ -12,7 +12,10 @@
 //   set membership, no glob logic in Cypher. A user's effective Deny set is the union of its
 //   own policies and every group it is MEMBER_OF; Deny from either side suppresses the user.
 //   Deny-NotAction nodes (action='*' Deny with excluded_actions) are stored but not evaluated.
-//   See limitations.md.
+//   Every arm also returns perm.resource and a grant_kind ('exact' for arms 1/2, 'wildcard' for
+//   arm 3) so the Rust caller can intersect arm-3's resource against an optional queried
+//   resource via iam_expander::glob_match (no glob logic in Cypher) — see who_can() in
+//   src/queries/analysis.rs. See limitations.md.
 // param $action: IAM action to test (e.g. "s3:GetObject")
 // param $snapshot_id: snapshot scope
 // param $account_id: account scope for tenant isolation
@@ -41,7 +44,8 @@ WHERE e.account_id = $account_id
             })
       WHERE deny.action IN $deny_actions
   }
-RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type, false AS is_full_admin
+RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type, false AS is_full_admin,
+       perm.resource AS resource, 'exact' AS grant_kind
 UNION
 MATCH (u:User)-[:MEMBER_OF]->(g:Group)
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
@@ -67,7 +71,8 @@ WHERE u.account_id = $account_id
             })
       WHERE deny.action IN $deny_actions
   }
-RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type, false AS is_full_admin
+RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type, false AS is_full_admin,
+       perm.resource AS resource, 'exact' AS grant_kind
 UNION
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
       -[:GRANTS]->(perm:Permission {
@@ -94,4 +99,5 @@ WHERE e.account_id = $account_id
       WHERE deny.action IN $deny_actions
   }
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
-       perm.excluded_actions IS NULL AS is_full_admin
+       perm.excluded_actions IS NULL AS is_full_admin,
+       perm.resource AS resource, 'wildcard' AS grant_kind
