@@ -674,9 +674,7 @@ pub fn data_with_allow_and_wildcard_deny(
 /// (that the user is a member of) Denying the same action via the group's inline policy.
 /// Used to verify group-inherited Deny suppresses a user's own Allow.
 pub fn data_with_user_allow_and_group_deny(account_id: &str, action: &str) -> CollectedData {
-    use iam_models::{
-        Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement,
-    };
+    use iam_models::{Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement};
     use std::collections::HashMap;
 
     let user_arn = format!("arn:aws:iam::{}:user/GroupDeniedUser", account_id);
