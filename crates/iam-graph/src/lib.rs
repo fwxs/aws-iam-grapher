@@ -30,6 +30,6 @@ pub use ingester::{GraphIngester, IngestConfig, IngestStats};
 pub use queries::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     list_snapshots, privilege_escalation_paths, risky_instance_profiles, who_can, EntityRef,
-    EscalationPath, PermissionDiff, PermissionRecord, PermissionRow, QueryContext,
-    RiskyInstanceProfile, SnapshotRecord,
+    EscalationPath, Hop, PermissionDiff, PermissionRecord, PermissionRow, QueryContext,
+    RiskyInstanceProfile, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };

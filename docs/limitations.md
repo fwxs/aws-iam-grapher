@@ -66,13 +66,15 @@ IAM policy statements may include `Condition` keys (e.g., `aws:RequestedRegion`,
 
 **Implication for privilege escalation:** `CAN_ASSUME` edges with `conditional = true` may over-report assume-role access. An entity returned by `privilege_escalation_paths` should be checked for conditional edges before treating the path as exploitable.
 
-### Transitive `sts:AssumeRole` limited to 2 levels
+### Transitive `sts:AssumeRole` is bounded by `--max-hops`
 
-Privilege escalation analysis traverses `CAN_ASSUME` relationships. V1 follows at most 2 hops: entity → role-A → role-B. Chains longer than 2 levels are not detected.
+`privilege-escalation` traverses a `CAN_ASSUME_ROLE` entity-to-entity edge (materialized at ingestion time from the `CAN_ASSUME` trust-policy relationship, for principals that resolve to an in-account Role/User ARN) as a variable-length path of `1..max_hops` hops. If entity X can assume role A, which can assume role B, which can assume role C (which holds `iam:PassRole` or another risky action), the query reports the full chain `X → A → B → C` with the risky action attributed to the terminal entity C.
 
-**V1 behavior:** If entity X can assume role A, which can assume role B, which can assume role C (which holds admin access), V1 detects X → A → B but does not report X → C.
+**`--max-hops` default is 3**, capped at 10. The cap exists because variable-length path matching on a dense `CAN_ASSUME_ROLE` graph grows combinatorially with depth; an unbounded traversal risks a runaway query on large accounts. Chains longer than `--max-hops` are not detected — increase the flag if you suspect deeper chains, at the cost of query time.
 
-**Workaround:** Run the `privilege-escalation` query iteratively on the entities it returns to extend the chain manually.
+Cycles (e.g. A → B → A) are handled by Cypher's default acyclic-relationship semantics for variable-length patterns (a path may not reuse the same relationship instance twice) plus shortest-path deduplication per entity, so a cyclic `CAN_ASSUME_ROLE` graph terminates and each reachable entity is reported once.
+
+**Caveat:** the entity-to-entity bridge is only created when the trust-policy principal is an `AWS` ARN that resolves to a Role or User node already present in the same snapshot (kind `IamEntity`). `Service`, `Federated`, `CanonicalUser`, `Wildcard`, and cross-account `AssumedRole` principals are recorded on the original `CAN_ASSUME` edge (see above) but do not extend the transitive chain — see "Multi-account" in the V2 roadmap.
 
 ### `NotAction` — implemented as allow-all-except (query-time exclusion)
 
@@ -179,6 +181,5 @@ These limitations are targeted for resolution in a future major version:
 | Permission Boundaries | Intersect entity policies with boundary at query time using graph traversal |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
-| Deep transitive assume-role | Switch `privilege-escalation` to variable-length path queries (`[:CAN_ASSUME*1..]`) with cycle detection |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
 | `Deny NotAction` evaluation | Evaluate deny-all-except statements in `who_can` (currently stored but not subtracted) |

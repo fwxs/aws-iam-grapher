@@ -332,6 +332,18 @@ impl GraphIngester {
                                 conditional,
                             ));
                             rel_count += 1;
+                            // Bridge entity-to-entity only when the principal is an
+                            // in-account IAM role/user ARN — the only kind that can
+                            // resolve to another Role/User node in this snapshot.
+                            if kind == "IamEntity" {
+                                phase6.push(relationships::can_assume_role_query(
+                                    snap_id,
+                                    &id,
+                                    &r.arn,
+                                    conditional,
+                                ));
+                                rel_count += 1;
+                            }
                         }
                     }
                 }
