@@ -124,12 +124,30 @@ user's Allow, in `who_can` and `privilege_escalation_paths` alike.
   a Deny on one of their member users — groups are not IAM principals that take action, so this
   is out of scope.
 
-### `Action: "*"` resource scope not intersected
+### `Action: "*"` resource scope intersection (`--resource`)
 
-Entities holding `Action: "*"` (full-admin) are returned by `who_can` with `is_full_admin: true`.
-The resource scope of the `*` grant is not intersected with the queried resource, so a principal
-with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` appears in `who_can("s3:DeleteObject")`
-even though the grant is bucket-scoped, not object-scoped.
+`who_can` accepts an optional `--resource <arn>`. When supplied, it intersects the queried
+resource against the `Resource` of wildcard (`Action: "*"`) grants — both true full-admin and
+`NotAction` allow-all-except nodes — using IAM resource-glob semantics (`iam_expander::glob_match`,
+reused from action-glob matching). A grant whose resource doesn't cover the queried resource is
+excluded: a principal with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` is excluded from
+`who_can("s3:DeleteObject", resource="arn:aws:s3:::my-bucket/object")` (bucket-scoped, not
+object-scoped) but included for `who_can("s3:ListBucket", resource="arn:aws:s3:::my-bucket")`.
+
+Exact-action grants (arms 1/2 — direct policy grant and group-derived grant) are **not** filtered
+by `--resource`; their `resource` is only surfaced in the output for callers to post-filter
+themselves. When `--resource` is omitted, behavior is unchanged from before and every result now
+also carries the matched grant's `resource`.
+
+Caveat: `iam_expander::glob_match` lowercases both sides before comparing (it was written for
+case-insensitive IAM action matching). ARN resource segments (bucket names, object keys) are
+case-sensitive in real AWS, so a queried resource that differs from the grant only by case will
+incorrectly be treated as a match. This is a known limitation of reusing the action-glob matcher
+for resources.
+
+When an entity has multiple wildcard grants across different resources, only one resulting
+`resource` value is surfaced per entity (the first one Rust-side dedup encounters) — `who_can`
+already deduplicates by ARN, collapsing multiple matching grants into a single row.
 
 ### Validated scale ceiling
 
