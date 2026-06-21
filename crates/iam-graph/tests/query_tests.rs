@@ -80,9 +80,10 @@ async fn privilege_escalation_finds_iam_passrole() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, &account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx)
-        .await
-        .expect("escalation query must succeed");
+    let paths =
+        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
+            .await
+            .expect("escalation query must succeed");
 
     assert!(
         !paths.is_empty(),
@@ -93,6 +94,96 @@ async fn privilege_escalation_finds_iam_passrole() {
             .iter()
             .any(|p| p.risky_actions.contains(&"iam:PassRole".to_string())),
         "iam:PassRole must be in risky_actions"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_finds_deep_transitive_chain() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445556";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_assume_role_chain(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let chain_x = paths
+        .iter()
+        .find(|p| p.name == "ChainX")
+        .expect("ChainX must be reported as an escalation path via its assume-role chain");
+
+    assert!(
+        chain_x.risky_actions.contains(&"iam:PassRole".to_string()),
+        "risky action from the chain terminal (ChainC) must be attributed to ChainX"
+    );
+
+    let path_arns: Vec<&str> = chain_x.path.iter().map(|h| h.arn.as_str()).collect();
+    assert_eq!(
+        path_arns,
+        vec![
+            format!("arn:aws:iam::{}:role/ChainX", account_id),
+            format!("arn:aws:iam::{}:role/ChainA", account_id),
+            format!("arn:aws:iam::{}:role/ChainB", account_id),
+            format!("arn:aws:iam::{}:role/ChainC", account_id),
+        ],
+        "full 4-node chain X -> A -> B -> C must be reported in order"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_cyclic_assume_role_terminates_without_duplicates() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445557";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_assume_role_cycle(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 5)
+        .await
+        .expect("escalation query must terminate on a cyclic CAN_ASSUME_ROLE graph");
+
+    assert_eq!(
+        paths.iter().filter(|p| p.name == "CycleA").count(),
+        1,
+        "CycleA must be reported exactly once, not duplicated by the A->B->A cycle path"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| p.name == "CycleB").count(),
+        1,
+        "CycleB must be reported exactly once via the transitive B->A path"
+    );
+
+    let cycle_a = paths.iter().find(|p| p.name == "CycleA").unwrap();
+    assert_eq!(
+        cycle_a.path.len(),
+        1,
+        "CycleA's own direct risky permission must win over the longer A->B->A path"
+    );
+
+    let cycle_b = paths.iter().find(|p| p.name == "CycleB").unwrap();
+    assert_eq!(
+        cycle_b
+            .path
+            .iter()
+            .map(|h| h.arn.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            format!("arn:aws:iam::{}:role/CycleB", account_id),
+            format!("arn:aws:iam::{}:role/CycleA", account_id),
+        ],
+        "CycleB escalates by assuming CycleA"
     );
 }
 
@@ -328,9 +419,10 @@ async fn who_can_group_inherited_deny_overrides_own_allow() {
         "GroupDeniedUser must not appear — group-inherited Deny overrides the user's own Allow"
     );
 
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx)
-        .await
-        .expect("escalation query must succeed");
+    let paths =
+        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
+            .await
+            .expect("escalation query must succeed");
 
     assert!(
         !paths.iter().any(|p| p.name == "GroupDeniedUser"),

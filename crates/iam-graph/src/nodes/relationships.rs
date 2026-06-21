@@ -44,6 +44,13 @@ const CAN_ASSUME: &str = "
     MERGE (pr)-[:CAN_ASSUME {conditional: $conditional}]->(r)
 ";
 
+const CAN_ASSUME_ROLE: &str = "
+    MATCH (assumer {arn: $principal_id, snapshot_id: $snapshot_id})
+    WHERE assumer:Role OR assumer:User
+    MATCH (r:Role {uid: $role_uid})
+    MERGE (assumer)-[:CAN_ASSUME_ROLE {conditional: $conditional}]->(r)
+";
+
 const CONTAINS_ROLE: &str = "
     MATCH (ip:InstanceProfile {uid: $profile_uid})
     MATCH (r:Role {uid: $role_uid})
@@ -175,6 +182,26 @@ pub fn can_assume_query(
     query(CAN_ASSUME)
         .param("principal_id", principal_id)
         .param("principal_type", principal_kind)
+        .param("role_uid", entity_uid(snapshot_id, role_arn))
+        .param("conditional", conditional)
+}
+
+/// CAN_ASSUME_ROLE from an in-snapshot Role/User entity to the Role it can assume.
+///
+/// Direct entity-to-entity bridge over `CAN_ASSUME` (which targets an ARN-keyed
+/// `Principal` node, not the entity node itself), materialized only when the trust
+/// policy principal resolves to a Role or User ARN present in this snapshot. This is
+/// what makes `CAN_ASSUME_ROLE*1..N` variable-length traversal possible for
+/// transitive `sts:AssumeRole` privilege-escalation analysis.
+pub fn can_assume_role_query(
+    snapshot_id: &str,
+    principal_arn: &str,
+    role_arn: &str,
+    conditional: bool,
+) -> Query {
+    query(CAN_ASSUME_ROLE)
+        .param("principal_id", principal_arn)
+        .param("snapshot_id", snapshot_id)
         .param("role_uid", entity_uid(snapshot_id, role_arn))
         .param("conditional", conditional)
 }

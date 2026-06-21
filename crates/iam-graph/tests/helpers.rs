@@ -792,3 +792,133 @@ pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool)
         ..Default::default()
     }
 }
+
+/// Build a role with a trust policy that lets `assumer_arn` assume it.
+fn role_with_trust(
+    account_id: &str,
+    role_name: &str,
+    assumer_arn: &str,
+    inline_policies: Vec<iam_models::IamInlinePolicy>,
+) -> iam_models::IamRole {
+    use iam_models::{PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: iam_models::Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"AWS": assumer_arn})),
+            not_principal: None,
+            condition: None,
+        }],
+    };
+    iam_models::IamRole {
+        arn: format!("arn:aws:iam::{}:role/{}", account_id, role_name),
+        role_id: format!("AROA{}", role_name.to_uppercase()),
+        role_name: role_name.to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies,
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    }
+}
+
+/// Build a 4-hop `sts:AssumeRole` chain X -> A -> B -> C, where only the terminal role
+/// `C` holds a risky permission (`iam:PassRole`). Used to test deep transitive
+/// privilege-escalation traversal (M-A3).
+pub fn data_with_assume_role_chain(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let x_arn = format!("arn:aws:iam::{}:role/ChainX", account_id);
+    let a_arn = format!("arn:aws:iam::{}:role/ChainA", account_id);
+    let b_arn = format!("arn:aws:iam::{}:role/ChainB", account_id);
+
+    let role_x = role_with_trust(
+        account_id,
+        "ChainX",
+        "arn:aws:iam::000000000000:root",
+        vec![],
+    );
+    let role_a = role_with_trust(account_id, "ChainA", &x_arn, vec![]);
+    let role_b = role_with_trust(account_id, "ChainB", &a_arn, vec![]);
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role_c = role_with_trust(account_id, "ChainC", &b_arn, vec![risky_inline]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_x, role_a, role_b, role_c],
+        ..Default::default()
+    }
+}
+
+/// Build a 2-cycle `sts:AssumeRole` relationship: A can assume B and B can assume A.
+/// Only `CycleA` holds a risky permission (`iam:PassRole`), so the cycle exercises both
+/// the direct arm (CycleA escalates directly) and the transitive arm (CycleB escalates
+/// by assuming CycleA) over the same cyclic edge set — including a 2-hop path back to
+/// CycleA itself (A -> B -> A). Used to test that cyclic CAN_ASSUME_ROLE traversal
+/// terminates without hanging and reports each entity exactly once (M-A3).
+pub fn data_with_assume_role_cycle(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let a_arn = format!("arn:aws:iam::{}:role/CycleA", account_id);
+    let b_arn = format!("arn:aws:iam::{}:role/CycleB", account_id);
+
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let role_a = role_with_trust(account_id, "CycleA", &b_arn, vec![risky_inline]);
+    let role_b = role_with_trust(account_id, "CycleB", &a_arn, vec![]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_a, role_b],
+        ..Default::default()
+    }
+}

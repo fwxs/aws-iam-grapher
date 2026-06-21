@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     list_snapshots, privilege_escalation_paths, who_can, GraphClient, PermissionRow, QueryContext,
+    DEFAULT_MAX_HOPS,
 };
 
 #[derive(Args)]
@@ -50,8 +51,14 @@ enum QueryCommand {
     EntityPerms { arn: String },
     /// Instance profiles whose roles grant the given IAM action.
     InstanceProfilesWith { action: String },
-    /// Entities with privilege-escalation permissions.
-    PrivilegeEscalation,
+    /// Entities with privilege-escalation permissions, directly or via a transitive
+    /// sts:AssumeRole chain.
+    PrivilegeEscalation {
+        /// Max sts:AssumeRole hops to traverse when looking for transitive escalation
+        /// paths. Capped at 10 to bound traversal cost on dense CAN_ASSUME_ROLE graphs.
+        #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
+        max_hops: u32,
+    },
     /// List available snapshots for the account.
     ListSnapshots,
     /// Compare permissions between two snapshots.
@@ -257,8 +264,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     print!("{}", table::format_table(&["NAME", "ARN"], &rows));
                 }
 
-                QueryCommand::PrivilegeEscalation => {
-                    let paths = privilege_escalation_paths(client.inner(), &ctx)
+                QueryCommand::PrivilegeEscalation { max_hops } => {
+                    let max_hops = *max_hops;
+                    let paths = privilege_escalation_paths(client.inner(), &ctx, max_hops)
                         .await
                         .context("privilege-escalation query failed")?;
 
@@ -267,8 +275,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
 
                     println!(
-                        "Privilege escalation paths (snapshot: {})\n",
-                        short_id(&snapshot_id)
+                        "Privilege escalation paths (snapshot: {}, max-hops: {})\n",
+                        short_id(&snapshot_id),
+                        max_hops
                     );
 
                     if paths.is_empty() {
@@ -278,11 +287,19 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
                     let rows: Vec<Vec<String>> = paths
                         .iter()
-                        .map(|p| vec![p.arn.clone(), p.risky_actions.join(", ")])
+                        .map(|p| {
+                            let path_str = p
+                                .path
+                                .iter()
+                                .map(|h| h.arn.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" -> ");
+                            vec![p.arn.clone(), path_str, p.risky_actions.join(", ")]
+                        })
                         .collect();
                     print!(
                         "{}",
-                        table::format_table(&["ENTITY", "RISKY ACTIONS"], &rows)
+                        table::format_table(&["ENTITY", "PATH", "RISKY ACTIONS"], &rows)
                     );
                 }
 

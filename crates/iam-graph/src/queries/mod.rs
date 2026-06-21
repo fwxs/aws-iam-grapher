@@ -8,7 +8,9 @@ pub use analysis::{
     PermissionRow, RiskyInstanceProfile,
 };
 pub use context::QueryContext;
-pub use escalation::{privilege_escalation_paths, EscalationPath};
+pub use escalation::{
+    privilege_escalation_paths, EscalationPath, Hop, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+};
 pub use snapshots::{
     delete_snapshot, diff_permissions, list_snapshots, PermissionDiff, PermissionRecord,
     SnapshotRecord,

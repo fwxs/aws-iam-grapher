@@ -18,6 +18,8 @@ const INDEXES: &[&str] = &[
     "CREATE INDEX policy_account IF NOT EXISTS FOR (p:Policy) ON (p.account_id)",
     "CREATE INDEX role_account IF NOT EXISTS FOR (r:Role) ON (r.account_id)",
     "CREATE INDEX user_account IF NOT EXISTS FOR (u:User) ON (u.account_id)",
+    "CREATE INDEX role_arn IF NOT EXISTS FOR (r:Role) ON (r.arn)",
+    "CREATE INDEX user_arn IF NOT EXISTS FOR (u:User) ON (u.arn)",
     "CREATE INDEX permission_action IF NOT EXISTS FOR (perm:Permission) ON (perm.action)",
     "CREATE INDEX permission_snapshot IF NOT EXISTS FOR (perm:Permission) ON (perm.snapshot_id)",
     "CREATE INDEX role_aws_managed IF NOT EXISTS FOR (r:Role) ON (r.is_aws_managed)",
