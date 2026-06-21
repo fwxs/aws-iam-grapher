@@ -483,6 +483,59 @@ pub fn data_with_full_admin_role(account_id: &str) -> CollectedData {
     }
 }
 
+/// Build CollectedData with a role holding `Action: "*"` scoped to a single `resource` (e.g. a
+/// specific bucket ARN), rather than the unrestricted `"*"` resource used by
+/// `data_with_full_admin_role`. Used to test `who_can`'s `--resource` intersection (M-A2).
+pub fn data_with_resource_scoped_full_admin_role(
+    account_id: &str,
+    resource: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/ScopedAdminRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "ScopedAdminPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["*".to_string()],
+                not_action: vec![],
+                resource: vec![resource.to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_SCOPED_ADMIN".to_string(),
+        role_name: "ScopedAdminRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData carrying a InstanceProfilesMissing warning.
 pub fn data_with_missing_profiles_warning(account_id: &str) -> CollectedData {
     use iam_collector::CollectorWarning;
@@ -621,9 +674,7 @@ pub fn data_with_allow_and_wildcard_deny(
 /// (that the user is a member of) Denying the same action via the group's inline policy.
 /// Used to verify group-inherited Deny suppresses a user's own Allow.
 pub fn data_with_user_allow_and_group_deny(account_id: &str, action: &str) -> CollectedData {
-    use iam_models::{
-        Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement,
-    };
+    use iam_models::{Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement};
     use std::collections::HashMap;
 
     let user_arn = format!("arn:aws:iam::{}:user/GroupDeniedUser", account_id);

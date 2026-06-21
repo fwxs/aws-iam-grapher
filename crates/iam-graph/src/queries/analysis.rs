@@ -11,6 +11,8 @@ pub struct EntityRef {
     /// True when the entity holds an unqualified `Action: "*"` Allow — i.e. full-admin access.
     /// Such entities match *every* specific-action query even without an explicit permission node.
     pub is_full_admin: bool,
+    /// The `Resource` of the grant that matched this entity.
+    pub resource: String,
 }
 
 /// A single permission row with named fields.
@@ -60,10 +62,18 @@ async fn candidate_deny_actions(
 }
 
 /// Return all entities that have permission to perform `action` in this snapshot.
+///
+/// `resource`, when supplied, intersects the queried resource against the `Resource` of
+/// wildcard (`Action: "*"` full-admin / NotAction allow-all-except) grants using IAM
+/// resource-glob semantics (`iam_expander::glob_match`), excluding wildcard grants whose
+/// resource scope doesn't cover the queried resource. Exact-action grants (arms 1/2) are
+/// never filtered by `resource` — their `resource` is only surfaced in the output. See
+/// limitations.md.
 pub async fn who_can(
     graph: &Graph,
     ctx: &QueryContext,
     action: &str,
+    resource: Option<&str>,
 ) -> Result<Vec<EntityRef>, GraphError> {
     let candidates = candidate_deny_actions(graph, ctx).await?;
     let deny_actions: Vec<String> = candidates
@@ -95,11 +105,29 @@ pub async fn who_can(
         let is_full_admin: bool = row
             .get("is_full_admin")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let perm_resource: String = row
+            .get("resource")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let grant_kind: String = row
+            .get("grant_kind")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+
+        // Only wildcard (action='*') grants are resource-scoped intersection candidates;
+        // exact-action grants always pass through.
+        if let Some(queried_resource) = resource {
+            if grant_kind == "wildcard"
+                && !iam_expander::glob_match(&perm_resource, queried_resource)
+            {
+                continue;
+            }
+        }
+
         raw.push(EntityRef {
             arn,
             name,
             entity_type,
             is_full_admin,
+            resource: perm_resource,
         });
     }
 
@@ -230,6 +258,7 @@ async fn collect_instance_profile_refs(
             name,
             entity_type: "InstanceProfile".to_string(),
             is_full_admin: false,
+            resource: String::new(),
         });
     }
     Ok(results)
