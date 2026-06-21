@@ -168,12 +168,24 @@ aws-iam-grapher query \
 ```
 Entities with permission s3:DeleteObject (snapshot: a3f2c1d0)
 
-TYPE   ARN
-────── ──────────────────────────────────────────────────────
-Role   arn:aws:iam::123456789012:role/DataEngineer
-Role   arn:aws:iam::123456789012:role/S3AdminRole
-User   arn:aws:iam::123456789012:user/alice
+TYPE   ARN                                              RESOURCE
+────── ──────────────────────────────────────────────── ─────────
+Role   arn:aws:iam::123456789012:role/DataEngineer       *
+Role   arn:aws:iam::123456789012:role/S3AdminRole        *
+User   arn:aws:iam::123456789012:user/alice              *
 ```
+
+Add `--resource <arn>` to intersect `Action: "*"` (full-admin) grants against a specific
+resource, excluding grants whose resource scope doesn't cover it:
+
+```bash
+aws-iam-grapher query \
+    --account-id 123456789012 \
+    who-can s3:DeleteObject --resource arn:aws:s3:::my-bucket/object.txt
+```
+
+A principal with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` is excluded here since
+the grant is bucket-scoped, not object-scoped. See [`docs/limitations.md`](docs/limitations.md).
 
 ### All permissions for an entity
 

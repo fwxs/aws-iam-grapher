@@ -39,7 +39,13 @@ pub struct QueryArgs {
 #[derive(Subcommand)]
 enum QueryCommand {
     /// Entities that can perform the given IAM action.
-    WhoCan { action: String },
+    WhoCan {
+        action: String,
+        /// Intersect wildcard (Action: "*") grants against this resource ARN, excluding
+        /// grants whose resource scope doesn't cover it.
+        #[arg(long)]
+        resource: Option<String>,
+    },
     /// All permissions for a specific entity ARN.
     EntityPerms { arn: String },
     /// Instance profiles whose roles grant the given IAM action.
@@ -158,8 +164,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             }
 
             match cmd {
-                QueryCommand::WhoCan { action } => {
-                    let results = who_can(client.inner(), &ctx, action)
+                QueryCommand::WhoCan { action, resource } => {
+                    let results = who_can(client.inner(), &ctx, action, resource.as_deref())
                         .await
                         .context("who-can query failed")?;
 
@@ -186,10 +192,13 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                             } else {
                                 e.entity_type.clone()
                             };
-                            vec![type_label, e.arn.clone()]
+                            vec![type_label, e.arn.clone(), e.resource.clone()]
                         })
                         .collect();
-                    print!("{}", table::format_table(&["TYPE", "ARN"], &rows));
+                    print!(
+                        "{}",
+                        table::format_table(&["TYPE", "ARN", "RESOURCE"], &rows)
+                    );
                 }
 
                 QueryCommand::EntityPerms { arn } => {
