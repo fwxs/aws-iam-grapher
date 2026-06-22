@@ -28,6 +28,9 @@ pub struct EscalationPath {
     /// Ordered chain from `arn` to the entity that holds `risky_actions`.
     /// A single-element path means the entity holds the risky permissions directly.
     pub path: Vec<Hop>,
+    /// `true` if any `CAN_ASSUME_ROLE` hop on `path` carries an unevaluated
+    /// runtime trust condition — the path may not hold at runtime.
+    pub conditional: bool,
 }
 
 const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
@@ -59,6 +62,7 @@ pub async fn privilege_escalation_paths(
         allowed_actions: Vec<String>,
         deny_actions: Vec<String>,
         path: Vec<Hop>,
+        conditional: bool,
     }
 
     // Dedupe by arn across the direct and transitive UNION arms, keeping the shortest
@@ -84,6 +88,9 @@ pub async fn privilege_escalation_paths(
         let path: Vec<Hop> = row
             .get("path")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let conditional: bool = row
+            .get("conditional")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
 
         match by_arn.get(&arn) {
             Some(existing) if existing.path.len() <= path.len() => {}
@@ -96,6 +103,7 @@ pub async fn privilege_escalation_paths(
                         allowed_actions,
                         deny_actions,
                         path,
+                        conditional,
                     },
                 );
             }
@@ -128,6 +136,7 @@ pub async fn privilege_escalation_paths(
             entity_type: candidate.entity_type,
             risky_actions,
             path: candidate.path,
+            conditional: candidate.conditional,
         });
     }
     Ok(results)

@@ -170,8 +170,12 @@ pub fn inline_grants_excluded_query(
 ///
 /// `principal_kind` should come from the trust policy block key (`AWS`, `Service`,
 /// `Federated`, `CanonicalUser`) rather than being re-inferred from the id string.
-/// `conditional` is `true` when the trust policy statement carries a `Condition` or
-/// `NotPrincipal` block — the edge is asserted but may not always hold at runtime.
+/// `conditional` is `true` when the edge's validity depends on a runtime value the
+/// ingester can't evaluate from collected data (e.g. `sts:ExternalId`, MFA, or an
+/// unresolved `NotPrincipal` exclusion) — see `ingester::classify_trust_condition`.
+/// Deterministic conditions (e.g. a `PrincipalAccount` check consistent with the
+/// listed principal) are folded into `false`; contradictory ones suppress the edge
+/// entirely before this function is even called.
 pub fn can_assume_query(
     snapshot_id: &str,
     principal_kind: &str,

@@ -4,8 +4,9 @@ use crate::nodes::{
     account, group, instance_profile, permission, policy, relationships, role, uid, user,
 };
 use iam_collector::CollectedData;
-use iam_models::{Effect, IamInlinePolicy, PolicyStatement};
+use iam_models::{Condition, Effect, IamInlinePolicy, PolicyStatement};
 use neo4rs::Query;
+use std::collections::HashSet;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -321,9 +322,33 @@ impl GraphIngester {
             // Trust policy principals
             if let Some(doc) = &r.assume_role_policy_document {
                 for stmt in &doc.statement {
-                    let conditional = stmt.condition.is_some() || stmt.not_principal.is_some();
-                    if let Some(principal) = &stmt.principal {
-                        for (kind, id) in extract_principal_ids(principal) {
+                    // Deny trust statements aren't evaluated (matches prior behavior —
+                    // only Allow statements ever produced CAN_ASSUME edges).
+                    if !matches!(stmt.effect, Effect::Allow) {
+                        continue;
+                    }
+
+                    let principal_ids = stmt
+                        .principal
+                        .as_ref()
+                        .map(extract_principal_ids)
+                        .unwrap_or_default();
+                    let principal_account = single_principal_account(&principal_ids);
+
+                    let verdict = match &stmt.condition {
+                        Some(cond) => classify_trust_condition(cond, principal_account),
+                        None => TrustVerdict::AlwaysTrue,
+                    };
+                    // A condition that can never hold (e.g. a PrincipalAccount check
+                    // that contradicts the listed principal's own account) means the
+                    // statement never grants assumption — emit no edge at all.
+                    if matches!(verdict, TrustVerdict::AlwaysFalse) {
+                        continue;
+                    }
+                    let conditional = matches!(verdict, TrustVerdict::Runtime);
+
+                    if !principal_ids.is_empty() {
+                        for (kind, id) in principal_ids {
                             phase6.push(relationships::can_assume_query(
                                 snap_id,
                                 &kind,
@@ -345,6 +370,18 @@ impl GraphIngester {
                                 rel_count += 1;
                             }
                         }
+                    } else if stmt.not_principal.is_some() {
+                        // `Allow NotPrincipal: [...]` allows every principal except the
+                        // listed ones. We don't resolve the exclusion to concrete
+                        // entities, so we represent "anyone but the excluded set" as a
+                        // single Wildcard-kind edge rather than creating an edge from
+                        // any of the excluded entities (which would be the over-assertion
+                        // this issue exists to fix). The Wildcard kind never extends a
+                        // CAN_ASSUME_ROLE chain, so it can't widen the escalation graph.
+                        phase6.push(relationships::can_assume_query(
+                            snap_id, "Wildcard", "*", &r.arn, true,
+                        ));
+                        rel_count += 1;
                     }
                 }
             }
@@ -641,6 +678,79 @@ fn push_inline_statement_grants(
     }
 }
 
+/// Outcome of evaluating a trust-policy `Condition` block against the resolved
+/// account of the statement's principal, where that's known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustVerdict {
+    /// The condition cannot fail given the principal — evaluate as unconditional.
+    AlwaysTrue,
+    /// The condition can never hold given the principal — the statement never
+    /// actually grants assumption.
+    AlwaysFalse,
+    /// Depends on runtime values (e.g. `sts:ExternalId`, MFA) we can't evaluate
+    /// from collected data — keep `conditional = true`.
+    Runtime,
+}
+
+/// Evaluate the small set of deterministic trust-policy conditions we understand.
+///
+/// Only `StringEquals`/`StringEqualsIgnoreCase` on `aws:PrincipalAccount` against a
+/// principal whose account is statically known (a concrete in-account or
+/// cross-account ARN, not a Service/Federated/Wildcard principal) is deterministic:
+/// the condition is consistent or contradictory with the principal's own account
+/// regardless of any runtime value. Everything else (multiple/unknown operators,
+/// other condition keys, or an unresolvable principal account) stays `Runtime`.
+fn classify_trust_condition(
+    condition: &Condition,
+    principal_account: Option<&str>,
+) -> TrustVerdict {
+    if condition.is_empty() {
+        return TrustVerdict::AlwaysTrue;
+    }
+    for (operator, keys) in condition {
+        let op = operator.to_lowercase();
+        if op != "stringequals" && op != "stringequalsignorecase" {
+            return TrustVerdict::Runtime;
+        }
+        for (key, values) in keys {
+            if key.to_lowercase() != "aws:principalaccount" {
+                return TrustVerdict::Runtime;
+            }
+            let Some(account) = principal_account else {
+                return TrustVerdict::Runtime;
+            };
+            if !values.0.iter().any(|v| v == account) {
+                return TrustVerdict::AlwaysFalse;
+            }
+        }
+    }
+    TrustVerdict::AlwaysTrue
+}
+
+/// Account segment of an ARN (`arn:aws:iam::ACCOUNT:...`), or `None` if absent/empty.
+fn arn_account(arn: &str) -> Option<&str> {
+    match arn.split(':').nth(4) {
+        Some(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+/// The single account shared by every in-account principal id in the list, or
+/// `None` if the accounts are unknown or not all identical (ambiguous).
+fn single_principal_account(principal_ids: &[(String, String)]) -> Option<&str> {
+    let mut accounts: HashSet<&str> = HashSet::new();
+    for (kind, id) in principal_ids {
+        if kind == "IamEntity" || kind == "AssumedRole" {
+            accounts.insert(arn_account(id)?);
+        }
+    }
+    if accounts.len() == 1 {
+        accounts.into_iter().next()
+    } else {
+        None
+    }
+}
+
 /// Extract `(kind, id)` pairs from a trust-policy principal block.
 ///
 /// Reads the block key (`AWS`, `Service`, `Federated`, `CanonicalUser`) to set
@@ -779,5 +889,130 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|(kind, _)| kind == "IamEntity"));
+    }
+
+    #[test]
+    fn arn_account_extracts_account_segment() {
+        assert_eq!(
+            arn_account("arn:aws:iam::123456789012:role/X"),
+            Some("123456789012")
+        );
+    }
+
+    #[test]
+    fn arn_account_returns_none_for_non_arn() {
+        assert_eq!(arn_account("not-an-arn"), None);
+        assert_eq!(arn_account("ec2.amazonaws.com"), None);
+    }
+
+    #[test]
+    fn single_principal_account_returns_account_for_uniform_iam_entities() {
+        let ids = vec![
+            ("IamEntity".to_string(), "arn:aws:iam::111:root".to_string()),
+            (
+                "IamEntity".to_string(),
+                "arn:aws:iam::111:role/X".to_string(),
+            ),
+        ];
+        assert_eq!(single_principal_account(&ids), Some("111"));
+    }
+
+    #[test]
+    fn single_principal_account_returns_none_for_mixed_accounts() {
+        let ids = vec![
+            ("IamEntity".to_string(), "arn:aws:iam::111:root".to_string()),
+            ("IamEntity".to_string(), "arn:aws:iam::222:root".to_string()),
+        ];
+        assert_eq!(single_principal_account(&ids), None);
+    }
+
+    #[test]
+    fn single_principal_account_returns_none_for_service_principal() {
+        let ids = vec![("Service".to_string(), "ec2.amazonaws.com".to_string())];
+        assert_eq!(single_principal_account(&ids), None);
+    }
+
+    #[test]
+    fn classify_trust_condition_empty_is_always_true() {
+        let condition: Condition = std::collections::HashMap::new();
+        assert_eq!(
+            classify_trust_condition(&condition, Some("111")),
+            TrustVerdict::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn classify_trust_condition_matching_principal_account_is_always_true() {
+        let condition: Condition = std::collections::HashMap::from([(
+            "StringEquals".to_string(),
+            std::collections::HashMap::from([(
+                "aws:PrincipalAccount".to_string(),
+                iam_models::ConditionValues(vec!["111".to_string()]),
+            )]),
+        )]);
+        assert_eq!(
+            classify_trust_condition(&condition, Some("111")),
+            TrustVerdict::AlwaysTrue
+        );
+    }
+
+    #[test]
+    fn classify_trust_condition_mismatched_principal_account_is_always_false() {
+        let condition: Condition = std::collections::HashMap::from([(
+            "StringEquals".to_string(),
+            std::collections::HashMap::from([(
+                "aws:PrincipalAccount".to_string(),
+                iam_models::ConditionValues(vec!["222".to_string()]),
+            )]),
+        )]);
+        assert_eq!(
+            classify_trust_condition(&condition, Some("111")),
+            TrustVerdict::AlwaysFalse
+        );
+    }
+
+    #[test]
+    fn classify_trust_condition_unresolvable_principal_is_runtime() {
+        let condition: Condition = std::collections::HashMap::from([(
+            "StringEquals".to_string(),
+            std::collections::HashMap::from([(
+                "aws:PrincipalAccount".to_string(),
+                iam_models::ConditionValues(vec!["111".to_string()]),
+            )]),
+        )]);
+        assert_eq!(
+            classify_trust_condition(&condition, None),
+            TrustVerdict::Runtime
+        );
+    }
+
+    #[test]
+    fn classify_trust_condition_external_id_is_runtime() {
+        let condition: Condition = std::collections::HashMap::from([(
+            "StringEquals".to_string(),
+            std::collections::HashMap::from([(
+                "sts:ExternalId".to_string(),
+                iam_models::ConditionValues(vec!["secret".to_string()]),
+            )]),
+        )]);
+        assert_eq!(
+            classify_trust_condition(&condition, Some("111")),
+            TrustVerdict::Runtime
+        );
+    }
+
+    #[test]
+    fn classify_trust_condition_unknown_operator_is_runtime() {
+        let condition: Condition = std::collections::HashMap::from([(
+            "DateGreaterThan".to_string(),
+            std::collections::HashMap::from([(
+                "aws:CurrentTime".to_string(),
+                iam_models::ConditionValues(vec!["2024-01-01T00:00:00Z".to_string()]),
+            )]),
+        )]);
+        assert_eq!(
+            classify_trust_condition(&condition, Some("111")),
+            TrustVerdict::Runtime
+        );
     }
 }

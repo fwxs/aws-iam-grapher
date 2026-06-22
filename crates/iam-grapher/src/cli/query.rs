@@ -294,12 +294,20 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                                 .map(|h| h.arn.as_str())
                                 .collect::<Vec<_>>()
                                 .join(" -> ");
-                            vec![p.arn.clone(), path_str, p.risky_actions.join(", ")]
+                            vec![
+                                p.arn.clone(),
+                                path_str,
+                                p.risky_actions.join(", "),
+                                if p.conditional { "yes" } else { "no" }.to_string(),
+                            ]
                         })
                         .collect();
                     print!(
                         "{}",
-                        table::format_table(&["ENTITY", "PATH", "RISKY ACTIONS"], &rows)
+                        table::format_table(
+                            &["ENTITY", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+                            &rows
+                        )
                     );
                 }
 
