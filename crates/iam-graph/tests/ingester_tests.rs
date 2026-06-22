@@ -452,3 +452,135 @@ async fn ingest_trust_policy_with_condition_marks_can_assume_conditional() {
         "CAN_ASSUME edge must be marked conditional when trust policy has Condition block"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_trust_policy_with_not_principal_excludes_listed_entity() {
+    use chrono::Utc;
+    use iam_collector::{CollectedData, CollectorMode};
+    use std::collections::HashMap;
+
+    let client = helpers::shared_client().await;
+    let config = helpers::test_config("444455556677");
+    let snap_id = config.snapshot_id.clone();
+
+    let excluded_arn = "arn:aws:iam::444455556677:role/ExcludedRole";
+    let role_arn = "arn:aws:iam::444455556677:role/NotPrincipalRole";
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: None,
+            not_principal: Some(serde_json::json!({"AWS": excluded_arn})),
+            condition: None,
+        }],
+    };
+    let excluded_role = IamRole {
+        arn: excluded_arn.to_string(),
+        role_id: "AROATEST_EXCLUDED".to_string(),
+        role_name: "ExcludedRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    let role = IamRole {
+        arn: role_arn.to_string(),
+        role_id: "AROATEST_NOTPRINCIPAL".to_string(),
+        role_name: "NotPrincipalRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies: vec![],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some("444455556677".to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![excluded_role, role],
+        ..Default::default()
+    };
+
+    let ingester = GraphIngester::new(client, config);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    // No CAN_ASSUME edge from the excluded entity's ARN.
+    let excluded_rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (pr:Principal {id: $excluded_arn})-[:CAN_ASSUME]->(r:Role {uid: $uid})
+                 RETURN pr.id AS id",
+            )
+            .param("excluded_arn", excluded_arn)
+            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+        )
+        .await
+        .expect("CAN_ASSUME query must succeed");
+    assert!(
+        excluded_rows.is_empty(),
+        "NotPrincipal-excluded entity must not get a CAN_ASSUME edge"
+    );
+
+    // No CAN_ASSUME_ROLE bridge from the excluded entity either.
+    let bridge_rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (excluded:Role {arn: $excluded_arn})-[:CAN_ASSUME_ROLE]->(r:Role {uid: $uid})
+                 RETURN excluded.arn AS arn",
+            )
+            .param("excluded_arn", excluded_arn)
+            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+        )
+        .await
+        .expect("CAN_ASSUME_ROLE query must succeed");
+    assert!(
+        bridge_rows.is_empty(),
+        "NotPrincipal-excluded entity must not get a CAN_ASSUME_ROLE bridge"
+    );
+
+    // A Wildcard-kind CAN_ASSUME edge still represents "anyone but the excluded set".
+    let wildcard_rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (pr:Principal {type: 'Wildcard'})-[ca:CAN_ASSUME]->(r:Role {uid: $uid})
+                 RETURN ca.conditional AS conditional",
+            )
+            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+        )
+        .await
+        .expect("Wildcard CAN_ASSUME query must succeed");
+    assert!(
+        !wildcard_rows.is_empty(),
+        "a Wildcard-kind CAN_ASSUME edge must represent the NotPrincipal exclusion"
+    );
+    let conditional: bool = wildcard_rows[0]
+        .get("conditional")
+        .expect("conditional property must be present");
+    assert!(
+        conditional,
+        "NotPrincipal-derived edge must stay conditional since the exclusion isn't fully resolved"
+    );
+}

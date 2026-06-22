@@ -12,6 +12,9 @@
 //   is applied in Rust via iam_expander::glob_match against deny_actions, since Cypher has
 //   no glob matching. Deny-NotAction sentinel nodes (action='*' with excluded_actions) are
 //   excluded from deny_actions and not evaluated — see limitations.md.
+//   `conditional` is true when any CAN_ASSUME_ROLE hop on the path carries
+//   `conditional = true` (a runtime-evaluated or unresolved trust condition) — it
+//   flags the path as uncertain rather than asserting the chain unconditionally.
 // param $account_id: account scope for tenant isolation
 // param $snapshot_id: snapshot scope
 
@@ -41,7 +44,8 @@ WHERE gdeny.excluded_actions IS NULL
 WITH e, allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
-       [{arn: e.arn, entity_type: labels(e)[0]}] AS path
+       [{arn: e.arn, entity_type: labels(e)[0]}] AS path,
+       false AS conditional
 
 UNION
 
@@ -77,4 +81,5 @@ WHERE gdeny.excluded_actions IS NULL
 WITH start, p, allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
 RETURN start.arn AS arn, start.name AS name, labels(start)[0] AS entity_type,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
-       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0]}] AS path
+       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0]}] AS path,
+       any(rel IN relationships(p) WHERE rel.conditional) AS conditional

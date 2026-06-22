@@ -835,6 +835,100 @@ fn role_with_trust(
     }
 }
 
+/// Build a role with a trust policy that lets `assumer_arn` assume it, gated by a
+/// runtime trust `Condition` (e.g. `sts:ExternalId`) that can't be evaluated from
+/// collected data — the resulting `CAN_ASSUME`/`CAN_ASSUME_ROLE` edges must stay
+/// `conditional = true` (M-A4).
+fn role_with_runtime_condition(
+    account_id: &str,
+    role_name: &str,
+    assumer_arn: &str,
+    inline_policies: Vec<iam_models::IamInlinePolicy>,
+) -> iam_models::IamRole {
+    use iam_models::{ConditionValues, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: iam_models::Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"AWS": assumer_arn})),
+            not_principal: None,
+            condition: Some(HashMap::from([(
+                "StringEquals".to_string(),
+                HashMap::from([(
+                    "sts:ExternalId".to_string(),
+                    ConditionValues(vec!["secret".to_string()]),
+                )]),
+            )])),
+        }],
+    };
+    iam_models::IamRole {
+        arn: format!("arn:aws:iam::{}:role/{}", account_id, role_name),
+        role_id: format!("AROA{}", role_name.to_uppercase()),
+        role_name: role_name.to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies,
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    }
+}
+
+/// Build a 2-hop `sts:AssumeRole` chain X -> C, where the trust policy on `C` gates
+/// assumption with a runtime `sts:ExternalId` condition (unevaluated) and `C` holds a
+/// risky permission (`iam:PassRole`). Used to verify `privilege_escalation_paths`
+/// flags the path `conditional = true` rather than asserting it unconditionally (M-A4).
+pub fn data_with_conditional_assume_role(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let x_arn = format!("arn:aws:iam::{}:role/CondChainX", account_id);
+
+    let role_x = role_with_trust(
+        account_id,
+        "CondChainX",
+        "arn:aws:iam::000000000000:root",
+        vec![],
+    );
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role_c = role_with_runtime_condition(account_id, "CondChainC", &x_arn, vec![risky_inline]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_x, role_c],
+        ..Default::default()
+    }
+}
+
 /// Build a 4-hop `sts:AssumeRole` chain X -> A -> B -> C, where only the terminal role
 /// `C` holds a risky permission (`iam:PassRole`). Used to test deep transitive
 /// privilege-escalation traversal (M-A3).

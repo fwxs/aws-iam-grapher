@@ -189,6 +189,38 @@ async fn privilege_escalation_cyclic_assume_role_terminates_without_duplicates()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
+async fn privilege_escalation_flags_path_gated_by_runtime_trust_condition() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445558";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_conditional_assume_role(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let chain_x = paths
+        .iter()
+        .find(|p| p.name == "CondChainX")
+        .expect("CondChainX must be reported via its conditional assume-role chain");
+
+    assert!(
+        chain_x.risky_actions.contains(&"iam:PassRole".to_string()),
+        "risky action from the chain terminal must be attributed to CondChainX"
+    );
+    assert!(
+        chain_x.conditional,
+        "path gated by an unevaluated runtime trust condition must be flagged conditional"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
 async fn diff_permissions_detects_new_permissions() {
     use iam_graph::diff_permissions;
 
