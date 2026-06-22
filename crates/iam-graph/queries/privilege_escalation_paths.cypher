@@ -10,8 +10,9 @@
 //   terminal entity — own policies plus every group the terminal is MEMBER_OF. Per-action,
 //   wildcard-aware Deny suppression (e.g. a Deny on `iam:Put*` covering `iam:PutRolePolicy`)
 //   is applied in Rust via iam_expander::glob_match against deny_actions, since Cypher has
-//   no glob matching. Deny-NotAction sentinel nodes (action='*' with excluded_actions) are
-//   excluded from deny_actions and not evaluated — see limitations.md.
+//   no glob matching. Deny-all-except (Deny NotAction) sentinel nodes (action='*' with
+//   excluded_actions) are evaluated here instead, since the rule is plain set membership: a
+//   risky action is suppressed if it is NOT in the deny-all-except node's excluded_actions.
 //   `conditional` is true when any CAN_ASSUME_ROLE hop on the path carries
 //   `conditional = true` (a runtime-evaluated or unresolved trust condition) — it
 //   flags the path as uncertain rather than asserting the chain unconditionally.
@@ -32,16 +33,31 @@ WHERE perm.action IN [
     'iam:CreateAccessKey',
     'iam:CreateLoginProfile'
 ]
-WITH e, collect(DISTINCT perm.action) AS allowed_actions
+WITH e, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
 WHERE deny.excluded_actions IS NULL
-WITH e, allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
+WITH e, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (e)-[:MEMBER_OF]->(:Group)
                -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
                -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
 WHERE gdeny.excluded_actions IS NULL
-WITH e, allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
+WITH e, direct_allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
+OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
+               -[:GRANTS]->(deny_not:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
+WHERE deny_not.action = '*' AND deny_not.excluded_actions IS NOT NULL
+WITH e, direct_allowed_actions, own_deny_actions, group_deny_actions,
+     collect(DISTINCT deny_not.excluded_actions) AS own_deny_not_lists
+OPTIONAL MATCH (e)-[:MEMBER_OF]->(:Group)
+               -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
+               -[:GRANTS]->(gdeny_not:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
+WHERE gdeny_not.action = '*' AND gdeny_not.excluded_actions IS NOT NULL
+WITH e, direct_allowed_actions, own_deny_actions, group_deny_actions,
+     own_deny_not_lists + collect(DISTINCT gdeny_not.excluded_actions) AS deny_not_lists
+WITH e,
+     [a IN direct_allowed_actions
+        WHERE NOT any(excluded IN deny_not_lists WHERE NOT a IN excluded)] AS allowed_actions,
+     own_deny_actions, group_deny_actions
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
        [{arn: e.arn, entity_type: labels(e)[0]}] AS path,
@@ -69,16 +85,32 @@ WHERE perm.action IN [
     'iam:CreateAccessKey',
     'iam:CreateLoginProfile'
 ]
-WITH start, p, terminal, collect(DISTINCT perm.action) AS allowed_actions
+WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
 WHERE deny.excluded_actions IS NULL
-WITH start, p, terminal, allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
+WITH start, p, terminal, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (terminal)-[:MEMBER_OF]->(:Group)
                -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
                -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
 WHERE gdeny.excluded_actions IS NULL
-WITH start, p, allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
+WITH start, p, terminal, direct_allowed_actions, own_deny_actions,
+     collect(DISTINCT gdeny.action) AS group_deny_actions
+OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
+               -[:GRANTS]->(deny_not:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
+WHERE deny_not.action = '*' AND deny_not.excluded_actions IS NOT NULL
+WITH start, p, terminal, direct_allowed_actions, own_deny_actions, group_deny_actions,
+     collect(DISTINCT deny_not.excluded_actions) AS own_deny_not_lists
+OPTIONAL MATCH (terminal)-[:MEMBER_OF]->(:Group)
+               -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
+               -[:GRANTS]->(gdeny_not:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
+WHERE gdeny_not.action = '*' AND gdeny_not.excluded_actions IS NOT NULL
+WITH start, p, direct_allowed_actions, own_deny_actions, group_deny_actions,
+     own_deny_not_lists + collect(DISTINCT gdeny_not.excluded_actions) AS deny_not_lists
+WITH start, p,
+     [a IN direct_allowed_actions
+        WHERE NOT any(excluded IN deny_not_lists WHERE NOT a IN excluded)] AS allowed_actions,
+     own_deny_actions, group_deny_actions
 RETURN start.arn AS arn, start.name AS name, labels(start)[0] AS entity_type,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
        [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0]}] AS path,

@@ -613,6 +613,145 @@ pub fn data_with_allow_not_action(account_id: &str, excluded_action: &str) -> Co
     }
 }
 
+/// Build CollectedData with a role whose inline policy has `Allow Action: "*"` (full-admin)
+/// AND `Deny NotAction: [excluded_action]` (deny-all-except). The Deny should suppress every
+/// action except `excluded_action`, despite the full-admin Allow.
+///
+/// The role ARN is `arn:aws:iam::<account_id>:role/DenyNotActionRole`.
+pub fn data_with_full_admin_allow_and_deny_not_action(
+    account_id: &str,
+    excluded_action: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/DenyNotActionRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "DenyNotActionPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Allow,
+                    action: vec!["*".to_string()],
+                    not_action: vec![],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Deny,
+                    action: vec![],
+                    not_action: vec![excluded_action.to_string()],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_DENY_NOTACTION".to_string(),
+        role_name: "DenyNotActionRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a role whose inline policy has `Allow iam:PassRole` AND
+/// `Deny NotAction: [excluded_action]` (deny-all-except). Used to verify
+/// `privilege_escalation_paths` suppresses a risky action covered by a deny-all-except node.
+///
+/// The role ARN is `arn:aws:iam::<account_id>:role/EscalationDenyNotActionRole`.
+pub fn data_with_pass_role_and_deny_not_action(
+    account_id: &str,
+    excluded_action: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!(
+        "arn:aws:iam::{}:role/EscalationDenyNotActionRole",
+        account_id
+    );
+    let inline = IamInlinePolicy {
+        policy_name: "EscalationDenyNotActionPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Allow,
+                    action: vec!["iam:PassRole".to_string()],
+                    not_action: vec![],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Deny,
+                    action: vec![],
+                    not_action: vec![excluded_action.to_string()],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_ESCALATION_DENY_NOTACTION".to_string(),
+        role_name: "EscalationDenyNotActionRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData with a role that has `Allow $action` AND `Deny $deny_action_pattern`
 /// (e.g. `s3:Delete*`) in an inline policy. Used to verify wildcard Deny suppresses Allow.
 pub fn data_with_allow_and_wildcard_deny(

@@ -506,3 +506,70 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
         excluded_action
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_deny_not_action_denies_all_except_excluded() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000009";
+    // Deny NotAction excludes s3:GetObject — every other action must be denied
+    // despite the full-admin Allow *.
+    let excluded_action = "s3:GetObject";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_full_admin_allow_and_deny_not_action(account_id, excluded_action);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+
+    // Act — a non-excluded action must be denied (Deny NotAction covers everything but
+    // s3:GetObject), even though the entity also holds Allow *.
+    let denied = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
+        .await
+        .expect("who_can must succeed");
+    assert!(
+        !denied.iter().any(|e| e.name == "DenyNotActionRole"),
+        "DenyNotActionRole must NOT appear in who_can for s3:DeleteObject — \
+         Deny NotAction:[\"s3:GetObject\"] denies every action except s3:GetObject"
+    );
+
+    // Act — the excluded action itself must remain allowed.
+    let allowed = who_can(ingester.client().inner(), &ctx, excluded_action, None)
+        .await
+        .expect("who_can must succeed");
+    assert!(
+        allowed.iter().any(|e| e.name == "DenyNotActionRole"),
+        "DenyNotActionRole must appear in who_can for {} — excluded from the deny-all-except Deny",
+        excluded_action
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_paths_suppresses_action_covered_by_deny_not_action() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000010";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    // Deny NotAction excludes s3:GetObject, so iam:PassRole (not excluded) must be suppressed.
+    let data = helpers::data_with_pass_role_and_deny_not_action(account_id, "s3:GetObject");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths =
+        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
+            .await
+            .expect("escalation query must succeed");
+
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.name == "EscalationDenyNotActionRole"),
+        "EscalationDenyNotActionRole must NOT appear — Deny NotAction:[\"s3:GetObject\"] \
+         denies iam:PassRole (not in the excluded set)"
+    );
+}
