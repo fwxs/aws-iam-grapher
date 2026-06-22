@@ -97,11 +97,6 @@ listed actions) are fully supported using a sentinel + query-time exclusion mode
    them match every action.
 
 **Remaining approximations:**
-- `Deny NotAction` (deny-all-except): the node is stored in the graph but the deny-all-except
-  semantic is not evaluated. `who_can` and `privilege_escalation_paths` only subtract Deny nodes
-  where `action` is an exact match or a true full-admin `*` (i.e. `excluded_actions IS NULL`).
-  A `Deny NotAction: ["s3:GetObject"]` would not suppress any action — the denied complement
-  is not computed. This may over-report access in the rare deny-all-except pattern.
 - The resource scope of an allow-all-except grant is not intersected with the queried resource
   (same approximation as for full-admin `*` grants — see below).
 - Condition evaluation on `NotAction` statements is not implemented (same limitation as all
@@ -118,10 +113,15 @@ Group-inherited Deny is evaluated: a user's effective Deny set is the union of D
 on its own policies and on every group it is `MEMBER_OF`. A Deny from either side suppresses the
 user's Allow, in `who_can` and `privilege_escalation_paths` alike.
 
+`Deny NotAction` (deny-all-except) is now evaluated: a Deny-NotAction sentinel node
+(`action = '*'` Deny with `excluded_actions` set) denies every action except the ones listed.
+`who_can` matches it when `$action NOT IN excluded_actions`; `privilege_escalation_paths` drops
+a risky action from `allowed_actions` unless it appears in every deny-all-except node's
+`excluded_actions` reachable from the terminal entity (own policies and member groups). Both
+queries honor Deny-over-Allow precedence: a deny-all-except node suppresses access even when an
+`Allow *` (full-admin) or allow-all-except (`NotAction`) grant is also present.
+
 **Remaining approximations:**
-- `Deny NotAction` (deny-all-except) is still not evaluated — see "`NotAction` — implemented as
-  allow-all-except" above. Deny-NotAction sentinel nodes (`action = '*'` with `excluded_actions`
-  set) are excluded from Deny matching entirely.
 - Group results themselves (a `Group` returned directly as `who_can`'s `e`) are not suppressed by
   a Deny on one of their member users — groups are not IAM principals that take action, so this
   is out of scope.
@@ -182,4 +182,3 @@ These limitations are targeted for resolution in a future major version:
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
-| `Deny NotAction` evaluation | Evaluate deny-all-except statements in `who_can` (currently stored but not subtracted) |
