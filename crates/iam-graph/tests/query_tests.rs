@@ -1,6 +1,8 @@
 mod helpers;
 
-use iam_graph::{privilege_escalation_paths, who_can, GraphIngester, QueryContext};
+use iam_graph::{
+    entity_permissions, privilege_escalation_paths, who_can, GraphIngester, QueryContext,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -571,5 +573,106 @@ async fn privilege_escalation_paths_suppresses_action_covered_by_deny_not_action
             .any(|p| p.name == "EscalationDenyNotActionRole"),
         "EscalationDenyNotActionRole must NOT appear — Deny NotAction:[\"s3:GetObject\"] \
          denies iam:PassRole (not in the excluded set)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_boundary_excludes_action_not_covered_by_boundary() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000011";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    // BoundedRole holds Allow s3:GetObject + s3:DeleteObject but is bounded to s3:Get* only.
+    let (data, _role_arn) = helpers::data_with_bounded_role(account_id, "s3:Get*");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+
+    let denied = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
+        .await
+        .expect("who_can must succeed");
+    assert!(
+        !denied.iter().any(|e| e.name == "BoundedRole"),
+        "BoundedRole must NOT appear in who_can for s3:DeleteObject — \
+         boundary only Allows s3:Get*"
+    );
+
+    let allowed = who_can(ingester.client().inner(), &ctx, "s3:GetObject", None)
+        .await
+        .expect("who_can must succeed");
+    let entry = allowed
+        .iter()
+        .find(|e| e.name == "BoundedRole")
+        .expect("BoundedRole must appear in who_can for s3:GetObject — covered by boundary");
+    assert!(
+        entry.is_bounded,
+        "BoundedRole must be flagged is_bounded: true"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_unbounded_entity_is_unaffected() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000012";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_role_action(account_id, "s3:DeleteObject", true);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
+        .await
+        .expect("who_can must succeed");
+
+    let entry = entities
+        .iter()
+        .find(|e| e.name == "ActionRole")
+        .expect("ActionRole must appear in who_can");
+    assert!(
+        !entry.is_bounded,
+        "ActionRole has no Permission Boundary — is_bounded must be false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn entity_permissions_marks_boundary_capped_action_not_effective() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000013";
+
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_bounded_role(account_id, "s3:Get*");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let uid = format!("{}|{}", snapshot_id, role_arn);
+    let perms = entity_permissions(ingester.client().inner(), &ctx, &uid)
+        .await
+        .expect("entity_permissions must succeed");
+
+    let capped = perms
+        .iter()
+        .find(|p| p.action == "s3:DeleteObject")
+        .expect("s3:DeleteObject row must be present");
+    assert!(
+        !capped.effective,
+        "s3:DeleteObject Allow must be marked not effective — boundary only Allows s3:Get*"
+    );
+
+    let effective = perms
+        .iter()
+        .find(|p| p.action == "s3:GetObject")
+        .expect("s3:GetObject row must be present");
+    assert!(
+        effective.effective,
+        "s3:GetObject Allow must be marked effective — covered by boundary"
     );
 }

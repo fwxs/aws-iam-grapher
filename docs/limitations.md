@@ -30,13 +30,15 @@ Neo4j Community is single-node only. For high availability or read replicas, Neo
 
 The following IAM constructs are **recorded** in the graph but **not evaluated** when determining effective permissions. Queries may return entities that appear to have access but whose effective access is blocked by one of these mechanisms — or miss entities whose access is granted through them.
 
-### Permission Boundaries not evaluated
+### Permission Boundaries evaluated as an Allow-intersection ceiling
 
 AWS IAM Permission Boundaries are attached to roles and users and act as a maximum permission ceiling. An entity can only exercise permissions that appear in both its policies and its permission boundary.
 
-**V1 behavior:** The graph records that a boundary is attached (`has_permission_boundary` property on the node). Queries do NOT intersect policies with the boundary. `who-can` and `entity-perms` results may include actions that are actually denied by the boundary.
+**Current behavior:** `who-can` and `entity-perms` intersect each entity's Allow grants against its `BOUNDED_BY` boundary policy's Allow actions (exact, wildcard via `iam_expander::glob_match`, full-admin `*`, and allow-all-except `NotAction`). An entity whose boundary does not also Allow the queried action is excluded from `who-can` and marked `effective: false` in `entity-perms`. Entities without a boundary are unaffected. Results carry `is_bounded` to signal where the ceiling applies.
 
-**Workaround:** After running a query, check if the returned entity has `has_permission_boundary = true`. Inspect the boundary policy separately.
+**Residual approximation:** Boundary-side wildcard matching uses literal glob comparison, not semantic set containment — a grant that is itself a wildcard (e.g. `s3:*`) intersected against a narrower boundary wildcard (e.g. `s3:Get*`) is evaluated as a literal pattern match between the two strings, not as "does the grant's action set fall entirely within the boundary's action set". This mirrors the existing Deny-wildcard approximation (see below) and only affects wildcard-vs-wildcard comparisons; wildcard-vs-concrete-action comparisons (the common case) are exact.
+
+**Not evaluated:** Deny statements *inside* the boundary policy itself (AWS also evaluates these) and `Condition` keys on boundary statements.
 
 ### Service Control Policies (SCPs) not supported
 
@@ -178,7 +180,7 @@ These limitations are targeted for resolution in a future major version:
 
 | Limitation | Planned approach |
 |---|---|
-| Permission Boundaries | Intersect entity policies with boundary at query time using graph traversal |
+| Permission Boundaries — Deny statements inside the boundary, and boundary wildcard-vs-wildcard set containment | Extend boundary intersection to evaluate Deny statements and expand wildcards before comparison |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
 | Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
