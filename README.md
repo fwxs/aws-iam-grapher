@@ -157,6 +157,19 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable) and `--account-id`. If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
 
+Add `--output-file <path>` to write the result as JSON to a file, regardless of `--output`. The
+human-readable table still prints to stdout — useful for downstream tooling that wants a clean
+JSON artifact without scraping stdout/stderr:
+
+```bash
+aws-iam-grapher query \
+    --account-id 123456789012 \
+    --output-file who-can.json \
+    who-can s3:DeleteObject
+```
+
+The `collect` subcommand supports the same `--output-file` flag for its summary.
+
 ### Who can perform an action?
 
 ```bash

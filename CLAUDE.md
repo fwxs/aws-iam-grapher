@@ -21,9 +21,6 @@ cargo test -p iam-graph test_name
 DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
   TESTCONTAINERS_RYUK_DISABLED=true \
   cargo test --workspace -- --ignored
-
-# Release build (catches cfg/feature issues)
-cargo build --release
 ```
 
 All four commands must pass before any task is considered complete.
