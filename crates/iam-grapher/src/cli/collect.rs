@@ -63,6 +63,11 @@ pub struct CollectArgs {
     /// Output format.
     #[arg(long, value_enum, default_value = "table")]
     pub output: OutputFormat,
+
+    /// Write JSON summary to this file. Overrides --output to JSON for the file;
+    /// the human-readable summary still prints to stdout.
+    #[arg(long)]
+    pub output_file: Option<PathBuf>,
 }
 
 /// Validate argument combinations before making any network calls.
@@ -144,6 +149,7 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         &stats,
         duration_secs,
         &args.output,
+        args.output_file.as_deref(),
     )?;
     Ok(())
 }
@@ -228,6 +234,7 @@ fn print_collect_summary(
     stats: &IngestStats,
     duration_secs: f64,
     format: &OutputFormat,
+    output_file: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let total_nodes = stats.accounts_merged
         + stats.snapshots_created
@@ -238,23 +245,26 @@ fn print_collect_summary(
         + stats.instance_profiles_merged
         + stats.permissions_merged;
 
-    if *format == OutputFormat::Json {
-        let summary = serde_json::json!({
-            "snapshot_id": snapshot_id,
-            "mode": mode_label,
-            "collected": {
-                "policies": data.policies.len(),
-                "roles": data.roles.len(),
-                "users": data.users.len(),
-                "groups": data.groups.len(),
-                "instance_profiles": data.instance_profiles.len(),
-            },
-            "ingested": {
-                "nodes_created": total_nodes,
-                "relationships_created": stats.relationships_created,
-                "duration_secs": duration_secs,
-            }
-        });
+    let summary = serde_json::json!({
+        "snapshot_id": snapshot_id,
+        "mode": mode_label,
+        "collected": {
+            "policies": data.policies.len(),
+            "roles": data.roles.len(),
+            "users": data.users.len(),
+            "groups": data.groups.len(),
+            "instance_profiles": data.instance_profiles.len(),
+        },
+        "ingested": {
+            "nodes_created": total_nodes,
+            "relationships_created": stats.relationships_created,
+            "duration_secs": duration_secs,
+        }
+    });
+
+    if let Some(path) = output_file {
+        crate::output::json::write_json(&summary, path)?;
+    } else if *format == OutputFormat::Json {
         let json = serde_json::to_string_pretty(&summary)
             .context("failed to serialize collect summary")?;
         println!("{json}");

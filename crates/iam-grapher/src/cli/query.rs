@@ -6,6 +6,8 @@ use iam_graph::{
     list_snapshots, privilege_escalation_paths, who_can, GraphClient, PermissionRow, QueryContext,
     DEFAULT_MAX_HOPS,
 };
+use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct QueryArgs {
@@ -33,8 +35,31 @@ pub struct QueryArgs {
     #[arg(long, value_enum, default_value = "table")]
     output: OutputFormat,
 
+    /// Write JSON result to this file. Overrides --output to JSON for the file;
+    /// the human-readable table/summary still prints to stdout.
+    #[arg(long)]
+    output_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: QueryCommand,
+}
+
+/// Emit JSON to `output_file` and/or stdout per `output`/`output_file` settings.
+/// Returns `true` if the human-readable view should still be printed to stdout.
+fn emit_json<T: Serialize>(
+    value: &T,
+    output: &OutputFormat,
+    output_file: Option<&Path>,
+) -> anyhow::Result<bool> {
+    if let Some(path) = output_file {
+        json::write_json(value, path)?;
+        return Ok(true);
+    }
+    if *output == OutputFormat::Json {
+        json::print_json(value)?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[derive(Subcommand)]
@@ -82,8 +107,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("list-snapshots query failed")?;
 
-            if args.output == OutputFormat::Json {
-                return json::print_json(&snapshots);
+            if !emit_json(&snapshots, &args.output, args.output_file.as_deref())? {
+                return Ok(());
             }
 
             let rows: Vec<Vec<String>> = snapshots
@@ -119,8 +144,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("diff query failed")?;
 
-            if args.output == OutputFormat::Json {
-                return json::print_json(&diff);
+            if !emit_json(&diff, &args.output, args.output_file.as_deref())? {
+                return Ok(());
             }
 
             println!("Permission diff between {snapshot_a} and {snapshot_b}\n");
@@ -176,8 +201,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         .await
                         .context("who-can query failed")?;
 
-                    if args.output == OutputFormat::Json {
-                        return json::print_json(&results);
+                    if !emit_json(&results, &args.output, args.output_file.as_deref())? {
+                        return Ok(());
                     }
 
                     println!(
@@ -214,8 +239,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         .await
                         .context("entity-perms query failed")?;
 
-                    if args.output == OutputFormat::Json {
-                        return json::print_json(&perms);
+                    if !emit_json(&perms, &args.output, args.output_file.as_deref())? {
+                        return Ok(());
                     }
 
                     println!("Permissions for {arn}\n");
@@ -242,8 +267,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         .await
                         .context("instance-profiles-with query failed")?;
 
-                    if args.output == OutputFormat::Json {
-                        return json::print_json(&results);
+                    if !emit_json(&results, &args.output, args.output_file.as_deref())? {
+                        return Ok(());
                     }
 
                     println!(
@@ -270,8 +295,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         .await
                         .context("privilege-escalation query failed")?;
 
-                    if args.output == OutputFormat::Json {
-                        return json::print_json(&paths);
+                    if !emit_json(&paths, &args.output, args.output_file.as_deref())? {
+                        return Ok(());
                     }
 
                     println!(

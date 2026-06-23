@@ -79,6 +79,7 @@ mod tests {
             batch_size: 500,
             dry_run: false,
             output: crate::output::OutputFormat::Table,
+            output_file: None,
         };
         assert!(collect::validate(&args).is_err());
     }
@@ -97,5 +98,40 @@ mod tests {
             panic!("expected Collect subcommand");
         };
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn collect_output_file_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--output-file",
+            "/tmp/out.json",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(args) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(
+            args.output_file,
+            Some(std::path::PathBuf::from("/tmp/out.json"))
+        );
+    }
+
+    #[test]
+    fn query_output_file_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "--neo4j-pass",
+            "test",
+            "--output-file",
+            "/tmp/out.json",
+            "list-snapshots",
+        ])
+        .expect("parse must succeed");
+        assert!(matches!(cli.command, Commands::Query(_)));
     }
 }
