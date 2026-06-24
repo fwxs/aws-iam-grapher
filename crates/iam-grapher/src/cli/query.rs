@@ -219,11 +219,13 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     let rows: Vec<Vec<String>> = results
                         .iter()
                         .map(|e| {
-                            let type_label = if e.is_full_admin {
-                                format!("{} [full-admin]", e.entity_type)
-                            } else {
-                                e.entity_type.clone()
-                            };
+                            let mut type_label = e.entity_type.clone();
+                            if e.is_full_admin {
+                                type_label.push_str(" [full-admin]");
+                            }
+                            if e.is_bounded {
+                                type_label.push_str(" [bounded]");
+                            }
                             vec![type_label, e.arn.clone(), e.resource.clone()]
                         })
                         .collect();
@@ -253,12 +255,22 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     let rows: Vec<Vec<String>> = perms
                         .iter()
                         .map(|p: &PermissionRow| {
-                            vec![p.effect.clone(), p.action.clone(), p.resource.clone()]
+                            let status = if p.effective {
+                                "effective"
+                            } else {
+                                "capped-by-boundary"
+                            };
+                            vec![
+                                p.effect.clone(),
+                                p.action.clone(),
+                                p.resource.clone(),
+                                status.to_string(),
+                            ]
                         })
                         .collect();
                     print!(
                         "{}",
-                        table::format_table(&["EFFECT", "ACTION", "RESOURCE"], &rows)
+                        table::format_table(&["EFFECT", "ACTION", "RESOURCE", "STATUS"], &rows)
                     );
                 }
 

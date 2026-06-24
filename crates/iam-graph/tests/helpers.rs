@@ -1155,3 +1155,93 @@ pub fn data_with_assume_role_cycle(account_id: &str) -> CollectedData {
         ..Default::default()
     }
 }
+
+/// Build a role granted concrete `s3:GetObject` and `s3:DeleteObject` actions (simulating
+/// already-wildcard-expanded grants, as `iam-collector` produces before ingestion) but bounded
+/// by a Permission Boundary policy that only Allows `boundary_action` (e.g. `s3:Get*`). The
+/// boundary side is intentionally left wildcarded and matched at query time via
+/// `iam_expander::glob_match`, mirroring how Deny wildcards are evaluated. Used to test that
+/// `who_can` / `entity_perms` intersect grants with the boundary ceiling.
+pub fn data_with_bounded_role(account_id: &str, boundary_action: &str) -> (CollectedData, String) {
+    use iam_models::{Effect, IamInlinePolicy, IamPolicy, IamRole, PermissionsBoundary};
+    use iam_models::{PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/BoundedRole", account_id);
+    let boundary_arn = format!("arn:aws:iam::{}:policy/BoundaryPolicy", account_id);
+
+    let inline = IamInlinePolicy {
+        policy_name: "InlineActionsPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["s3:GetObject".to_string(), "s3:DeleteObject".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let boundary_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec![boundary_action.to_string()],
+            not_action: vec![],
+            resource: vec!["*".to_string()],
+            not_resource: vec![],
+            principal: None,
+            not_principal: None,
+            condition: None,
+        }],
+    };
+    let boundary_policy = IamPolicy {
+        arn: boundary_arn.clone(),
+        policy_id: "ANPABOUNDARY".to_string(),
+        policy_name: "BoundaryPolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 0,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(boundary_doc),
+        tags: HashMap::new(),
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROABOUNDED".to_string(),
+        role_name: "BoundedRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: Some(PermissionsBoundary {
+            permissions_boundary_type: "PermissionsBoundaryPolicy".to_string(),
+            permissions_boundary_arn: boundary_arn,
+        }),
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        policies: vec![boundary_policy],
+        ..Default::default()
+    };
+    (data, role_arn)
+}

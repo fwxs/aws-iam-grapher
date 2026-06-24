@@ -13,6 +13,9 @@ pub struct EntityRef {
     pub is_full_admin: bool,
     /// The `Resource` of the grant that matched this entity.
     pub resource: String,
+    /// True when the entity has a Permission Boundary attached, regardless of whether the
+    /// boundary capped the matched action.
+    pub is_bounded: bool,
 }
 
 /// A single permission row with named fields.
@@ -21,6 +24,9 @@ pub struct PermissionRow {
     pub action: String,
     pub effect: String,
     pub resource: String,
+    /// False when this Allow is capped by the entity's Permission Boundary (the boundary does
+    /// not also Allow this action). Always true for Deny rows and for unbounded entities.
+    pub effective: bool,
 }
 
 /// An instance profile that has privilege-escalation permissions.
@@ -35,6 +41,10 @@ pub struct RiskyInstanceProfile {
 const WHO_CAN_QUERY: &str = include_str!("../../queries/who_can.cypher");
 const CANDIDATE_DENY_ACTIONS_QUERY: &str =
     include_str!("../../queries/candidate_deny_actions.cypher");
+const CANDIDATE_BOUNDARY_ACTIONS_QUERY: &str =
+    include_str!("../../queries/candidate_boundary_actions.cypher");
+const ENTITY_BOUNDARY_ACTIONS_QUERY: &str =
+    include_str!("../../queries/entity_boundary_actions.cypher");
 
 /// Fetch every distinct Deny action string in this snapshot/account scope, excluding
 /// Deny-NotAction sentinel nodes. Callers match the queried action against this list with
@@ -46,6 +56,32 @@ async fn candidate_deny_actions(
     let mut stream = graph
         .execute(
             neo4rs::query(CANDIDATE_DENY_ACTIONS_QUERY)
+                .param("snapshot_id", ctx.snapshot_id.as_str())
+                .param("account_id", ctx.account_id.as_str()),
+        )
+        .await?;
+
+    let mut actions = Vec::new();
+    while let Some(row) = stream.next().await? {
+        let action: String = row
+            .get("action")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        actions.push(action);
+    }
+    Ok(actions)
+}
+
+/// Fetch every distinct Allow action string granted by any Permission Boundary in this
+/// snapshot/account scope, excluding allow-all-except sentinel nodes. Callers match the queried
+/// action against this list with `iam_expander::glob_match` to compute the concrete set of
+/// boundary-allowed actions that cover it.
+async fn candidate_boundary_actions(
+    graph: &Graph,
+    ctx: &QueryContext,
+) -> Result<Vec<String>, GraphError> {
+    let mut stream = graph
+        .execute(
+            neo4rs::query(CANDIDATE_BOUNDARY_ACTIONS_QUERY)
                 .param("snapshot_id", ctx.snapshot_id.as_str())
                 .param("account_id", ctx.account_id.as_str()),
         )
@@ -81,13 +117,20 @@ pub async fn who_can(
         .filter(|candidate| iam_expander::glob_match(candidate, action))
         .collect();
 
+    let boundary_candidates = candidate_boundary_actions(graph, ctx).await?;
+    let boundary_allow_actions: Vec<String> = boundary_candidates
+        .into_iter()
+        .filter(|candidate| iam_expander::glob_match(candidate, action))
+        .collect();
+
     let mut stream = graph
         .execute(
             neo4rs::query(WHO_CAN_QUERY)
                 .param("action", action)
                 .param("snapshot_id", ctx.snapshot_id.as_str())
                 .param("account_id", ctx.account_id.as_str())
-                .param("deny_actions", deny_actions),
+                .param("deny_actions", deny_actions)
+                .param("boundary_allow_actions", boundary_allow_actions),
         )
         .await?;
 
@@ -111,6 +154,9 @@ pub async fn who_can(
         let grant_kind: String = row
             .get("grant_kind")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let is_bounded: bool = row
+            .get("is_bounded")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
 
         // Only wildcard (action='*') grants are resource-scoped intersection candidates;
         // exact-action grants always pass through.
@@ -128,6 +174,7 @@ pub async fn who_can(
             entity_type,
             is_full_admin,
             resource: perm_resource,
+            is_bounded,
         });
     }
 
@@ -149,12 +196,59 @@ pub async fn who_can(
 
 const ENTITY_PERMISSIONS_QUERY: &str = include_str!("../../queries/entity_permissions.cypher");
 
-/// Return all permissions for a specific entity UID.
+/// A boundary Allow entry: an exact/wildcard action, or a full-admin / allow-all-except
+/// sentinel (`action == "*"`) with an optional `excluded_actions` set.
+struct BoundaryEntry {
+    action: String,
+    excluded_actions: Option<Vec<String>>,
+}
+
+/// True if `action` is covered by any boundary Allow entry — exact/wildcard match, a true
+/// full-admin boundary (`action == "*"`, no exclusions), or an allow-all-except boundary
+/// (`action == "*"` with exclusions, action not excluded).
+fn boundary_allows(entries: &[BoundaryEntry], action: &str) -> bool {
+    entries.iter().any(|entry| {
+        if entry.action == "*" {
+            match &entry.excluded_actions {
+                None => true,
+                Some(excluded) => !excluded.iter().any(|excluded| excluded == action),
+            }
+        } else {
+            iam_expander::glob_match(&entry.action, action)
+        }
+    })
+}
+
+/// Return all permissions for a specific entity UID. Allow rows carry `effective: false` when
+/// capped by the entity's Permission Boundary (see limitations.md).
 pub async fn entity_permissions(
     graph: &Graph,
     ctx: &QueryContext,
     entity_uid: &str,
 ) -> Result<Vec<PermissionRow>, GraphError> {
+    let mut boundary_stream = graph
+        .execute(
+            neo4rs::query(ENTITY_BOUNDARY_ACTIONS_QUERY)
+                .param("uid", entity_uid)
+                .param("snapshot_id", ctx.snapshot_id.as_str()),
+        )
+        .await?;
+
+    let mut boundary_entries = Vec::new();
+    while let Some(row) = boundary_stream.next().await? {
+        let action: String = row
+            .get("action")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let excluded_actions: Option<Vec<String>> = row
+            .get("excluded_actions")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        boundary_entries.push(BoundaryEntry {
+            action,
+            excluded_actions,
+        });
+    }
+    let is_bounded = !boundary_entries.is_empty();
+
     let mut stream = graph
         .execute(
             neo4rs::query(ENTITY_PERMISSIONS_QUERY)
@@ -174,10 +268,13 @@ pub async fn entity_permissions(
         let resource: String = row
             .get("resource")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let effective =
+            effect != "Allow" || !is_bounded || boundary_allows(&boundary_entries, &action);
         results.push(PermissionRow {
             action,
             effect,
             resource,
+            effective,
         });
     }
     Ok(results)
@@ -259,6 +356,7 @@ async fn collect_instance_profile_refs(
             entity_type: "InstanceProfile".to_string(),
             is_full_admin: false,
             resource: String::new(),
+            is_bounded: false,
         });
     }
     Ok(results)
