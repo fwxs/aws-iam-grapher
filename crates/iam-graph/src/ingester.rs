@@ -22,6 +22,9 @@ pub struct IngestConfig {
     pub account_alias: Option<String>,
     /// When true, log queries instead of executing them.
     pub dry_run: bool,
+    /// Shared id tagging every snapshot produced by one org-wide collection run.
+    /// `None` for single-account (live/offline/hybrid) collection.
+    pub org_collection_run_id: Option<String>,
 }
 
 impl Default for IngestConfig {
@@ -32,6 +35,7 @@ impl Default for IngestConfig {
             account_id: String::new(),
             account_alias: None,
             dry_run: false,
+            org_collection_run_id: None,
         }
     }
 }
@@ -131,6 +135,7 @@ impl GraphIngester {
                 &collected_at,
                 is_partial,
                 partial_reasons,
+                self.config.org_collection_run_id.as_deref(),
             ),
             account::snapshot_of_account_query(snap_id, acct_id),
         ];

@@ -9,6 +9,7 @@ pub struct SnapshotRecord {
     pub collected_at: String,
     pub is_partial: bool,
     pub partial_reasons: Vec<String>,
+    pub org_collection_run_id: Option<String>,
 }
 
 const LIST_SNAPSHOTS_QUERY: &str = include_str!("../../queries/list_snapshots.cypher");
@@ -37,12 +38,17 @@ pub async fn list_snapshots(
             .get("is_partial")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
         let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
+        let org_collection_run_id: Option<String> = row
+            .get::<String>("org_collection_run_id")
+            .ok()
+            .filter(|s| !s.is_empty());
         results.push(SnapshotRecord {
             id,
             account_id,
             collected_at,
             is_partial,
             partial_reasons,
+            org_collection_run_id,
         });
     }
     Ok(results)
