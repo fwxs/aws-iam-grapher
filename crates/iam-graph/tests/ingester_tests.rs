@@ -177,6 +177,7 @@ async fn ingest_respects_batch_size() {
         account_id: "111122223333".to_string(),
         account_alias: None,
         dry_run: false,
+        org_collection_run_id: None,
     };
     let snapshot_id = config.snapshot_id.clone();
 
@@ -252,6 +253,7 @@ async fn ingest_large_synthetic_account_records_scale_ceiling() {
         account_id: "999988887777".to_string(),
         account_alias: Some("scale-test".to_string()),
         dry_run: false,
+        org_collection_run_id: None,
     };
 
     let account_id = "999988887777";

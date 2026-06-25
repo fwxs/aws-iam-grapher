@@ -104,6 +104,7 @@ pub fn test_config(account_id: &str) -> IngestConfig {
         account_id: account_id.to_string(),
         account_alias: Some("test-account".to_string()),
         dry_run: false,
+        org_collection_run_id: None,
     }
 }
 

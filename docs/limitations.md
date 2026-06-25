@@ -183,4 +183,26 @@ These limitations are targeted for resolution in a future major version:
 | Permission Boundaries — Deny statements inside the boundary, and boundary wildcard-vs-wildcard set containment | Extend boundary intersection to evaluate Deny statements and expand wildcards before comparison |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
 | Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
-| Multi-account | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
+| Multi-account cross-account role chaining | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
+
+## Multi-account (AWS Organizations) collection
+
+`collect org` enumerates the OU tree and member accounts from a management-account AWS profile,
+assumes a jump role into each member account, runs the same per-account collection as `collect`,
+and files each account into its own `Snapshot`. Every snapshot produced by one run shares an
+`org_collection_run_id` property, so a single org-wide collection can be queried as a group via
+`MATCH (s:Snapshot {org_collection_run_id: $run_id})`.
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --assume-role-name OrganizationAccountAccessRole \
+  --exclude-ou ou-sandbox-1111 \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+**Current behavior:** a single member account's collection failure (e.g. the jump role doesn't
+exist, or is denied) is recorded as a warning and does not abort the rest of the run. Each
+account is still queried independently — `org_collection_run_id` is metadata for grouping
+snapshots, not a cross-account graph; cross-account `sts:AssumeRole` chaining between accounts
+in the same org is still future work (see Multi-account cross-account role chaining above).

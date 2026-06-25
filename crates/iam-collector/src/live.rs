@@ -1,9 +1,7 @@
 use crate::errors::{CollectorError, CollectorWarning};
 use crate::expand::expand_collected_data;
 use crate::traits::{CollectedData, CollectorMode, IamDataSource};
-use crate::util::account_id_from_arns;
-use aws_sdk_iam::error::SdkError;
-use aws_smithy_types::error::metadata::ProvideErrorMetadata;
+use crate::util::{account_id_from_arns, map_sdk_error};
 use chrono::{DateTime, Utc};
 use iam_models::{
     IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy, IamRole, IamUser,
@@ -367,115 +365,5 @@ fn sdk_instance_profile_to_model(ip: &aws_sdk_iam::types::InstanceProfile) -> Ia
         .unwrap_or_else(Utc::now),
         roles,
         is_aws_managed,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Error mapping — classify SDK errors by typed metadata
-// ---------------------------------------------------------------------------
-
-/// Maps an `SdkError` to a `CollectorError`.
-///
-/// Checked against aws-sdk-iam 1.112.0 / aws-smithy-runtime-api 1.12.3:
-/// AccessDenied from IAM arrives as an unhandled `ServiceError` whose `meta().code()`
-/// returns `Some("AccessDenied")`. This is stable API; the Debug string is not.
-fn map_sdk_error<E, R>(err: SdkError<E, R>) -> CollectorError
-where
-    E: std::fmt::Debug + ProvideErrorMetadata,
-    R: std::fmt::Debug,
-{
-    // Primary: inspect the modeled error code via stable typed API.
-    if let SdkError::ServiceError(ref svc_err) = err {
-        let code = svc_err.err().meta().code();
-        if matches!(code, Some("AccessDenied") | Some("Forbidden")) {
-            return CollectorError::InsufficientPermissions(format!("{err:?}"));
-        }
-    }
-
-    // Last-resort fallback: Debug string. The Debug representation of SdkError is not a
-    // stable API and may change across aws-sdk-iam releases. Only reached when the service
-    // error does not carry a typed code (e.g. network-level 403 with no body).
-    let msg = format!("{err:?}");
-    if msg.contains("403") || msg.contains("AccessDenied") || msg.contains("Forbidden") {
-        return CollectorError::InsufficientPermissions(msg);
-    }
-
-    CollectorError::AwsSdk(msg)
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
-    use aws_smithy_runtime_api::http::StatusCode;
-    use aws_smithy_types::body::SdkBody;
-    use aws_smithy_types::error::metadata::{ErrorMetadata, ProvideErrorMetadata};
-
-    /// Minimal error type for unit-testing `map_sdk_error` in isolation.
-    #[derive(Debug)]
-    struct StubError {
-        meta: ErrorMetadata,
-    }
-
-    impl ProvideErrorMetadata for StubError {
-        fn meta(&self) -> &ErrorMetadata {
-            &self.meta
-        }
-    }
-
-    fn stub_http_response(status: u16) -> HttpResponse {
-        HttpResponse::new(
-            StatusCode::try_from(status).expect("valid status code"),
-            SdkBody::empty(),
-        )
-    }
-
-    fn stub_sdk_error(code: &str, http_status: u16) -> SdkError<StubError, HttpResponse> {
-        let meta = ErrorMetadata::builder().code(code).build();
-        let source = StubError { meta };
-        SdkError::service_error(source, stub_http_response(http_status))
-    }
-
-    #[test]
-    fn map_sdk_error_access_denied_code_returns_insufficient_permissions() {
-        // Arrange
-        let err = stub_sdk_error("AccessDenied", 403);
-
-        // Act
-        let result = map_sdk_error(err);
-
-        // Assert
-        assert!(
-            matches!(result, CollectorError::InsufficientPermissions(_)),
-            "expected InsufficientPermissions, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn map_sdk_error_forbidden_code_returns_insufficient_permissions() {
-        let err = stub_sdk_error("Forbidden", 403);
-        let result = map_sdk_error(err);
-        assert!(matches!(result, CollectorError::InsufficientPermissions(_)));
-    }
-
-    #[test]
-    fn map_sdk_error_non_403_returns_aws_sdk_error() {
-        let err = stub_sdk_error("NoSuchEntity", 404);
-        let result = map_sdk_error(err);
-        assert!(
-            matches!(result, CollectorError::AwsSdk(_)),
-            "expected AwsSdk, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn map_sdk_error_service_failure_returns_aws_sdk_error() {
-        let err = stub_sdk_error("ServiceFailure", 500);
-        let result = map_sdk_error(err);
-        assert!(matches!(result, CollectorError::AwsSdk(_)));
     }
 }

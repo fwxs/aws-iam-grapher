@@ -23,6 +23,7 @@ const INDEXES: &[&str] = &[
     "CREATE INDEX permission_action IF NOT EXISTS FOR (perm:Permission) ON (perm.action)",
     "CREATE INDEX permission_snapshot IF NOT EXISTS FOR (perm:Permission) ON (perm.snapshot_id)",
     "CREATE INDEX role_aws_managed IF NOT EXISTS FOR (r:Role) ON (r.is_aws_managed)",
+    "CREATE INDEX snapshot_org_run IF NOT EXISTS FOR (s:Snapshot) ON (s.org_collection_run_id)",
 ];
 
 /// Run all constraints and indexes against `graph`. Safe to call multiple times.

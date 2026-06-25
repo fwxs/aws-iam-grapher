@@ -12,6 +12,8 @@ members = [
 async-trait        = "^0.1.89"
 aws-config         = { version = "^1.8.18", features = ["behavior-version-latest"] }
 aws-sdk-iam        = "^1.112.0"
+aws-sdk-organizations  = "^1.118.0"
+aws-sdk-sts            = "^1.107.0"
 aws-smithy-mocks        = "^0.2.6"
 aws-smithy-runtime-api  = "^1.12.3"
 aws-smithy-types        = "^1.4.9"
