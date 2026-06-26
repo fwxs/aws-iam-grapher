@@ -3,8 +3,8 @@ use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
-    list_snapshots, privilege_escalation_paths, who_can, GraphClient, PermissionRow, QueryContext,
-    DEFAULT_MAX_HOPS,
+    latest_org_run_id, list_snapshots, org_escalation_paths, privilege_escalation_paths, who_can,
+    GraphClient, OrgQueryContext, PermissionRow, QueryContext, DEFAULT_MAX_HOPS,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -93,6 +93,15 @@ enum QueryCommand {
     },
     /// Delete a snapshot and all its nodes from the graph.
     DeleteSnapshot { snapshot_id: String },
+    /// Cross-account privilege-escalation paths across an org collection run.
+    OrgEscalation {
+        /// Max sts:AssumeRole hops to traverse.
+        #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
+        max_hops: u32,
+        /// Org collection run id (default: most recent org run).
+        #[arg(long)]
+        org_run_id: Option<String>,
+    },
 }
 
 pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
@@ -133,6 +142,69 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("delete-snapshot failed")?;
             println!("Deleted {deleted} nodes for snapshot {snapshot_id}");
+        }
+
+        QueryCommand::OrgEscalation {
+            max_hops,
+            org_run_id,
+        } => {
+            let run_id = match org_run_id {
+                Some(id) => id,
+                None => latest_org_run_id(client.inner())
+                    .await
+                    .context("failed to look up latest org run")?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no org collection runs found.\n\
+                             Run first: aws-iam-grapher collect org ..."
+                        )
+                    })?,
+            };
+            let ctx = OrgQueryContext::new(&run_id);
+            let paths = org_escalation_paths(client.inner(), &ctx, max_hops)
+                .await
+                .context("org-escalation query failed")?;
+
+            if !emit_json(&paths, &args.output, args.output_file.as_deref())? {
+                return Ok(());
+            }
+
+            println!(
+                "Cross-account escalation paths (org-run: {}, max-hops: {})\n",
+                short_id(&run_id),
+                max_hops
+            );
+
+            if paths.is_empty() {
+                println!("No cross-account escalation paths found.");
+                return Ok(());
+            }
+
+            let rows: Vec<Vec<String>> = paths
+                .iter()
+                .map(|ep| {
+                    let path_str = ep
+                        .path
+                        .iter()
+                        .map(|h| format!("{}@{}", h.arn, short_id(&h.account_id)))
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    vec![
+                        ep.arn.clone(),
+                        ep.account_id.clone(),
+                        path_str,
+                        ep.risky_actions.join(", "),
+                        if ep.conditional { "yes" } else { "no" }.to_string(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                table::format_table(
+                    &["ENTITY", "ACCOUNT", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+                    &rows
+                )
+            );
         }
 
         QueryCommand::Diff {

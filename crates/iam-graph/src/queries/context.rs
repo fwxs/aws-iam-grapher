@@ -17,3 +17,23 @@ impl QueryContext {
         }
     }
 }
+
+/// Query context for org-wide queries that span multiple account snapshots.
+///
+/// Uses `org_collection_run_id` as the isolation boundary instead of `(account_id,
+/// snapshot_id)`. All snapshots in one org run share the same `org_run_id`, making
+/// cross-account traversal possible without cross-tenant leakage.
+#[derive(Debug, Clone)]
+pub struct OrgQueryContext {
+    /// Org collection run id shared by all per-account snapshots in one `collect org` run.
+    pub org_run_id: String,
+}
+
+impl OrgQueryContext {
+    /// Create a new org-scoped query context.
+    pub fn new(org_run_id: impl Into<String>) -> Self {
+        Self {
+            org_run_id: org_run_id.into(),
+        }
+    }
+}
