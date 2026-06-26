@@ -29,7 +29,8 @@ pub use errors::GraphError;
 pub use ingester::{GraphIngester, IngestConfig, IngestStats};
 pub use queries::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
-    list_snapshots, privilege_escalation_paths, risky_instance_profiles, who_can, EntityRef,
-    EscalationPath, Hop, PermissionDiff, PermissionRecord, PermissionRow, QueryContext,
-    RiskyInstanceProfile, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+    latest_org_run_id, list_snapshots, org_escalation_paths, privilege_escalation_paths,
+    risky_instance_profiles, stitch_cross_account, who_can, EntityRef, EscalationPath, Hop,
+    OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff, PermissionRecord, PermissionRow,
+    QueryContext, RiskyInstanceProfile, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };
