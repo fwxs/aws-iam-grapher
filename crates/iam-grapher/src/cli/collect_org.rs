@@ -2,7 +2,7 @@ use crate::cli::collect::SharedCollectArgs;
 use anyhow::Context as _;
 use clap::Args;
 use iam_collector::{CollectorWarning, OrgCollector};
-use iam_graph::{GraphClient, GraphIngester, IngestConfig};
+use iam_graph::{stitch_cross_account, GraphClient, GraphIngester, IngestConfig};
 use uuid::Uuid;
 
 #[derive(Args)]
@@ -98,6 +98,11 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
             stats.relationships_created
         );
     }
+
+    let edge_count = stitch_cross_account(client.inner(), &result.run_id)
+        .await
+        .context("cross-account stitch failed")?;
+    println!("  cross-account edges stitched: {edge_count}");
 
     println!(
         "Org collection complete: {} accounts ingested, {} warnings",
