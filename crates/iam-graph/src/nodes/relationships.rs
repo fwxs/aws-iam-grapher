@@ -63,6 +63,8 @@ const BOUNDED_BY: &str = "
     MERGE (e)-[:BOUNDED_BY]->(p)
 ";
 
+const STITCH_CROSS_ACCOUNT: &str = include_str!("../../queries/stitch_cross_account.cypher");
+
 /// INCLUDES relationship from Snapshot to any entity node.
 pub fn snapshot_includes_query(snapshot_id: &str, entity_uid: &str) -> Query {
     query(SNAPSHOT_INCLUDES)
@@ -222,4 +224,14 @@ pub fn bounded_by_query(snapshot_id: &str, entity_arn: &str, boundary_arn: &str)
     query(BOUNDED_BY)
         .param("entity_uid", entity_uid(snapshot_id, entity_arn))
         .param("policy_uid", entity_uid(snapshot_id, boundary_arn))
+}
+
+/// Build the cross-account stitch query for one org collection run.
+///
+/// Materializes `CAN_ASSUME_ROLE {cross_account: true}` edges between entities in different
+/// account snapshots that share the same `org_collection_run_id`, validated against both the
+/// trust policy (via existing `CAN_ASSUME` → `Principal` nodes) and the assumer's own
+/// `sts:AssumeRole` grants. Idempotent — safe to re-run via `MERGE`.
+pub fn stitch_cross_account_query(org_run_id: &str) -> Query {
+    query(STITCH_CROSS_ACCOUNT).param("org_run_id", org_run_id)
 }
