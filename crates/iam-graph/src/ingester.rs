@@ -201,14 +201,15 @@ impl GraphIngester {
                 for stmt in &doc.statement {
                     let effect_str = effect_str(&stmt.effect);
                     let resources = statement_resources(stmt);
+                    let condition = stmt.condition.as_ref();
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
-                                snap_id, acct_id, effect_str, action, resource,
+                                snap_id, acct_id, effect_str, action, resource, condition,
                             ));
                             let prefix = permission::service_prefix(action).to_string();
                             phase4.push(permission::permission_on_service_query(
-                                snap_id, effect_str, action, resource, &prefix,
+                                snap_id, effect_str, action, resource, &prefix, condition,
                             ));
                             perm_count += 1;
                         }
@@ -221,6 +222,7 @@ impl GraphIngester {
                                 effect_str,
                                 resource,
                                 &stmt.not_action,
+                                condition,
                             ));
                             perm_count += 1;
                         }
@@ -233,14 +235,15 @@ impl GraphIngester {
                 for stmt in &inline.policy_document.statement {
                     let effect_str = effect_str(&stmt.effect);
                     let resources = statement_resources(stmt);
+                    let condition = stmt.condition.as_ref();
                     for action in &stmt.action {
                         for resource in &resources {
                             phase4.push(permission::merge_permission_query(
-                                snap_id, acct_id, effect_str, action, resource,
+                                snap_id, acct_id, effect_str, action, resource, condition,
                             ));
                             let prefix = permission::service_prefix(action).to_string();
                             phase4.push(permission::permission_on_service_query(
-                                snap_id, effect_str, action, resource, &prefix,
+                                snap_id, effect_str, action, resource, &prefix, condition,
                             ));
                             perm_count += 1;
                         }
@@ -253,6 +256,7 @@ impl GraphIngester {
                                 effect_str,
                                 resource,
                                 &stmt.not_action,
+                                condition,
                             ));
                             perm_count += 1;
                         }
@@ -496,10 +500,11 @@ impl GraphIngester {
                 for stmt in &doc.statement {
                     let eff = effect_str(&stmt.effect);
                     let resources = statement_resources(stmt);
+                    let condition = stmt.condition.as_ref();
                     for action in &stmt.action {
                         for resource in &resources {
                             phase6.push(relationships::policy_grants_query(
-                                snap_id, &p.arn, eff, action, resource,
+                                snap_id, &p.arn, eff, action, resource, condition,
                             ));
                             rel_count += 1;
                         }
@@ -512,6 +517,7 @@ impl GraphIngester {
                                 eff,
                                 resource,
                                 &stmt.not_action,
+                                condition,
                             ));
                             rel_count += 1;
                         }
@@ -655,6 +661,7 @@ fn push_inline_statement_grants(
 ) {
     let eff = effect_str(&stmt.effect);
     let resources = statement_resources(stmt);
+    let condition = stmt.condition.as_ref();
     for action in &stmt.action {
         for resource in &resources {
             phase6.push(relationships::inline_grants_query(
@@ -664,6 +671,7 @@ fn push_inline_statement_grants(
                 eff,
                 action,
                 resource,
+                condition,
             ));
             *rel_count += 1;
         }
@@ -677,6 +685,7 @@ fn push_inline_statement_grants(
                 eff,
                 resource,
                 &stmt.not_action,
+                condition,
             ));
             *rel_count += 1;
         }

@@ -1,4 +1,5 @@
 use crate::nodes::uid::{entity_uid, excluded_permission_uid, inline_policy_uid, permission_uid};
+use iam_models::Condition;
 use neo4rs::{query, Query};
 
 const SNAPSHOT_INCLUDES: &str = "
@@ -101,12 +102,13 @@ pub fn policy_grants_query(
     effect: &str,
     action: &str,
     resource: &str,
+    condition: Option<&Condition>,
 ) -> Query {
     query(POLICY_GRANTS)
         .param("policy_uid", entity_uid(snapshot_id, policy_arn))
         .param(
             "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource),
+            permission_uid(snapshot_id, effect, action, resource, condition),
         )
 }
 
@@ -118,6 +120,7 @@ pub fn inline_grants_query(
     effect: &str,
     action: &str,
     resource: &str,
+    condition: Option<&Condition>,
 ) -> Query {
     query(INLINE_GRANTS)
         .param(
@@ -126,7 +129,7 @@ pub fn inline_grants_query(
         )
         .param(
             "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource),
+            permission_uid(snapshot_id, effect, action, resource, condition),
         )
 }
 
@@ -137,12 +140,13 @@ pub fn policy_grants_excluded_query(
     effect: &str,
     resource: &str,
     excluded: &[String],
+    condition: Option<&Condition>,
 ) -> Query {
     query(POLICY_GRANTS)
         .param("policy_uid", entity_uid(snapshot_id, policy_arn))
         .param(
             "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
         )
 }
 
@@ -154,6 +158,7 @@ pub fn inline_grants_excluded_query(
     effect: &str,
     resource: &str,
     excluded: &[String],
+    condition: Option<&Condition>,
 ) -> Query {
     query(INLINE_GRANTS)
         .param(
@@ -162,7 +167,7 @@ pub fn inline_grants_excluded_query(
         )
         .param(
             "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
         )
 }
 
