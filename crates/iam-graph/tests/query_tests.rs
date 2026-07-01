@@ -3,6 +3,7 @@ mod helpers;
 use iam_graph::{
     entity_permissions, privilege_escalation_paths, who_can, GraphIngester, QueryContext,
 };
+use iam_models::condition::ConditionContext;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -17,9 +18,15 @@ async fn who_can_returns_correct_entities() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, &account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:GetObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:GetObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     assert!(
         !entities.is_empty(),
@@ -58,9 +65,15 @@ async fn who_can_does_not_leak_across_accounts() {
 
     // Query account A — must not see account B's entities
     let ctx_a = QueryContext::new(&snap_a, "ACCOUNT_A");
-    let entities = who_can(ingester_b.client().inner(), &ctx_a, "s3:GetObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester_b.client().inner(),
+        &ctx_a,
+        "s3:GetObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     for entity in &entities {
         assert!(
             !entity.arn.contains("ACCOUNT_B"),
@@ -273,9 +286,15 @@ async fn who_can_sees_group_and_inline_user_paths() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     assert!(
         entities.iter().any(|e| e.name == "dave"),
@@ -304,9 +323,15 @@ async fn who_can_deny_overrides_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     assert!(
         !entities.iter().any(|e| e.name == "DenyTestRole"),
@@ -327,9 +352,15 @@ async fn who_can_full_admin_wildcard_matches_any_action() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     let admin_entity = entities.iter().find(|e| e.name == "FullAdminRole");
     assert!(
@@ -361,6 +392,7 @@ async fn who_can_resource_scoped_admin_excluded_when_resource_not_covered() {
         &ctx,
         "s3:DeleteObject",
         Some("arn:aws:s3:::my-bucket/object"),
+        &ConditionContext::default(),
     )
     .await
     .expect("who_can must succeed");
@@ -391,6 +423,7 @@ async fn who_can_resource_scoped_admin_included_when_resource_covered() {
         &ctx,
         "s3:ListBucket",
         Some(bucket_resource),
+        &ConditionContext::default(),
     )
     .await
     .expect("who_can must succeed");
@@ -421,9 +454,15 @@ async fn who_can_wildcard_deny_overrides_exact_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     assert!(
         !entities.iter().any(|e| e.name == "WildcardDenyTestRole"),
@@ -444,9 +483,15 @@ async fn who_can_group_inherited_deny_overrides_own_allow() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "iam:PassRole", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "iam:PassRole",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     assert!(
         !entities.iter().any(|e| e.name == "GroupDeniedUser"),
@@ -486,6 +531,7 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
         &ctx,
         "ec2:DescribeInstances",
         None,
+        &ConditionContext::default(),
     )
     .await
     .expect("who_can must succeed");
@@ -499,9 +545,15 @@ async fn who_can_not_action_includes_non_excluded_excludes_excluded() {
     );
 
     // Act — excluded action: entity must NOT appear
-    let excluded = who_can(ingester.client().inner(), &ctx, excluded_action, None)
-        .await
-        .expect("who_can must succeed");
+    let excluded = who_can(
+        ingester.client().inner(),
+        &ctx,
+        excluded_action,
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     assert!(
         !excluded.iter().any(|e| e.name == "NotActionRole"),
         "NotActionRole must NOT appear in who_can for {} (excluded by NotAction)",
@@ -528,9 +580,15 @@ async fn who_can_deny_not_action_denies_all_except_excluded() {
 
     // Act — a non-excluded action must be denied (Deny NotAction covers everything but
     // s3:GetObject), even though the entity also holds Allow *.
-    let denied = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let denied = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     assert!(
         !denied.iter().any(|e| e.name == "DenyNotActionRole"),
         "DenyNotActionRole must NOT appear in who_can for s3:DeleteObject — \
@@ -538,9 +596,15 @@ async fn who_can_deny_not_action_denies_all_except_excluded() {
     );
 
     // Act — the excluded action itself must remain allowed.
-    let allowed = who_can(ingester.client().inner(), &ctx, excluded_action, None)
-        .await
-        .expect("who_can must succeed");
+    let allowed = who_can(
+        ingester.client().inner(),
+        &ctx,
+        excluded_action,
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     assert!(
         allowed.iter().any(|e| e.name == "DenyNotActionRole"),
         "DenyNotActionRole must appear in who_can for {} — excluded from the deny-all-except Deny",
@@ -591,18 +655,30 @@ async fn who_can_boundary_excludes_action_not_covered_by_boundary() {
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
 
-    let denied = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let denied = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     assert!(
         !denied.iter().any(|e| e.name == "BoundedRole"),
         "BoundedRole must NOT appear in who_can for s3:DeleteObject — \
          boundary only Allows s3:Get*"
     );
 
-    let allowed = who_can(ingester.client().inner(), &ctx, "s3:GetObject", None)
-        .await
-        .expect("who_can must succeed");
+    let allowed = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:GetObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
     let entry = allowed
         .iter()
         .find(|e| e.name == "BoundedRole")
@@ -626,9 +702,15 @@ async fn who_can_unbounded_entity_is_unaffected() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let entities = who_can(ingester.client().inner(), &ctx, "s3:DeleteObject", None)
-        .await
-        .expect("who_can must succeed");
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteObject",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
 
     let entry = entities
         .iter()
@@ -674,5 +756,75 @@ async fn entity_permissions_marks_boundary_capped_action_not_effective() {
     assert!(
         effective.effective,
         "s3:GetObject Allow must be marked effective — covered by boundary"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_flags_mfa_gated_grant_conditional_with_no_context() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000014";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_mfa_gated_role_action(account_id, "s3:DeleteBucket");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteBucket",
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
+
+    let entity = entities
+        .iter()
+        .find(|e| e.name == "MfaGatedRole")
+        .expect("MfaGatedRole must appear when no MFA context is supplied");
+    assert!(
+        entity.conditional,
+        "grant gated by aws:MultiFactorAuthPresent must be flagged conditional with no context"
+    );
+    assert_eq!(
+        entity.unevaluated_condition_keys,
+        vec!["aws:MultiFactorAuthPresent".to_string()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn who_can_excludes_mfa_gated_grant_when_mfa_false_context_supplied() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000015";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_mfa_gated_role_action(account_id, "s3:DeleteBucket");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let condition_ctx = ConditionContext {
+        mfa: Some(false),
+        ..Default::default()
+    };
+    let entities = who_can(
+        ingester.client().inner(),
+        &ctx,
+        "s3:DeleteBucket",
+        None,
+        &condition_ctx,
+    )
+    .await
+    .expect("who_can must succeed");
+
+    assert!(
+        !entities.iter().any(|e| e.name == "MfaGatedRole"),
+        "grant gated by aws:MultiFactorAuthPresent: true must be excluded when --mfa false"
     );
 }
