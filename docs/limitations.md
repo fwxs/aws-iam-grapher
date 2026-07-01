@@ -48,13 +48,27 @@ AWS Organizations SCPs restrict what IAM entities in member accounts can do, eve
 
 **Workaround:** Retrieve the effective SCP stack via `aws organizations list-policies-for-target` and manually intersect with query output.
 
-### Policy conditions not evaluated
+### Policy conditions: a small deterministic subset is evaluated, the rest is flagged
 
-IAM policy statements may include `Condition` keys (e.g., `aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `s3:prefix`). Conditions restrict when a permission applies.
+IAM policy statements may include `Condition` keys (e.g., `aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `s3:prefix`, `aws:PrincipalTag/*`). Conditions restrict when a permission applies. Full evaluation is undecidable without runtime request context, so only a fixed, documented subset is evaluated.
 
-**V1 behavior:** The `Condition` block is stored as a raw JSON string property on the `Permission` node but is never evaluated. A permission guarded by `"aws:MultiFactorAuthPresent": "true"` is treated as unconditional in all queries.
+**V1 behavior:** The `Condition` block is stored as a JSON string on `Permission.condition` (`iam-graph/src/nodes/permission.rs`). `who-can` evaluates it via `iam_models::condition::evaluate` (`crates/iam-models/src/condition.rs`) against an optional `ConditionContext` built from CLI flags:
 
-**Workaround:** After identifying high-risk entities via `who-can` or `privilege-escalation`, check the `Permission.condition` property in Neo4j Browser to determine whether conditions gate access.
+| Condition key | Operators evaluated | CLI flag |
+|---|---|---|
+| `aws:MultiFactorAuthPresent` | `Bool` | `--mfa <true\|false>` |
+| `aws:RequestedRegion` | `StringEquals`, `StringLike` | `--region <name>` |
+| `aws:PrincipalTag/<key>` | `StringEquals`, `StringLike` | `--principal-tag <key>=<value>` (repeatable) |
+
+For each grant: if a supported key/operator pair has a matching context value and evaluates false, the grant is **excluded** from results (e.g. `--mfa false` drops a grant gated by `aws:MultiFactorAuthPresent: true`). If every supported key evaluates true but the grant carries any other key/operator (or a supported key has no matching context value), the grant is kept but the entity is returned with `conditional: true` and `unevaluated_condition_keys` listing what wasn't evaluated. **Unevaluated conditions are never silently treated as unconditional** — they always surface as `conditional`.
+
+**Not evaluated:** any key/operator outside the table above (e.g. `s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks), and conditions on `entity-perms` / `instance-profiles-with` (only `who-can` evaluates and flags conditions in V1).
+
+**Dedup approximation:** when the same entity has multiple grants for a queried action, `conditional` is true only if *every* surviving grant is conditional — an additional unconditional grant makes the entity's access unconditional overall. See `who_can()` in `crates/iam-graph/src/queries/analysis.rs`.
+
+**Relationship to trust-policy conditions:** trust policy (`AssumeRole`) conditions are evaluated separately by `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`), which understands only `StringEquals`/`StringEqualsIgnoreCase` on `aws:PrincipalAccount` — see "Trust policy evaluation is approximate" below. The two evaluators are not yet unified; a follow-up should consolidate trust-condition evaluation onto `iam_models::condition::evaluate`.
+
+**Workaround for unevaluated keys:** check the `unevaluated_condition_keys` field on `who-can` results (or `Permission.condition` directly in Neo4j Browser) to determine whether a flagged grant is actually gated in practice.
 
 ### Trust policy evaluation is approximate
 
