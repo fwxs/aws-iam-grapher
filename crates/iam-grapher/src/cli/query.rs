@@ -6,7 +6,9 @@ use iam_graph::{
     list_snapshots, privilege_escalation_paths, who_can, GraphClient, PermissionRow, QueryContext,
     DEFAULT_MAX_HOPS,
 };
+use iam_models::condition::ConditionContext;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -71,6 +73,15 @@ enum QueryCommand {
         /// grants whose resource scope doesn't cover it.
         #[arg(long)]
         resource: Option<String>,
+        /// Evaluate `aws:RequestedRegion` conditions against this region.
+        #[arg(long)]
+        region: Option<String>,
+        /// Evaluate `aws:MultiFactorAuthPresent` conditions against this value.
+        #[arg(long)]
+        mfa: Option<bool>,
+        /// Evaluate `aws:PrincipalTag/<key>` conditions against `key=value` (repeatable).
+        #[arg(long = "principal-tag")]
+        principal_tags: Vec<String>,
     },
     /// All permissions for a specific entity ARN.
     EntityPerms { arn: String },
@@ -196,10 +207,23 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             }
 
             match cmd {
-                QueryCommand::WhoCan { action, resource } => {
-                    let results = who_can(client.inner(), &ctx, action, resource.as_deref())
-                        .await
-                        .context("who-can query failed")?;
+                QueryCommand::WhoCan {
+                    action,
+                    resource,
+                    region,
+                    mfa,
+                    principal_tags,
+                } => {
+                    let condition_ctx = parse_condition_context(region, *mfa, principal_tags)?;
+                    let results = who_can(
+                        client.inner(),
+                        &ctx,
+                        action,
+                        resource.as_deref(),
+                        &condition_ctx,
+                    )
+                    .await
+                    .context("who-can query failed")?;
 
                     if !emit_json(&results, &args.output, args.output_file.as_deref())? {
                         return Ok(());
@@ -225,6 +249,12 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                             }
                             if e.is_bounded {
                                 type_label.push_str(" [bounded]");
+                            }
+                            if e.conditional {
+                                type_label.push_str(&format!(
+                                    " [conditional: {}]",
+                                    e.unevaluated_condition_keys.join(", ")
+                                ));
                             }
                             vec![type_label, e.arn.clone(), e.resource.clone()]
                         })
@@ -358,6 +388,26 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
 fn require_account_id(account_id: Option<&str>) -> anyhow::Result<&str> {
     account_id.ok_or_else(|| anyhow::anyhow!("--account-id is required for this subcommand"))
+}
+
+/// Build a [`ConditionContext`] from `--region`/`--mfa`/`--principal-tag` flags.
+fn parse_condition_context(
+    region: &Option<String>,
+    mfa: Option<bool>,
+    principal_tags: &[String],
+) -> anyhow::Result<ConditionContext> {
+    let mut tags = HashMap::new();
+    for entry in principal_tags {
+        let (key, value) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--principal-tag must be in `key=value` form, got `{entry}`")
+        })?;
+        tags.insert(key.to_string(), value.to_string());
+    }
+    Ok(ConditionContext {
+        region: region.clone(),
+        mfa,
+        principal_tags: tags,
+    })
 }
 
 async fn resolve_snapshot_id(
