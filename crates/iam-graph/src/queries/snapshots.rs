@@ -54,6 +54,28 @@ pub async fn list_snapshots(
     Ok(results)
 }
 
+const LATEST_ORG_RUN_QUERY: &str = "
+    MATCH (s:Snapshot)
+    WHERE s.org_collection_run_id IS NOT NULL AND s.org_collection_run_id <> ''
+    RETURN s.org_collection_run_id AS org_run_id
+    ORDER BY s.collected_at DESC
+    LIMIT 1
+";
+
+/// Return the most recent org collection run id, or `None` if no org runs exist.
+pub async fn latest_org_run_id(graph: &Graph) -> Result<Option<String>, GraphError> {
+    let mut stream = graph.execute(neo4rs::query(LATEST_ORG_RUN_QUERY)).await?;
+
+    if let Some(row) = stream.next().await? {
+        let id: String = row
+            .get("org_run_id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        Ok(Some(id))
+    } else {
+        Ok(None)
+    }
+}
+
 const DELETE_SNAPSHOT_QUERY: &str = include_str!("../../queries/delete_snapshot.cypher");
 
 const DELETE_SNAPSHOT_NODE_QUERY: &str = include_str!("../../queries/delete_snapshot_node.cypher");
