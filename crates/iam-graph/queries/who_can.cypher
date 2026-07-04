@@ -31,6 +31,9 @@
 // param $account_id: account scope for tenant isolation
 // param $deny_actions: concrete Deny action strings (exact/wildcard-matched/full-admin) that cover $action
 // param $boundary_allow_actions: concrete boundary Allow action strings (exact/wildcard-matched) that cover $action
+// Each arm also returns perm.condition (raw JSON string, or null) so the Rust caller can
+// evaluate the fixed condition subset (iam_models::condition::evaluate) against optional
+// query context and flag/exclude gated grants — see who_can() in src/queries/analysis.rs.
 
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
       -[:GRANTS]->(perm:Permission {
@@ -74,7 +77,8 @@ WHERE e.account_id = $account_id
   )
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type, false AS is_full_admin,
        perm.resource AS resource, 'exact' AS grant_kind,
-       EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded
+       EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
+       perm.condition AS condition
 UNION
 MATCH (u:User)-[:MEMBER_OF]->(g:Group)
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
@@ -119,7 +123,8 @@ WHERE u.account_id = $account_id
   )
 RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type, false AS is_full_admin,
        perm.resource AS resource, 'exact' AS grant_kind,
-       EXISTS { MATCH (u)-[:BOUNDED_BY]->(:Policy) } AS is_bounded
+       EXISTS { MATCH (u)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
+       perm.condition AS condition
 UNION
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
       -[:GRANTS]->(perm:Permission {
@@ -165,4 +170,5 @@ WHERE e.account_id = $account_id
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
        perm.excluded_actions IS NULL AS is_full_admin,
        perm.resource AS resource, 'wildcard' AS grant_kind,
-       EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded
+       EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
+       perm.condition AS condition

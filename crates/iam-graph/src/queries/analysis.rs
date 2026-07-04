@@ -1,5 +1,6 @@
 use crate::errors::GraphError;
 use crate::queries::context::QueryContext;
+use iam_models::condition::{self, ConditionContext, ConditionOutcome};
 use neo4rs::Graph;
 
 /// Reference to an IAM entity returned by analysis queries.
@@ -16,6 +17,12 @@ pub struct EntityRef {
     /// True when the entity has a Permission Boundary attached, regardless of whether the
     /// boundary capped the matched action.
     pub is_bounded: bool,
+    /// True when at least one surviving grant for this entity carries a `Condition` key
+    /// outside the evaluated subset (see `iam_models::condition`) — access is gated, not
+    /// unconditional, even though it's returned here. See `docs/limitations.md`.
+    pub conditional: bool,
+    /// Condition keys that could not be evaluated for this entity's grant(s).
+    pub unevaluated_condition_keys: Vec<String>,
 }
 
 /// A single permission row with named fields.
@@ -110,6 +117,7 @@ pub async fn who_can(
     ctx: &QueryContext,
     action: &str,
     resource: Option<&str>,
+    condition_ctx: &ConditionContext,
 ) -> Result<Vec<EntityRef>, GraphError> {
     let candidates = candidate_deny_actions(graph, ctx).await?;
     let deny_actions: Vec<String> = candidates
@@ -157,6 +165,9 @@ pub async fn who_can(
         let is_bounded: bool = row
             .get("is_bounded")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let condition_json: Option<String> = row
+            .get("condition")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
 
         // Only wildcard (action='*') grants are resource-scoped intersection candidates;
         // exact-action grants always pass through.
@@ -168,6 +179,12 @@ pub async fn who_can(
             }
         }
 
+        let (conditional, unevaluated_condition_keys) =
+            match evaluate_grant_condition(condition_json.as_deref(), condition_ctx) {
+                Some(outcome) => outcome,
+                None => continue,
+            };
+
         raw.push(EntityRef {
             arn,
             name,
@@ -175,23 +192,61 @@ pub async fn who_can(
             is_full_admin,
             resource: perm_resource,
             is_bounded,
+            conditional,
+            unevaluated_condition_keys,
         });
     }
 
     // Deduplicate by ARN (UNION arms can return the same entity via different paths).
     // If an entity appears as both specific-action and full-admin, keep is_full_admin: true.
+    // ponytail: an entity is conditional only if every surviving grant for it is conditional
+    // (AND across duplicates, union of keys) — a second, unconditional grant to the same
+    // action makes the entity's access unconditional overall. Refine only if a real case
+    // needs per-grant tracking instead of this per-entity approximation.
     let mut by_arn: std::collections::HashMap<String, EntityRef> = std::collections::HashMap::new();
     for entity in raw {
-        let entry = by_arn
+        by_arn
             .entry(entity.arn.clone())
-            .or_insert_with(|| entity.clone());
-        if entity.is_full_admin {
-            entry.is_full_admin = true;
-        }
+            .and_modify(|entry| {
+                if entity.is_full_admin {
+                    entry.is_full_admin = true;
+                }
+                entry.conditional = entry.conditional && entity.conditional;
+                for key in &entity.unevaluated_condition_keys {
+                    if !entry.unevaluated_condition_keys.contains(key) {
+                        entry.unevaluated_condition_keys.push(key.clone());
+                    }
+                }
+            })
+            .or_insert(entity);
     }
     let mut results: Vec<EntityRef> = by_arn.into_values().collect();
     results.sort_by(|a, b| a.arn.cmp(&b.arn));
     Ok(results)
+}
+
+/// Evaluate a grant's stored `Condition` JSON against query context.
+///
+/// Returns `None` when the grant is excluded (a supported condition key evaluated false —
+/// e.g. `--mfa false` against an `aws:MultiFactorAuthPresent: true` grant), otherwise
+/// `Some((conditional, unevaluated_keys))`.
+fn evaluate_grant_condition(
+    condition_json: Option<&str>,
+    ctx: &ConditionContext,
+) -> Option<(bool, Vec<String>)> {
+    let Some(condition_json) = condition_json else {
+        return Some((false, Vec::new()));
+    };
+    let parsed: iam_models::Condition = match serde_json::from_str(condition_json) {
+        Ok(c) => c,
+        // Unparseable stored condition — treat as unevaluated rather than dropping the grant.
+        Err(_) => return Some((true, vec!["<unparseable>".to_string()])),
+    };
+    match condition::evaluate(&parsed, ctx) {
+        ConditionOutcome::Unconditional => Some((false, Vec::new())),
+        ConditionOutcome::Excluded => None,
+        ConditionOutcome::Conditional { unevaluated_keys } => Some((true, unevaluated_keys)),
+    }
 }
 
 const ENTITY_PERMISSIONS_QUERY: &str = include_str!("../../queries/entity_permissions.cypher");
@@ -357,6 +412,8 @@ async fn collect_instance_profile_refs(
             is_full_admin: false,
             resource: String::new(),
             is_bounded: false,
+            conditional: false,
+            unevaluated_condition_keys: Vec::new(),
         });
     }
     Ok(results)

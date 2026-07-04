@@ -933,6 +933,65 @@ pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool)
     }
 }
 
+/// Build CollectedData with a role that has the given action gated by
+/// `aws:MultiFactorAuthPresent: true` in an inline policy.
+pub fn data_with_mfa_gated_role_action(account_id: &str, action: &str) -> CollectedData {
+    use iam_models::{
+        ConditionValues, Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/MfaGatedRole", account_id);
+    let mut condition_inner = HashMap::new();
+    condition_inner.insert(
+        "aws:MultiFactorAuthPresent".to_string(),
+        ConditionValues(vec!["true".to_string()]),
+    );
+    let mut condition = HashMap::new();
+    condition.insert("Bool".to_string(), condition_inner);
+
+    let inline = IamInlinePolicy {
+        policy_name: "MfaGatedPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec![action.to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: Some(condition),
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROAMFAGATED".to_string(),
+        role_name: "MfaGatedRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
 /// Build a role with a trust policy that lets `assumer_arn` assume it.
 fn role_with_trust(
     account_id: &str,
