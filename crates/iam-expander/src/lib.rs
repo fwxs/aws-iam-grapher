@@ -1,6 +1,5 @@
 mod cache;
 mod client;
-mod trie;
 
 pub use cache::ActionCache;
 
@@ -67,9 +66,13 @@ async fn expand_actions_with_cache(
     prefix: Option<&str>,
     cache: &mut ActionCache,
 ) -> Result<Vec<String>, ExpanderError> {
-    let trie = cache.get_or_fetch(service).await?;
-    let search = format!("{}:{}", service, prefix.unwrap_or(""));
-    Ok(trie.starts_with(&search))
+    let actions = cache.get_or_fetch(service).await?;
+    let search = prefix.unwrap_or("");
+    Ok(actions
+        .iter()
+        .filter(|a| a.starts_with(search))
+        .map(|a| format!("{service}:{a}"))
+        .collect())
 }
 
 async fn expand_statements(
@@ -189,22 +192,20 @@ fn glob_match_inner(p: &[char], t: &[char]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trie::Trie;
 
     fn make_cache_with(service: &str, actions: &[&str]) -> ActionCache {
         use std::collections::HashMap;
 
-        let mut tries = HashMap::new();
-        let mut trie = Trie::new();
-        for a in actions {
-            trie.insert(&format!("{service}:{a}"));
-        }
-        tries.insert(service.to_string(), trie);
+        let mut services = HashMap::new();
+        services.insert(
+            service.to_string(),
+            actions.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        );
 
         // Use a non-existent path so no disk I/O happens in tests
         ActionCache::from_parts(
             std::path::PathBuf::from("/tmp/test-cache-nonexistent.json"),
-            tries,
+            services,
         )
     }
 

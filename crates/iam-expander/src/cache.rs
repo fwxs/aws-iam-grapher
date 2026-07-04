@@ -3,16 +3,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{client, trie::Trie, ExpanderError};
+use crate::{client, ExpanderError};
 
 /// Disk-backed cache of IAM action lists, keyed by service name.
 ///
-/// Actions are stored as a flat JSON map so they can be read back without
-/// network access.  The in-memory tries are rebuilt from that map on load.
+/// Actions are stored unqualified (e.g. `"GetObject"`, not `"s3:GetObject"`).
 pub struct ActionCache {
     path: PathBuf,
     raw: RawCache,
-    tries: HashMap<String, Trie>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -30,25 +28,23 @@ impl ActionCache {
         } else {
             RawCache::default()
         };
-        let tries = build_tries(&raw.actions);
-        Ok(Self { path, raw, tries })
+        Ok(Self { path, raw })
     }
 
-    /// Returns the trie for `service`, fetching from the network when missing.
+    /// Returns unqualified actions for `service`, fetching from the network when missing.
     ///
     /// No longer persists on every miss — call [`flush`] once at end of run.
-    pub(crate) async fn get_or_fetch(&mut self, service: &str) -> Result<&Trie, ExpanderError> {
-        if !self.tries.contains_key(service) {
+    pub(crate) async fn get_or_fetch(&mut self, service: &str) -> Result<&[String], ExpanderError> {
+        if !self.raw.actions.contains_key(service) {
             let actions = client::fetch_actions(service).await?;
-            let mut trie = Trie::new();
-            for action in &actions {
-                trie.insert(&format!("{service}:{action}"));
-            }
             self.raw.actions.insert(service.to_string(), actions);
-            self.tries.insert(service.to_string(), trie);
         }
         // safe: we just inserted it above if it was missing
-        Ok(self.tries.get(service).expect("service was just inserted"))
+        Ok(self
+            .raw
+            .actions
+            .get(service)
+            .expect("service was just inserted"))
     }
 
     /// Atomically persists the cache to disk.
@@ -66,30 +62,14 @@ impl ActionCache {
         Ok(())
     }
 
-    /// Constructs an `ActionCache` directly from pre-built tries (test helper).
+    /// Constructs an `ActionCache` directly from pre-seeded actions (test helper).
     #[cfg(test)]
-    pub(crate) fn from_parts(path: PathBuf, tries: HashMap<String, Trie>) -> Self {
-        let actions: HashMap<String, Vec<String>> =
-            tries.keys().map(|k| (k.clone(), vec![])).collect();
+    pub(crate) fn from_parts(path: PathBuf, actions: HashMap<String, Vec<String>>) -> Self {
         Self {
             path,
             raw: RawCache { actions },
-            tries,
         }
     }
-}
-
-fn build_tries(actions: &HashMap<String, Vec<String>>) -> HashMap<String, Trie> {
-    actions
-        .iter()
-        .map(|(service, acts)| {
-            let mut trie = Trie::new();
-            for action in acts {
-                trie.insert(&format!("{service}:{action}"));
-            }
-            (service.clone(), trie)
-        })
-        .collect()
 }
 
 fn default_cache_path() -> Result<PathBuf, ExpanderError> {
