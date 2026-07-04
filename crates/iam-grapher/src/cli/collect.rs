@@ -3,7 +3,7 @@ use anyhow::Context as _;
 use clap::{Args, ValueEnum};
 use iam_collector::{
     CollectedData, CollectorError, CollectorWarning, HybridCollector, IamDataSource, LiveCollector,
-    OfflineCollectorBuilder,
+    OfflineCollector,
 };
 use iam_graph::{GraphClient, GraphIngester, IngestConfig, IngestStats};
 use std::path::PathBuf;
@@ -194,16 +194,16 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
                 .with_context(|| format!("failed to read {}", input_path.display()))
                 .map_err(|e| CollectorError::AwsSdk(e.to_string()))?;
 
-            let mut builder = OfflineCollectorBuilder::new().auth_details_json(&auth_json);
+            let profiles_json = match &args.profiles_file {
+                Some(profiles_path) => Some(
+                    std::fs::read_to_string(profiles_path)
+                        .with_context(|| format!("failed to read {}", profiles_path.display()))
+                        .map_err(|e| CollectorError::AwsSdk(e.to_string()))?,
+                ),
+                None => None,
+            };
 
-            if let Some(profiles_path) = &args.profiles_file {
-                let profiles_json = std::fs::read_to_string(profiles_path)
-                    .with_context(|| format!("failed to read {}", profiles_path.display()))
-                    .map_err(|e| CollectorError::AwsSdk(e.to_string()))?;
-                builder = builder.instance_profiles_json(&profiles_json);
-            }
-
-            let collector = builder.build()?;
+            let collector = OfflineCollector::new(&auth_json, profiles_json.as_deref())?;
             collector.collect().await
         }
     }

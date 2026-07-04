@@ -14,47 +14,22 @@ pub struct OfflineCollector {
     instance_profiles_json: Option<String>,
 }
 
-/// Builder for `OfflineCollector`.
-pub struct OfflineCollectorBuilder {
-    auth_details_json: String,
-    instance_profiles_json: Option<String>,
-}
-
-impl OfflineCollectorBuilder {
-    pub fn new() -> Self {
-        Self {
-            auth_details_json: String::new(),
-            instance_profiles_json: None,
-        }
-    }
-
-    /// Set JSON from `aws iam get-account-authorization-details`.
-    pub fn auth_details_json(mut self, json: &str) -> Self {
-        self.auth_details_json = json.to_string();
-        self
-    }
-
-    /// Optionally set JSON from `aws iam list-instance-profiles`.
-    pub fn instance_profiles_json(mut self, json: &str) -> Self {
-        self.instance_profiles_json = Some(json.to_string());
-        self
-    }
-
-    /// Validate the auth_details JSON (schema, not just syntax) and build the collector.
-    pub fn build(self) -> Result<OfflineCollector, CollectorError> {
+impl OfflineCollector {
+    /// Validates the auth_details JSON (schema, not just syntax) and builds the collector.
+    ///
+    /// `instance_profiles_json` is JSON from `aws iam list-instance-profiles`; omit it
+    /// when instance profiles were not collected.
+    pub fn new(
+        auth_details_json: &str,
+        instance_profiles_json: Option<&str>,
+    ) -> Result<Self, CollectorError> {
         // Parse to the typed struct so missing required fields are caught here,
         // not deferred to the first collect() call.
-        let _: AccountAuthorizationDetails = serde_json::from_str(&self.auth_details_json)?;
-        Ok(OfflineCollector {
-            auth_details_json: self.auth_details_json,
-            instance_profiles_json: self.instance_profiles_json,
+        let _: AccountAuthorizationDetails = serde_json::from_str(auth_details_json)?;
+        Ok(Self {
+            auth_details_json: auth_details_json.to_string(),
+            instance_profiles_json: instance_profiles_json.map(String::from),
         })
-    }
-}
-
-impl Default for OfflineCollectorBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
