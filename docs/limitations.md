@@ -220,3 +220,10 @@ exist, or is denied) is recorded as a warning and does not abort the rest of the
 account is still queried independently — `org_collection_run_id` is metadata for grouping
 snapshots, not a cross-account graph; cross-account `sts:AssumeRole` chaining between accounts
 in the same org is still future work (see Multi-account cross-account role chaining above).
+
+`--exclude-ou` matches only on OU **id** (e.g. `ou-sandbox-1111`), not the OU's display name, and
+only against OU ids actually encountered while walking the tree from the enumerated roots. If a
+value passed to `--exclude-ou` never matches — a typo, an OU name used by mistake, or an id from
+the wrong organization — it is reported as a warning (`--exclude-ou <id> did not match any
+organizational unit ...`) instead of being silently ignored, so a misconfigured exclusion doesn't
+look identical to "nothing needed excluding."

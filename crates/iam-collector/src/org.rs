@@ -90,11 +90,20 @@ impl OrgCollector {
     /// A single account's failure is recorded as a warning, not a fatal error.
     pub async fn collect(&self) -> Result<OrgCollectionResult, CollectorError> {
         let run_id = Uuid::new_v4().to_string();
-        let accounts = self.enumerate_accounts().await?;
+        let (accounts, unmatched_excludes) = self.enumerate_accounts().await?;
         info!(accounts = accounts.len(), "enumerated org accounts");
 
         let mut collected = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
+
+        for ou_id in &unmatched_excludes {
+            warn!(ou_id = %ou_id, "--exclude-ou did not match any OU encountered during enumeration");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--exclude-ou {ou_id} did not match any organizational unit in this organization \
+                 — check that it is the OU's id (e.g. \"ou-xxxx-yyyyyyyy\"), not its display name, \
+                 and that it is reachable from an enumerated root"
+            )));
+        }
 
         for account in &accounts {
             match self.collect_account(account).await {
@@ -149,18 +158,36 @@ impl OrgCollector {
         LiveCollector::new(iam_client).collect().await
     }
 
-    async fn enumerate_accounts(&self) -> Result<Vec<OrgAccount>, CollectorError> {
+    /// Enumerates every account reachable from the org roots, applying `--exclude-ou` pruning.
+    /// Returns the surviving accounts alongside any `exclude_ous` entries that never matched an
+    /// OU id encountered during the walk (a strong signal of a typo or an OU name passed instead
+    /// of an OU id, both of which would otherwise silently collect everything).
+    async fn enumerate_accounts(&self) -> Result<(Vec<OrgAccount>, Vec<String>), CollectorError> {
         let mut accounts = Vec::new();
+        let mut matched_excludes = std::collections::HashSet::new();
         let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
         while let Some(page) = root_paginator.next().await {
             let page = page.map_err(map_sdk_error)?;
             for root in page.roots() {
                 let root_id = root.id().unwrap_or_default().to_string();
-                self.collect_accounts_under(root_id.clone(), vec![root_id], &mut accounts)
-                    .await?;
+                self.collect_accounts_under(
+                    root_id.clone(),
+                    vec![root_id],
+                    &mut accounts,
+                    &mut matched_excludes,
+                )
+                .await?;
             }
         }
-        Ok(accounts)
+
+        let unmatched_excludes: Vec<String> = self
+            .exclude_ous
+            .iter()
+            .filter(|id| !matched_excludes.contains(*id))
+            .cloned()
+            .collect();
+
+        Ok((accounts, unmatched_excludes))
     }
 
     /// Recursively walk OUs under `parent_id`, collecting accounts and pruning excluded
@@ -170,6 +197,7 @@ impl OrgCollector {
         parent_id: String,
         ou_path: Vec<String>,
         out: &'a mut Vec<OrgAccount>,
+        matched_excludes: &'a mut std::collections::HashSet<String>,
     ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
         Box::pin(async move {
             let mut acct_paginator = self
@@ -200,11 +228,13 @@ impl OrgCollector {
                 for ou in page.organizational_units() {
                     let ou_id = ou.id().unwrap_or_default().to_string();
                     if self.exclude_ous.contains(&ou_id) {
+                        matched_excludes.insert(ou_id);
                         continue;
                     }
                     let mut child_path = ou_path.clone();
                     child_path.push(ou_id.clone());
-                    self.collect_accounts_under(ou_id, child_path, out).await?;
+                    self.collect_accounts_under(ou_id, child_path, out, matched_excludes)
+                        .await?;
                 }
             }
 
@@ -382,12 +412,13 @@ mod tests {
         );
 
         // Act
-        let accounts = collector
+        let (accounts, unmatched_excludes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
 
         // Assert
+        assert!(unmatched_excludes.is_empty());
         let mut ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, ["111111111111", "222222222222"]);
@@ -447,7 +478,7 @@ mod tests {
         );
 
         // Act
-        let accounts = collector
+        let (accounts, unmatched_excludes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -456,6 +487,107 @@ mod tests {
         // (no rule registered for parent_id == "ou-excluded", so a query there would panic).
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "333333333333");
+        assert!(unmatched_excludes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_reports_exclude_ou_that_matched_nothing() {
+        // Arrange: a plain org with no OUs at all — an `--exclude-ou` for an id that doesn't
+        // exist anywhere in the tree (typo, wrong path, or an OU name instead of an OU id) must
+        // be surfaced, not silently ignored, since a silent no-op looks identical to "the
+        // exclusion did nothing" from the user's point of view.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-does-not-exist".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(unmatched_excludes, vec!["ou-does-not-exist".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_excludes_deeply_nested_ou_subtree() {
+        // Arrange: root -> ou-a -> ou-excluded -> ou-nested -> account. Excluding ou-excluded
+        // (two levels down) must prune everything beneath it, including ou-nested's account.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-a", "A")]));
+        let a_ous_rule = mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-a"))
+            .then_output(|| ou_output(vec![("ou-excluded", "Excluded")]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let a_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-a"))
+            .then_output(|| accounts_output(vec![]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &a_ous_rule,
+                &root_accounts_rule,
+                &a_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-excluded".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act: if pruning fails, this panics (no rule registered for parent_id == "ou-excluded"
+        // or "ou-nested").
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert_eq!(accounts.len(), 0);
+        assert!(unmatched_excludes.is_empty());
     }
 
     #[tokio::test]
@@ -561,6 +693,52 @@ mod tests {
         assert_eq!(result.warnings.len(), 1);
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("222222222222"))
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_surfaces_warning_for_exclude_ou_that_matched_nothing() {
+        // Arrange: no OUs exist at all, but the caller passed --exclude-ou for one anyway
+        // (typo'd id, or an OU name instead of an id). Without a warning this looks exactly
+        // like a working exclusion that simply had nothing to exclude — the caller can't tell
+        // the difference between "correctly excluded" and "silently ignored".
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+
+        let assume_rule =
+            mock!(aws_sdk_sts::Client::assume_role).then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert("111111111111".to_string(), empty_auth_details_client());
+
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-typo".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(
+            matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("ou-typo"))
         );
     }
 }
