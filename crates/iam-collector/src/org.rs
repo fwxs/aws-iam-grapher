@@ -69,6 +69,21 @@ async fn resolve_configs(
     }
     let jump_from_config = jump_from_loader.load().await;
 
+    // jump_from_profile is often just a set of static/base credentials with no region of its
+    // own (that's the whole point — it exists only to call sts:AssumeRole). Since it's no
+    // longer sharing discovery_config, it needs its own region fallback: without one,
+    // Client::new(&jump_from_config) has no region at all and every call fails with
+    // ResolveEndpointError("Missing Region") before it ever reaches AWS.
+    let jump_from_config = if jump_from_config.region().is_some() {
+        jump_from_config
+    } else {
+        let region = discovery_config
+            .region()
+            .cloned()
+            .unwrap_or_else(|| Region::new("us-east-1"));
+        jump_from_config.into_builder().region(region).build()
+    };
+
     (discovery_config, jump_from_config)
 }
 
@@ -430,6 +445,50 @@ mod tests {
         assert_eq!(orgs_creds.access_key_id(), "MGMT_KEY");
         assert_eq!(sts_creds.access_key_id(), "JUMP_KEY");
         assert_ne!(orgs_creds.access_key_id(), sts_creds.access_key_id());
+    }
+
+    /// Regression test for the "Missing Region" `DispatchFailure` seen in real-world use:
+    /// `jump_from_profile` is often just static credentials with no `region` line, since its
+    /// only purpose is to call `sts:AssumeRole`. `resolve_configs` must fall its region back
+    /// to `management_profile`'s region rather than leaving `jump_from_config` with none.
+    #[tokio::test]
+    async fn resolve_configs_falls_back_jump_from_region_to_discovery_region() {
+        let _guard = AWS_ENV_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(
+            &creds_path,
+            "[mgmt]\naws_access_key_id = MGMT_KEY\naws_secret_access_key = mgmt-secret\n\n\
+             [default]\naws_access_key_id = JUMP_KEY\naws_secret_access_key = jump-secret\n",
+        )
+        .expect("write credentials file");
+
+        // Only "mgmt" has a region configured; "default" (the jump_from fallback profile) has
+        // none, mirroring a real base-credentials-only profile.
+        let config_path = dir.path().join("config");
+        std::fs::write(&config_path, "[profile mgmt]\nregion = eu-west-1\n")
+            .expect("write config file");
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+        std::env::set_var("AWS_CONFIG_FILE", &config_path);
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let (discovery_config, jump_from_config) = resolve_configs("mgmt".to_string(), None).await;
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        std::env::remove_var("AWS_CONFIG_FILE");
+
+        assert_eq!(discovery_config.region(), Some(&Region::new("eu-west-1")));
+        assert_eq!(
+            jump_from_config.region(),
+            Some(&Region::new("eu-west-1")),
+            "jump_from_config must fall back to the discovery region when its own profile has none"
+        );
     }
 
     #[tokio::test]

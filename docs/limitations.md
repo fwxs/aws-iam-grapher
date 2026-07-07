@@ -215,6 +215,12 @@ The `sts:AssumeRole` call into each member account's jump role always originates
 `role_arn`/`source_profile` chaining), reusing its credentials to call `AssumeRole` again would
 be a double-hop assumption that most jump-role trust policies reject with `AccessDenied`.
 
+`--jump-from-profile` is commonly just a set of static/base credentials with no `region` of its
+own — its only purpose is calling `sts:AssumeRole`. If it (or the default profile/env, when the
+flag is omitted) has no region configured, its region falls back to `--management-profile`'s
+region, then to `us-east-1`, so the jump-role assumption never fails with a
+`ResolveEndpointError("Missing Region")` dispatch error.
+
 ```bash
 aws-iam-grapher collect org \
   --management-profile org-management \
