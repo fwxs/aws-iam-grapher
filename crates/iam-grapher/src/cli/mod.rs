@@ -170,6 +170,32 @@ mod tests {
         assert_eq!(org_args.management_profile, "mgmt");
         assert_eq!(org_args.assume_role_name, "OrgAccess");
         assert_eq!(org_args.exclude_ous, vec!["ou-1111", "ou-2222"]);
+        assert_eq!(org_args.jump_from_profile, None);
+    }
+
+    #[test]
+    fn collect_org_parses_jump_from_profile() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--jump-from-profile",
+            "default",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.jump_from_profile, Some("default".to_string()));
     }
 
     #[test]
