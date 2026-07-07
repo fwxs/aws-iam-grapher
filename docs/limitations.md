@@ -221,10 +221,16 @@ flag is omitted) has no region configured, its region falls back to `--managemen
 region, then to `us-east-1`, so the jump-role assumption never fails with a
 `ResolveEndpointError("Missing Region")` dispatch error.
 
+`--region` (repeatable, both on `collect` and `collect org`) overrides that resolution
+explicitly: its first value is used for every AWS SDK call the running command makes,
+regardless of what the profile(s) configure. Omit it to use the profile-resolved region (falling
+back to `us-east-1` as above).
+
 ```bash
 aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
+  --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
   --exclude-ou ou-sandbox-1111 \
   --neo4j-pass "$NEO4J_PASSWORD"

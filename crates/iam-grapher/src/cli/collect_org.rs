@@ -28,6 +28,12 @@ pub struct OrgArgs {
     #[arg(long = "exclude-ou")]
     pub exclude_ous: Vec<String>,
 
+    /// AWS region(s) to use for org discovery and jump-role assumption. Repeatable; the first
+    /// entry wins and overrides whatever region --management-profile / --jump-from-profile
+    /// resolve. If omitted, falls back to the resolved profile region, then us-east-1.
+    #[arg(long = "region")]
+    pub regions: Vec<String>,
+
     #[command(flatten)]
     pub shared: SharedCollectArgs,
 }
@@ -36,6 +42,7 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
     let collector = OrgCollector::from_profile(
         args.management_profile.clone(),
         args.jump_from_profile.clone(),
+        &args.regions,
         args.assume_role_name.clone(),
         args.exclude_ous.clone(),
     )
