@@ -18,9 +18,9 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Collect IAM data and persist it in Neo4j.
-    Collect(CollectTopArgs),
+    Collect(Box<CollectTopArgs>),
     /// Run analysis queries against persisted IAM snapshots.
-    Query(query::QueryArgs),
+    Query(Box<query::QueryArgs>),
 }
 
 /// `collect` with no verb runs single-account collection (today's behavior, unchanged);
@@ -47,7 +47,7 @@ pub async fn run() -> anyhow::Result<()> {
             Some(CollectVerb::Org(args)) => collect_org::run(args).await,
             None => collect::run(top.account).await,
         },
-        Commands::Query(args) => query::run(args).await,
+        Commands::Query(args) => query::run(*args).await,
     }
 }
 
@@ -103,6 +103,7 @@ mod tests {
             },
             account_id: None,
             account_alias: None,
+            regions: Vec::new(),
         };
         assert!(collect::validate(&args).is_err());
     }
@@ -144,6 +145,35 @@ mod tests {
     }
 
     #[test]
+    fn collect_regions_flag_defaults_to_empty() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--neo4j-pass", "test"])
+            .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert!(top.account.regions.is_empty());
+    }
+
+    #[test]
+    fn collect_regions_flag_parses_repeated_values() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--region",
+            "us-west-2",
+            "--region",
+            "eu-central-1",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(top.account.regions, vec!["us-west-2", "eu-central-1"]);
+    }
+
+    #[test]
     fn collect_org_parses_with_required_args() {
         let cli = Cli::try_parse_from([
             "aws-iam-grapher",
@@ -155,9 +185,9 @@ mod tests {
             "OrgAccess",
             "--neo4j-pass",
             "test",
-            "--exclude-ou",
+            "--exclude-ou-id",
             "ou-1111",
-            "--exclude-ou",
+            "--exclude-ou-id",
             "ou-2222",
         ])
         .expect("parse must succeed");
@@ -169,7 +199,86 @@ mod tests {
         };
         assert_eq!(org_args.management_profile, "mgmt");
         assert_eq!(org_args.assume_role_name, "OrgAccess");
-        assert_eq!(org_args.exclude_ous, vec!["ou-1111", "ou-2222"]);
+        assert_eq!(org_args.exclude_ou_ids, vec!["ou-1111", "ou-2222"]);
+        assert_eq!(org_args.jump_from_profile, None);
+    }
+
+    #[test]
+    fn collect_org_parses_exclude_ou_name() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+            "--exclude-ou-name",
+            "Sandbox",
+            "--exclude-ou-name",
+            "Legacy",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.exclude_ou_names, vec!["Sandbox", "Legacy"]);
+        assert!(org_args.exclude_ou_ids.is_empty());
+    }
+
+    #[test]
+    fn collect_org_parses_jump_from_profile() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--jump-from-profile",
+            "default",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.jump_from_profile, Some("default".to_string()));
+    }
+
+    #[test]
+    fn collect_org_parses_region_flag() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+            "--region",
+            "us-west-2",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.regions, vec!["us-west-2"]);
     }
 
     #[test]

@@ -77,6 +77,12 @@ pub struct CollectArgs {
     /// Human-readable alias for this account.
     #[arg(long)]
     pub account_alias: Option<String>,
+
+    /// AWS region(s) to use for API calls. Repeatable; the first entry wins and overrides
+    /// whatever region the profile/environment resolves. Ignored in offline mode. If omitted,
+    /// falls back to the profile/environment's configured region, then us-east-1.
+    #[arg(long = "region")]
+    pub regions: Vec<String>,
 }
 
 /// Validate argument combinations before making any network calls.
@@ -179,12 +185,12 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     match args.mode {
         CollectMode::Live => {
             info!("building live collector");
-            let collector = LiveCollector::from_env().await?;
+            let collector = LiveCollector::from_env(&args.regions).await?;
             collector.collect().await
         }
         CollectMode::Hybrid => {
             info!("building hybrid collector");
-            let collector = HybridCollector::from_env().await?;
+            let collector = HybridCollector::from_env(&args.regions).await?;
             collector.collect().await
         }
         CollectMode::Offline => {

@@ -207,16 +207,51 @@ and files each account into its own `Snapshot`. Every snapshot produced by one r
 `org_collection_run_id` property, so a single org-wide collection can be queried as a group via
 `MATCH (s:Snapshot {org_collection_run_id: $run_id})`.
 
+`--management-profile` is used only for Organizations discovery (enumerating OUs and accounts).
+The `sts:AssumeRole` call into each member account's jump role always originates from
+`--jump-from-profile` instead (or, if omitted, the standard AWS credential chain —
+`AWS_PROFILE` / the `default` profile). These are kept separate on purpose: if
+`--management-profile` itself resolves to an assumed role (an SSO profile, or one with
+`role_arn`/`source_profile` chaining), reusing its credentials to call `AssumeRole` again would
+be a double-hop assumption that most jump-role trust policies reject with `AccessDenied`.
+
+`--jump-from-profile` is commonly just a set of static/base credentials with no `region` of its
+own — its only purpose is calling `sts:AssumeRole`. If it (or the default profile/env, when the
+flag is omitted) has no region configured, its region falls back to `--management-profile`'s
+region, then to `us-east-1`, so the jump-role assumption never fails with a
+`ResolveEndpointError("Missing Region")` dispatch error.
+
+`--region` (repeatable, both on `collect` and `collect org`) overrides that resolution
+explicitly: its first value is used for every AWS SDK call the running command makes,
+regardless of what the profile(s) configure. Omit it to use the profile-resolved region (falling
+back to `us-east-1` as above).
+
 ```bash
 aws-iam-grapher collect org \
   --management-profile org-management \
+  --jump-from-profile default \
+  --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
-  --exclude-ou ou-sandbox-1111 \
+  --exclude-ou-id ou-sandbox-1111 \
+  --exclude-ou-name Legacy \
   --neo4j-pass "$NEO4J_PASSWORD"
 ```
+
+`--exclude-ou-id` and `--exclude-ou-name` (both repeatable) prune matching OU subtrees before
+account enumeration — `--exclude-ou-id` matches the OU's id exactly, `--exclude-ou-name` matches
+its display name exactly. Either one excludes the OU and all its descendants (nested OUs and
+accounts).
 
 **Current behavior:** a single member account's collection failure (e.g. the jump role doesn't
 exist, or is denied) is recorded as a warning and does not abort the rest of the run. Each
 account is still queried independently — `org_collection_run_id` is metadata for grouping
 snapshots, not a cross-account graph; cross-account `sts:AssumeRole` chaining between accounts
 in the same org is still future work (see Multi-account cross-account role chaining above).
+
+`--exclude-ou-id` matches only against OU ids, `--exclude-ou-name` only against OU display names —
+each only against values actually encountered while walking the tree from the enumerated roots.
+If a value passed to either flag never matches — a typo, an id/name swap, or a value from the
+wrong organization — it is reported as a warning (`--exclude-ou-id <id> did not match any
+organizational unit ...` / `--exclude-ou-name <name> did not match any organizational unit's
+display name ...`) instead of being silently ignored, so a misconfigured exclusion doesn't look
+identical to "nothing needed excluding."

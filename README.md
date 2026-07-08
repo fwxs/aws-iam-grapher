@@ -166,6 +166,18 @@ aws-iam-grapher collect --mode hybrid --account-alias production
 
 ---
 
+## Logging
+
+`collect` and `collect org` log each AWS API call they make (region resolution, pagination
+progress, per-account jump-role assumption, etc.) at `info`/`debug` level via `tracing`.
+`info`-level logs are shown by default; for more detail (e.g. every paginated page fetched), set:
+
+```bash
+RUST_LOG=iam_collector=debug aws-iam-grapher collect --mode live --account-alias production
+```
+
+---
+
 ## Data Coverage by Collection Mode
 
 The table below shows what data is available in each mode. Missing data can silently skew analysis results — review this before interpreting the graph output.

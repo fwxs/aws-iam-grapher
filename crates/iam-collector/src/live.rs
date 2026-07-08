@@ -22,8 +22,15 @@ impl LiveCollector {
     }
 
     /// Create a collector loading credentials from the environment.
-    pub async fn from_env() -> Result<Self, CollectorError> {
+    ///
+    /// `regions` is the CLI `--region` flag: when non-empty, its first entry overrides
+    /// whatever region the profile/environment resolves; otherwise falls back to that
+    /// resolved region, then to `us-east-1`. See [`crate::resolve_region`].
+    pub async fn from_env(regions: &[String]) -> Result<Self, CollectorError> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+        let region = crate::resolve_region(regions, config.region());
+        info!(%region, "resolved AWS region for live collection");
+        let config = config.into_builder().region(region).build();
         Ok(Self::new(aws_sdk_iam::Client::new(&config)))
     }
 }
@@ -43,6 +50,7 @@ impl IamDataSource for LiveCollector {
         let mut groups: Vec<IamGroup> = Vec::new();
         let mut policies: Vec<IamPolicy> = Vec::new();
 
+        info!("fetching GetAccountAuthorizationDetails");
         let mut paginator = self
             .iam_client
             .get_account_authorization_details()
@@ -81,6 +89,7 @@ impl IamDataSource for LiveCollector {
         );
 
         // Paginate ListInstanceProfiles (non-fatal on 403)
+        info!("fetching ListInstanceProfiles");
         let mut instance_profiles: Vec<IamInstanceProfile> = Vec::new();
         let mut ip_paginator = self
             .iam_client

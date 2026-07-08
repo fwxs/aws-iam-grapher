@@ -7,7 +7,7 @@ use aws_sdk_iam::config::{Credentials, Region};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::SystemTime;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// One AWS account enumerated from the organization, with its OU path (root id first).
@@ -16,6 +16,29 @@ pub struct OrgAccount {
     pub id: String,
     pub name: String,
     pub ou_path: Vec<String>,
+}
+
+/// `--exclude-ou-id` / `--exclude-ou-name` entries that never matched any OU encountered
+/// while walking the org tree.
+#[derive(Debug, Default)]
+struct UnmatchedExcludes {
+    ids: Vec<String>,
+    names: Vec<String>,
+}
+
+#[cfg(test)]
+impl UnmatchedExcludes {
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.names.is_empty()
+    }
+}
+
+/// Tracks which `--exclude-ou-id` / `--exclude-ou-name` entries matched an OU during the walk,
+/// so [`OrgCollector::enumerate_accounts`] can report the ones that never did.
+#[derive(Debug, Default)]
+struct MatchedExcludes {
+    matched_ids: std::collections::HashSet<String>,
+    matched_names: std::collections::HashSet<String>,
 }
 
 /// Result of one AWS Organizations collection run: one `CollectedData` per account that
@@ -46,6 +69,53 @@ impl IamClientFactory for RealIamClientFactory {
     }
 }
 
+/// Resolves independent SDK configs for org discovery and jump-role assumption.
+///
+/// These must never share a credential chain: `management_profile` is allowed to resolve to an
+/// already-assumed role (SSO, `role_arn`/`source_profile` chaining, ...), and reusing those
+/// credentials to call `sts:AssumeRole` again into a member account would be a double-hop
+/// assumption that most jump-role trust policies reject. `jump_from_profile` — or, if `None`,
+/// the standard AWS credential chain — is used for role assumption instead, regardless of what
+/// `management_profile` resolves to.
+///
+/// `regions` is the CLI `--region` flag (see [`crate::resolve_region`]): its first entry, if
+/// any, overrides the region on *both* configs. Otherwise each config keeps its own
+/// profile-resolved region; a config with none falls back to the other's region, then to
+/// `us-east-1` — `jump_from_profile` in particular is often just static credentials with no
+/// region of its own, since its only purpose is calling `sts:AssumeRole`.
+async fn resolve_configs(
+    management_profile: String,
+    jump_from_profile: Option<String>,
+    regions: &[String],
+) -> (aws_config::SdkConfig, aws_config::SdkConfig) {
+    let discovery_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .profile_name(management_profile)
+        .load()
+        .await;
+    let discovery_region = crate::resolve_region(regions, discovery_config.region());
+    let discovery_config = discovery_config
+        .into_builder()
+        .region(discovery_region.clone())
+        .build();
+
+    let mut jump_from_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Some(profile) = jump_from_profile {
+        jump_from_loader = jump_from_loader.profile_name(profile);
+    }
+    let jump_from_config = jump_from_loader.load().await;
+    let jump_from_region = if !regions.is_empty() {
+        crate::resolve_region(regions, None)
+    } else {
+        crate::resolve_region(&[], jump_from_config.region().or(Some(&discovery_region)))
+    };
+    let jump_from_config = jump_from_config
+        .into_builder()
+        .region(jump_from_region)
+        .build();
+
+    (discovery_config, jump_from_config)
+}
+
 /// Collects IAM data across every member account of an AWS Organization.
 ///
 /// Enumerates the OU tree and accounts from the management account, prunes excluded OUs
@@ -55,32 +125,54 @@ pub struct OrgCollector {
     orgs_client: aws_sdk_organizations::Client,
     sts_client: aws_sdk_sts::Client,
     assume_role_name: String,
-    exclude_ous: Vec<String>,
+    exclude_ou_ids: Vec<String>,
+    exclude_ou_names: Vec<String>,
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
 }
 
 impl OrgCollector {
-    /// Build a collector from a named AWS profile for the organization's management account.
+    /// Build a collector for org-wide collection.
+    ///
+    /// `management_profile` is used only for Organizations discovery (enumerating OUs and
+    /// accounts). Role assumption into member accounts always originates from
+    /// `jump_from_profile` instead — never from `management_profile`'s resolved credentials.
+    /// This matters because `management_profile` may itself already be an assumed role (e.g.
+    /// an SSO profile or a profile with `role_arn`/`source_profile` chaining); reusing those
+    /// credentials to call `sts:AssumeRole` again would be a double-hop assumption that most
+    /// jump-role trust policies reject.
+    ///
+    /// `jump_from_profile` is the named AWS profile to use as that base identity. When `None`,
+    /// it falls back to the standard AWS credential chain (`AWS_PROFILE` / the `default`
+    /// profile) rather than `management_profile`.
+    ///
+    /// `regions` is the CLI `--region` flag; see [`resolve_configs`].
     pub async fn from_profile(
         management_profile: impl Into<String>,
+        jump_from_profile: Option<impl Into<String>>,
+        regions: &[String],
         assume_role_name: impl Into<String>,
-        exclude_ous: Vec<String>,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
     ) -> Result<Self, CollectorError> {
-        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .profile_name(management_profile.into())
-            .load()
-            .await;
-        let region = sdk_config
+        let (discovery_config, jump_from_config) = resolve_configs(
+            management_profile.into(),
+            jump_from_profile.map(Into::into),
+            regions,
+        )
+        .await;
+
+        let region = discovery_config
             .region()
             .cloned()
-            .unwrap_or_else(|| Region::new("us-east-1"));
+            .expect("resolve_configs always sets a region on discovery_config");
 
         Ok(Self {
-            orgs_client: aws_sdk_organizations::Client::new(&sdk_config),
-            sts_client: aws_sdk_sts::Client::new(&sdk_config),
+            orgs_client: aws_sdk_organizations::Client::new(&discovery_config),
+            sts_client: aws_sdk_sts::Client::new(&jump_from_config),
             assume_role_name: assume_role_name.into(),
-            exclude_ous,
+            exclude_ou_ids,
+            exclude_ou_names,
             region,
             client_factory: Box::new(RealIamClientFactory),
         })
@@ -90,13 +182,37 @@ impl OrgCollector {
     /// A single account's failure is recorded as a warning, not a fatal error.
     pub async fn collect(&self) -> Result<OrgCollectionResult, CollectorError> {
         let run_id = Uuid::new_v4().to_string();
-        let accounts = self.enumerate_accounts().await?;
+        info!(run_id = %run_id, "starting org-wide collection: enumerating accounts");
+        let (accounts, unmatched_excludes) = self.enumerate_accounts().await?;
         info!(accounts = accounts.len(), "enumerated org accounts");
 
         let mut collected = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
 
-        for account in &accounts {
+        for ou_id in &unmatched_excludes.ids {
+            warn!(ou_id = %ou_id, "--exclude-ou-id did not match any OU encountered during enumeration");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--exclude-ou-id {ou_id} did not match any organizational unit in this \
+                 organization — check that it is the OU's id (e.g. \"ou-xxxx-yyyyyyyy\") and that \
+                 it is reachable from an enumerated root"
+            )));
+        }
+        for ou_name in &unmatched_excludes.names {
+            warn!(ou_name = %ou_name, "--exclude-ou-name did not match any OU encountered during enumeration");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--exclude-ou-name {ou_name} did not match any organizational unit's display \
+                 name in this organization — check spelling and that it is reachable from an \
+                 enumerated root"
+            )));
+        }
+
+        for (index, account) in accounts.iter().enumerate() {
+            info!(
+                account_id = %account.id,
+                account_name = %account.name,
+                progress = format!("{}/{}", index + 1, accounts.len()),
+                "collecting account"
+            );
             match self.collect_account(account).await {
                 Ok(data) => collected.push(data),
                 Err(e) => {
@@ -118,6 +234,7 @@ impl OrgCollector {
 
     async fn collect_account(&self, account: &OrgAccount) -> Result<CollectedData, CollectorError> {
         let role_arn = format!("arn:aws:iam::{}:role/{}", account.id, self.assume_role_name);
+        info!(role_arn = %role_arn, region = %self.region, "assuming jump role");
         let assumed = self
             .sts_client
             .assume_role()
@@ -149,18 +266,51 @@ impl OrgCollector {
         LiveCollector::new(iam_client).collect().await
     }
 
-    async fn enumerate_accounts(&self) -> Result<Vec<OrgAccount>, CollectorError> {
+    /// Enumerates every account reachable from the org roots, applying `--exclude-ou-id` /
+    /// `--exclude-ou-name` pruning. Returns the surviving accounts alongside any exclude
+    /// entries that never matched an OU encountered during the walk (a strong signal of a typo,
+    /// both of which would otherwise silently collect everything).
+    async fn enumerate_accounts(
+        &self,
+    ) -> Result<(Vec<OrgAccount>, UnmatchedExcludes), CollectorError> {
+        debug!("fetching ListRoots");
         let mut accounts = Vec::new();
+        let mut matched_excludes = MatchedExcludes::default();
         let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
         while let Some(page) = root_paginator.next().await {
             let page = page.map_err(map_sdk_error)?;
             for root in page.roots() {
                 let root_id = root.id().unwrap_or_default().to_string();
-                self.collect_accounts_under(root_id.clone(), vec![root_id], &mut accounts)
-                    .await?;
+                self.collect_accounts_under(
+                    root_id.clone(),
+                    vec![root_id],
+                    &mut accounts,
+                    &mut matched_excludes,
+                )
+                .await?;
             }
         }
-        Ok(accounts)
+
+        let unmatched_ids: Vec<String> = self
+            .exclude_ou_ids
+            .iter()
+            .filter(|id| !matched_excludes.matched_ids.contains(*id))
+            .cloned()
+            .collect();
+        let unmatched_names: Vec<String> = self
+            .exclude_ou_names
+            .iter()
+            .filter(|name| !matched_excludes.matched_names.contains(*name))
+            .cloned()
+            .collect();
+
+        Ok((
+            accounts,
+            UnmatchedExcludes {
+                ids: unmatched_ids,
+                names: unmatched_names,
+            },
+        ))
     }
 
     /// Recursively walk OUs under `parent_id`, collecting accounts and pruning excluded
@@ -170,8 +320,10 @@ impl OrgCollector {
         parent_id: String,
         ou_path: Vec<String>,
         out: &'a mut Vec<OrgAccount>,
+        matched_excludes: &'a mut MatchedExcludes,
     ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
         Box::pin(async move {
+            debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
             let mut acct_paginator = self
                 .orgs_client
                 .list_accounts_for_parent()
@@ -189,6 +341,7 @@ impl OrgCollector {
                 }
             }
 
+            debug!(parent_id = %parent_id, "fetching ListOrganizationalUnitsForParent");
             let mut ou_paginator = self
                 .orgs_client
                 .list_organizational_units_for_parent()
@@ -199,12 +352,23 @@ impl OrgCollector {
                 let page = page.map_err(map_sdk_error)?;
                 for ou in page.organizational_units() {
                     let ou_id = ou.id().unwrap_or_default().to_string();
-                    if self.exclude_ous.contains(&ou_id) {
+                    let ou_name = ou.name().unwrap_or_default();
+                    if self.exclude_ou_ids.contains(&ou_id) {
+                        matched_excludes.matched_ids.insert(ou_id);
+                        continue;
+                    }
+                    if let Some(name) = self
+                        .exclude_ou_names
+                        .iter()
+                        .find(|name| name.as_str() == ou_name)
+                    {
+                        matched_excludes.matched_names.insert(name.clone());
                         continue;
                     }
                     let mut child_path = ou_path.clone();
                     child_path.push(ou_id.clone());
-                    self.collect_accounts_under(ou_id, child_path, out).await?;
+                    self.collect_accounts_under(ou_id, child_path, out, matched_excludes)
+                        .await?;
                 }
             }
 
@@ -262,14 +426,31 @@ mod tests {
     fn org_collector_with(
         orgs_client: aws_sdk_organizations::Client,
         sts_client: aws_sdk_sts::Client,
-        exclude_ous: Vec<String>,
+        exclude_ou_ids: Vec<String>,
+        client_factory: Box<dyn IamClientFactory>,
+    ) -> OrgCollector {
+        org_collector_with_excludes(
+            orgs_client,
+            sts_client,
+            exclude_ou_ids,
+            vec![],
+            client_factory,
+        )
+    }
+
+    fn org_collector_with_excludes(
+        orgs_client: aws_sdk_organizations::Client,
+        sts_client: aws_sdk_sts::Client,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
         client_factory: Box<dyn IamClientFactory>,
     ) -> OrgCollector {
         OrgCollector {
             orgs_client,
             sts_client,
             assume_role_name: "OrgJumpRole".to_string(),
-            exclude_ous,
+            exclude_ou_ids,
+            exclude_ou_names,
             region: Region::new("us-east-1"),
             client_factory,
         }
@@ -336,6 +517,150 @@ mod tests {
             .build()
     }
 
+    /// Serializes tests that mutate process-wide AWS credential env vars. `cargo test` runs
+    /// unit tests within one binary concurrently by default, and no other test in this file
+    /// (or this crate) touches these vars, but a mutex keeps the guarantee explicit rather
+    /// than implicit. Async-aware because the critical section spans `.await` points.
+    static AWS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Regression test for the double-hop `AssumeRole` bug: `resolve_configs` (used by
+    /// `from_profile`) must resolve org discovery credentials from `management_profile` and
+    /// jump-role-assumption credentials from a completely separate profile, never falling back
+    /// to `management_profile` for the latter. Uses two profiles with distinct static
+    /// credentials (no network calls needed to resolve static keys) and asserts the two
+    /// resolved configs end up with different identities.
+    #[tokio::test]
+    async fn resolve_configs_never_uses_management_profile_credentials_for_jump_from() {
+        use aws_sdk_sts::config::ProvideCredentials;
+        use std::io::Write;
+
+        let _guard = AWS_ENV_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("credentials");
+        let mut file = std::fs::File::create(&creds_path).expect("create credentials file");
+        writeln!(
+            file,
+            "[mgmt]\naws_access_key_id = MGMT_KEY\naws_secret_access_key = mgmt-secret\n\n\
+             [default]\naws_access_key_id = JUMP_KEY\naws_secret_access_key = jump-secret\n"
+        )
+        .expect("write credentials file");
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+        std::env::remove_var("AWS_CONFIG_FILE");
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let (discovery_config, jump_from_config) =
+            resolve_configs("mgmt".to_string(), None, &[]).await;
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+
+        let orgs_creds = discovery_config
+            .credentials_provider()
+            .expect("discovery config has a credentials provider")
+            .provide_credentials()
+            .await
+            .expect("resolve org discovery credentials");
+        let sts_creds = jump_from_config
+            .credentials_provider()
+            .expect("jump_from config has a credentials provider")
+            .provide_credentials()
+            .await
+            .expect("resolve jump_from credentials");
+
+        assert_eq!(orgs_creds.access_key_id(), "MGMT_KEY");
+        assert_eq!(sts_creds.access_key_id(), "JUMP_KEY");
+        assert_ne!(orgs_creds.access_key_id(), sts_creds.access_key_id());
+    }
+
+    /// Regression test for the "Missing Region" `DispatchFailure` seen in real-world use:
+    /// `jump_from_profile` is often just static credentials with no `region` line, since its
+    /// only purpose is to call `sts:AssumeRole`. `resolve_configs` must fall its region back
+    /// to `management_profile`'s region rather than leaving `jump_from_config` with none.
+    #[tokio::test]
+    async fn resolve_configs_falls_back_jump_from_region_to_discovery_region() {
+        let _guard = AWS_ENV_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(
+            &creds_path,
+            "[mgmt]\naws_access_key_id = MGMT_KEY\naws_secret_access_key = mgmt-secret\n\n\
+             [default]\naws_access_key_id = JUMP_KEY\naws_secret_access_key = jump-secret\n",
+        )
+        .expect("write credentials file");
+
+        // Only "mgmt" has a region configured; "default" (the jump_from fallback profile) has
+        // none, mirroring a real base-credentials-only profile.
+        let config_path = dir.path().join("config");
+        std::fs::write(&config_path, "[profile mgmt]\nregion = eu-west-1\n")
+            .expect("write config file");
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+        std::env::set_var("AWS_CONFIG_FILE", &config_path);
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let (discovery_config, jump_from_config) =
+            resolve_configs("mgmt".to_string(), None, &[]).await;
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        std::env::remove_var("AWS_CONFIG_FILE");
+
+        assert_eq!(discovery_config.region(), Some(&Region::new("eu-west-1")));
+        assert_eq!(
+            jump_from_config.region(),
+            Some(&Region::new("eu-west-1")),
+            "jump_from_config must fall back to the discovery region when its own profile has none"
+        );
+    }
+
+    /// An explicit `--region` flag must override both configs' profile-resolved regions, not
+    /// just fill in a missing one.
+    #[tokio::test]
+    async fn resolve_configs_explicit_regions_override_both_configs() {
+        let _guard = AWS_ENV_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(
+            &creds_path,
+            "[mgmt]\naws_access_key_id = MGMT_KEY\naws_secret_access_key = mgmt-secret\n\n\
+             [default]\naws_access_key_id = JUMP_KEY\naws_secret_access_key = jump-secret\n",
+        )
+        .expect("write credentials file");
+
+        let config_path = dir.path().join("config");
+        std::fs::write(
+            &config_path,
+            "[profile mgmt]\nregion = eu-west-1\n\n[default]\nregion = ap-southeast-2\n",
+        )
+        .expect("write config file");
+
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+        std::env::set_var("AWS_CONFIG_FILE", &config_path);
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let (discovery_config, jump_from_config) =
+            resolve_configs("mgmt".to_string(), None, &["us-west-2".to_string()]).await;
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        std::env::remove_var("AWS_CONFIG_FILE");
+
+        assert_eq!(discovery_config.region(), Some(&Region::new("us-west-2")));
+        assert_eq!(jump_from_config.region(), Some(&Region::new("us-west-2")));
+    }
+
     #[tokio::test]
     async fn enumerate_accounts_returns_accounts_across_root_and_nested_ou() {
         // Arrange: root has one direct account and one child OU with one account.
@@ -382,12 +707,13 @@ mod tests {
         );
 
         // Act
-        let accounts = collector
+        let (accounts, unmatched_excludes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
 
         // Assert
+        assert!(unmatched_excludes.is_empty());
         let mut ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, ["111111111111", "222222222222"]);
@@ -447,7 +773,7 @@ mod tests {
         );
 
         // Act
-        let accounts = collector
+        let (accounts, unmatched_excludes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -456,6 +782,171 @@ mod tests {
         // (no rule registered for parent_id == "ou-excluded", so a query there would panic).
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "333333333333");
+        assert!(unmatched_excludes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_reports_exclude_ou_that_matched_nothing() {
+        // Arrange: a plain org with no OUs at all — an `--exclude-ou` for an id that doesn't
+        // exist anywhere in the tree (typo, wrong path, or an OU name instead of an OU id) must
+        // be surfaced, not silently ignored, since a silent no-op looks identical to "the
+        // exclusion did nothing" from the user's point of view.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-does-not-exist".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            unmatched_excludes.ids,
+            vec!["ou-does-not-exist".to_string()]
+        );
+        assert!(unmatched_excludes.names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_excludes_deeply_nested_ou_subtree() {
+        // Arrange: root -> ou-a -> ou-excluded -> ou-nested -> account. Excluding ou-excluded
+        // (two levels down) must prune everything beneath it, including ou-nested's account.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-a", "A")]));
+        let a_ous_rule = mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-a"))
+            .then_output(|| ou_output(vec![("ou-excluded", "Excluded")]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let a_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-a"))
+            .then_output(|| accounts_output(vec![]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &a_ous_rule,
+                &root_accounts_rule,
+                &a_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-excluded".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act: if pruning fails, this panics (no rule registered for parent_id == "ou-excluded"
+        // or "ou-nested").
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert_eq!(accounts.len(), 0);
+        assert!(unmatched_excludes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_excludes_ou_subtree_by_name() {
+        // Arrange: root has child OU "ou-excluded" (name "Excluded") with its own nested OU +
+        // account — all pruned by matching the display name, not the id.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-excluded", "Excluded"), ("ou-kept", "Kept")]));
+        let kept_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-kept"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let kept_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-kept"))
+            .then_output(|| accounts_output(vec![("333333333333", "kept-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &kept_ous_rule,
+                &root_accounts_rule,
+                &kept_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_excludes(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec!["Excluded".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert: only the kept-OU account shows up; the excluded subtree was never queried
+        // (no rule registered for parent_id == "ou-excluded", so a query there would panic).
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "333333333333");
+        assert!(unmatched_excludes.is_empty());
     }
 
     #[tokio::test]
@@ -561,6 +1052,52 @@ mod tests {
         assert_eq!(result.warnings.len(), 1);
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("222222222222"))
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_surfaces_warning_for_exclude_ou_that_matched_nothing() {
+        // Arrange: no OUs exist at all, but the caller passed --exclude-ou for one anyway
+        // (typo'd id, or an OU name instead of an id). Without a warning this looks exactly
+        // like a working exclusion that simply had nothing to exclude — the caller can't tell
+        // the difference between "correctly excluded" and "silently ignored".
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+
+        let assume_rule =
+            mock!(aws_sdk_sts::Client::assume_role).then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert("111111111111".to_string(), empty_auth_details_client());
+
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec!["ou-typo".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 1);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(
+            matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("ou-typo"))
         );
     }
 }
