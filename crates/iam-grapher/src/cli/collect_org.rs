@@ -25,8 +25,12 @@ pub struct OrgArgs {
     pub assume_role_name: String,
 
     /// Organizational Unit id to exclude (and its descendants). Repeatable.
-    #[arg(long = "exclude-ou")]
-    pub exclude_ous: Vec<String>,
+    #[arg(long = "exclude-ou-id")]
+    pub exclude_ou_ids: Vec<String>,
+
+    /// Organizational Unit display name to exclude (and its descendants). Repeatable.
+    #[arg(long = "exclude-ou-name")]
+    pub exclude_ou_names: Vec<String>,
 
     /// AWS region(s) to use for org discovery and jump-role assumption. Repeatable; the first
     /// entry wins and overrides whatever region --management-profile / --jump-from-profile
@@ -44,7 +48,8 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         args.jump_from_profile.clone(),
         &args.regions,
         args.assume_role_name.clone(),
-        args.exclude_ous.clone(),
+        args.exclude_ou_ids.clone(),
+        args.exclude_ou_names.clone(),
     )
     .await
     .context("failed to build org collector")?;

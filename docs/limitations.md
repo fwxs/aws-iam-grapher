@@ -232,9 +232,15 @@ aws-iam-grapher collect org \
   --jump-from-profile default \
   --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
-  --exclude-ou ou-sandbox-1111 \
+  --exclude-ou-id ou-sandbox-1111 \
+  --exclude-ou-name Legacy \
   --neo4j-pass "$NEO4J_PASSWORD"
 ```
+
+`--exclude-ou-id` and `--exclude-ou-name` (both repeatable) prune matching OU subtrees before
+account enumeration — `--exclude-ou-id` matches the OU's id exactly, `--exclude-ou-name` matches
+its display name exactly. Either one excludes the OU and all its descendants (nested OUs and
+accounts).
 
 **Current behavior:** a single member account's collection failure (e.g. the jump role doesn't
 exist, or is denied) is recorded as a warning and does not abort the rest of the run. Each
@@ -242,9 +248,10 @@ account is still queried independently — `org_collection_run_id` is metadata f
 snapshots, not a cross-account graph; cross-account `sts:AssumeRole` chaining between accounts
 in the same org is still future work (see Multi-account cross-account role chaining above).
 
-`--exclude-ou` matches only on OU **id** (e.g. `ou-sandbox-1111`), not the OU's display name, and
-only against OU ids actually encountered while walking the tree from the enumerated roots. If a
-value passed to `--exclude-ou` never matches — a typo, an OU name used by mistake, or an id from
-the wrong organization — it is reported as a warning (`--exclude-ou <id> did not match any
-organizational unit ...`) instead of being silently ignored, so a misconfigured exclusion doesn't
-look identical to "nothing needed excluding."
+`--exclude-ou-id` matches only against OU ids, `--exclude-ou-name` only against OU display names —
+each only against values actually encountered while walking the tree from the enumerated roots.
+If a value passed to either flag never matches — a typo, an id/name swap, or a value from the
+wrong organization — it is reported as a warning (`--exclude-ou-id <id> did not match any
+organizational unit ...` / `--exclude-ou-name <name> did not match any organizational unit's
+display name ...`) instead of being silently ignored, so a misconfigured exclusion doesn't look
+identical to "nothing needed excluding."

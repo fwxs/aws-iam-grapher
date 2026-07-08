@@ -185,9 +185,9 @@ mod tests {
             "OrgAccess",
             "--neo4j-pass",
             "test",
-            "--exclude-ou",
+            "--exclude-ou-id",
             "ou-1111",
-            "--exclude-ou",
+            "--exclude-ou-id",
             "ou-2222",
         ])
         .expect("parse must succeed");
@@ -199,8 +199,36 @@ mod tests {
         };
         assert_eq!(org_args.management_profile, "mgmt");
         assert_eq!(org_args.assume_role_name, "OrgAccess");
-        assert_eq!(org_args.exclude_ous, vec!["ou-1111", "ou-2222"]);
+        assert_eq!(org_args.exclude_ou_ids, vec!["ou-1111", "ou-2222"]);
         assert_eq!(org_args.jump_from_profile, None);
+    }
+
+    #[test]
+    fn collect_org_parses_exclude_ou_name() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+            "--exclude-ou-name",
+            "Sandbox",
+            "--exclude-ou-name",
+            "Legacy",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.exclude_ou_names, vec!["Sandbox", "Legacy"]);
+        assert!(org_args.exclude_ou_ids.is_empty());
     }
 
     #[test]

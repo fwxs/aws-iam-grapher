@@ -18,6 +18,29 @@ pub struct OrgAccount {
     pub ou_path: Vec<String>,
 }
 
+/// `--exclude-ou-id` / `--exclude-ou-name` entries that never matched any OU encountered
+/// while walking the org tree.
+#[derive(Debug, Default)]
+struct UnmatchedExcludes {
+    ids: Vec<String>,
+    names: Vec<String>,
+}
+
+#[cfg(test)]
+impl UnmatchedExcludes {
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.names.is_empty()
+    }
+}
+
+/// Tracks which `--exclude-ou-id` / `--exclude-ou-name` entries matched an OU during the walk,
+/// so [`OrgCollector::enumerate_accounts`] can report the ones that never did.
+#[derive(Debug, Default)]
+struct MatchedExcludes {
+    matched_ids: std::collections::HashSet<String>,
+    matched_names: std::collections::HashSet<String>,
+}
+
 /// Result of one AWS Organizations collection run: one `CollectedData` per account that
 /// was successfully collected, all tagged with a shared `run_id`.
 #[derive(Debug, Clone)]
@@ -102,7 +125,8 @@ pub struct OrgCollector {
     orgs_client: aws_sdk_organizations::Client,
     sts_client: aws_sdk_sts::Client,
     assume_role_name: String,
-    exclude_ous: Vec<String>,
+    exclude_ou_ids: Vec<String>,
+    exclude_ou_names: Vec<String>,
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
 }
@@ -128,7 +152,8 @@ impl OrgCollector {
         jump_from_profile: Option<impl Into<String>>,
         regions: &[String],
         assume_role_name: impl Into<String>,
-        exclude_ous: Vec<String>,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
     ) -> Result<Self, CollectorError> {
         let (discovery_config, jump_from_config) = resolve_configs(
             management_profile.into(),
@@ -146,7 +171,8 @@ impl OrgCollector {
             orgs_client: aws_sdk_organizations::Client::new(&discovery_config),
             sts_client: aws_sdk_sts::Client::new(&jump_from_config),
             assume_role_name: assume_role_name.into(),
-            exclude_ous,
+            exclude_ou_ids,
+            exclude_ou_names,
             region,
             client_factory: Box::new(RealIamClientFactory),
         })
@@ -163,12 +189,20 @@ impl OrgCollector {
         let mut collected = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
 
-        for ou_id in &unmatched_excludes {
-            warn!(ou_id = %ou_id, "--exclude-ou did not match any OU encountered during enumeration");
+        for ou_id in &unmatched_excludes.ids {
+            warn!(ou_id = %ou_id, "--exclude-ou-id did not match any OU encountered during enumeration");
             warnings.push(CollectorWarning::PartialData(format!(
-                "--exclude-ou {ou_id} did not match any organizational unit in this organization \
-                 — check that it is the OU's id (e.g. \"ou-xxxx-yyyyyyyy\"), not its display name, \
-                 and that it is reachable from an enumerated root"
+                "--exclude-ou-id {ou_id} did not match any organizational unit in this \
+                 organization — check that it is the OU's id (e.g. \"ou-xxxx-yyyyyyyy\") and that \
+                 it is reachable from an enumerated root"
+            )));
+        }
+        for ou_name in &unmatched_excludes.names {
+            warn!(ou_name = %ou_name, "--exclude-ou-name did not match any OU encountered during enumeration");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--exclude-ou-name {ou_name} did not match any organizational unit's display \
+                 name in this organization — check spelling and that it is reachable from an \
+                 enumerated root"
             )));
         }
 
@@ -232,14 +266,16 @@ impl OrgCollector {
         LiveCollector::new(iam_client).collect().await
     }
 
-    /// Enumerates every account reachable from the org roots, applying `--exclude-ou` pruning.
-    /// Returns the surviving accounts alongside any `exclude_ous` entries that never matched an
-    /// OU id encountered during the walk (a strong signal of a typo or an OU name passed instead
-    /// of an OU id, both of which would otherwise silently collect everything).
-    async fn enumerate_accounts(&self) -> Result<(Vec<OrgAccount>, Vec<String>), CollectorError> {
+    /// Enumerates every account reachable from the org roots, applying `--exclude-ou-id` /
+    /// `--exclude-ou-name` pruning. Returns the surviving accounts alongside any exclude
+    /// entries that never matched an OU encountered during the walk (a strong signal of a typo,
+    /// both of which would otherwise silently collect everything).
+    async fn enumerate_accounts(
+        &self,
+    ) -> Result<(Vec<OrgAccount>, UnmatchedExcludes), CollectorError> {
         debug!("fetching ListRoots");
         let mut accounts = Vec::new();
-        let mut matched_excludes = std::collections::HashSet::new();
+        let mut matched_excludes = MatchedExcludes::default();
         let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
         while let Some(page) = root_paginator.next().await {
             let page = page.map_err(map_sdk_error)?;
@@ -255,14 +291,26 @@ impl OrgCollector {
             }
         }
 
-        let unmatched_excludes: Vec<String> = self
-            .exclude_ous
+        let unmatched_ids: Vec<String> = self
+            .exclude_ou_ids
             .iter()
-            .filter(|id| !matched_excludes.contains(*id))
+            .filter(|id| !matched_excludes.matched_ids.contains(*id))
+            .cloned()
+            .collect();
+        let unmatched_names: Vec<String> = self
+            .exclude_ou_names
+            .iter()
+            .filter(|name| !matched_excludes.matched_names.contains(*name))
             .cloned()
             .collect();
 
-        Ok((accounts, unmatched_excludes))
+        Ok((
+            accounts,
+            UnmatchedExcludes {
+                ids: unmatched_ids,
+                names: unmatched_names,
+            },
+        ))
     }
 
     /// Recursively walk OUs under `parent_id`, collecting accounts and pruning excluded
@@ -272,7 +320,7 @@ impl OrgCollector {
         parent_id: String,
         ou_path: Vec<String>,
         out: &'a mut Vec<OrgAccount>,
-        matched_excludes: &'a mut std::collections::HashSet<String>,
+        matched_excludes: &'a mut MatchedExcludes,
     ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
         Box::pin(async move {
             debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
@@ -304,8 +352,17 @@ impl OrgCollector {
                 let page = page.map_err(map_sdk_error)?;
                 for ou in page.organizational_units() {
                     let ou_id = ou.id().unwrap_or_default().to_string();
-                    if self.exclude_ous.contains(&ou_id) {
-                        matched_excludes.insert(ou_id);
+                    let ou_name = ou.name().unwrap_or_default();
+                    if self.exclude_ou_ids.contains(&ou_id) {
+                        matched_excludes.matched_ids.insert(ou_id);
+                        continue;
+                    }
+                    if let Some(name) = self
+                        .exclude_ou_names
+                        .iter()
+                        .find(|name| name.as_str() == ou_name)
+                    {
+                        matched_excludes.matched_names.insert(name.clone());
                         continue;
                     }
                     let mut child_path = ou_path.clone();
@@ -369,14 +426,31 @@ mod tests {
     fn org_collector_with(
         orgs_client: aws_sdk_organizations::Client,
         sts_client: aws_sdk_sts::Client,
-        exclude_ous: Vec<String>,
+        exclude_ou_ids: Vec<String>,
+        client_factory: Box<dyn IamClientFactory>,
+    ) -> OrgCollector {
+        org_collector_with_excludes(
+            orgs_client,
+            sts_client,
+            exclude_ou_ids,
+            vec![],
+            client_factory,
+        )
+    }
+
+    fn org_collector_with_excludes(
+        orgs_client: aws_sdk_organizations::Client,
+        sts_client: aws_sdk_sts::Client,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
         client_factory: Box<dyn IamClientFactory>,
     ) -> OrgCollector {
         OrgCollector {
             orgs_client,
             sts_client,
             assume_role_name: "OrgJumpRole".to_string(),
-            exclude_ous,
+            exclude_ou_ids,
+            exclude_ou_names,
             region: Region::new("us-east-1"),
             client_factory,
         }
@@ -751,7 +825,11 @@ mod tests {
 
         // Assert
         assert_eq!(accounts.len(), 1);
-        assert_eq!(unmatched_excludes, vec!["ou-does-not-exist".to_string()]);
+        assert_eq!(
+            unmatched_excludes.ids,
+            vec!["ou-does-not-exist".to_string()]
+        );
+        assert!(unmatched_excludes.names.is_empty());
     }
 
     #[tokio::test]
@@ -808,6 +886,66 @@ mod tests {
 
         // Assert
         assert_eq!(accounts.len(), 0);
+        assert!(unmatched_excludes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_excludes_ou_subtree_by_name() {
+        // Arrange: root has child OU "ou-excluded" (name "Excluded") with its own nested OU +
+        // account — all pruned by matching the display name, not the id.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-excluded", "Excluded"), ("ou-kept", "Kept")]));
+        let kept_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-kept"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let kept_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-kept"))
+            .then_output(|| accounts_output(vec![("333333333333", "kept-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &kept_ous_rule,
+                &root_accounts_rule,
+                &kept_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_excludes(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec!["Excluded".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert: only the kept-OU account shows up; the excluded subtree was never queried
+        // (no rule registered for parent_id == "ou-excluded", so a query there would panic).
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "333333333333");
         assert!(unmatched_excludes.is_empty());
     }
 
