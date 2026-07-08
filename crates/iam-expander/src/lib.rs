@@ -30,7 +30,9 @@ pub async fn expand_actions(
     prefix: Option<&str>,
 ) -> Result<Vec<String>, ExpanderError> {
     let mut cache = ActionCache::load().await?;
-    expand_actions_with_cache(service, prefix, &mut cache).await
+    let result = expand_actions_with_cache(service, prefix, &mut cache).await?;
+    cache.flush().await?;
+    Ok(result)
 }
 
 /// Expands all wildcards in a JSON policy document.
@@ -43,7 +45,9 @@ pub async fn expand_actions(
 /// cache load across all calls.
 pub async fn expand_policy_document(policy_json: &str) -> Result<String, ExpanderError> {
     let mut cache = ActionCache::load().await?;
-    expand_policy_document_with_cache(policy_json, &mut cache).await
+    let result = expand_policy_document_with_cache(policy_json, &mut cache).await?;
+    cache.flush().await?;
+    Ok(result)
 }
 
 /// Expands all wildcards in a JSON policy document using a caller-provided cache.
