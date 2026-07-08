@@ -30,8 +30,8 @@ struct ActionEntry {
 ///
 /// Expects `GET {ACTIONS_URL}` to return a JSON array of services, each with
 /// a `servicePrefix` and an `actions` list of `{"action": "svc:Name", ...}`
-/// entries. The host rejects non-browser clients, so a browser `User-Agent`
-/// is required.
+/// entries. The host rejects reqwest's default `User-Agent`; any explicit
+/// value works, so this does not need to mimic a browser.
 pub(crate) async fn fetch_all_actions() -> Result<HashMap<String, Vec<String>>, ExpanderError> {
     let response = http_client()
         .get(ACTIONS_URL)

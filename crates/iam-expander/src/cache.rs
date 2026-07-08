@@ -13,6 +13,10 @@ pub struct ActionCache {
     path: PathBuf,
     raw: RawCache,
     tries: HashMap<String, Trie>,
+    // ponytail: fetched_all resets every run even when the disk cache already
+    // holds all services, so an unknown-service query re-fetches the full
+    // catalog once per run. Gate on `!raw.actions.is_empty()` in `load` if
+    // that per-run refetch shows up as real cost.
     fetched_all: bool,
 }
 
