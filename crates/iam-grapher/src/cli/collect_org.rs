@@ -7,9 +7,18 @@ use uuid::Uuid;
 
 #[derive(Args)]
 pub struct OrgArgs {
-    /// Named AWS profile for the organization's management account.
+    /// Named AWS profile for the organization's management account. Used only for
+    /// Organizations discovery (enumerating OUs and accounts) — never for role assumption.
     #[arg(long)]
     pub management_profile: String,
+
+    /// Named AWS profile to assume the per-account jump role from. Role assumption always
+    /// originates from this profile, regardless of --management-profile, so a
+    /// --management-profile that itself resolves to an assumed role (e.g. SSO, or a profile
+    /// with role_arn/source_profile chaining) never double-hops the AssumeRole call. Defaults
+    /// to the standard AWS credential chain (AWS_PROFILE / the "default" profile) if omitted.
+    #[arg(long)]
+    pub jump_from_profile: Option<String>,
 
     /// IAM role name to assume in every member account.
     #[arg(long)]
@@ -19,6 +28,12 @@ pub struct OrgArgs {
     #[arg(long = "exclude-ou")]
     pub exclude_ous: Vec<String>,
 
+    /// AWS region(s) to use for org discovery and jump-role assumption. Repeatable; the first
+    /// entry wins and overrides whatever region --management-profile / --jump-from-profile
+    /// resolve. If omitted, falls back to the resolved profile region, then us-east-1.
+    #[arg(long = "region")]
+    pub regions: Vec<String>,
+
     #[command(flatten)]
     pub shared: SharedCollectArgs,
 }
@@ -26,6 +41,8 @@ pub struct OrgArgs {
 pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
     let collector = OrgCollector::from_profile(
         args.management_profile.clone(),
+        args.jump_from_profile.clone(),
+        &args.regions,
         args.assume_role_name.clone(),
         args.exclude_ous.clone(),
     )

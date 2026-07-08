@@ -207,9 +207,30 @@ and files each account into its own `Snapshot`. Every snapshot produced by one r
 `org_collection_run_id` property, so a single org-wide collection can be queried as a group via
 `MATCH (s:Snapshot {org_collection_run_id: $run_id})`.
 
+`--management-profile` is used only for Organizations discovery (enumerating OUs and accounts).
+The `sts:AssumeRole` call into each member account's jump role always originates from
+`--jump-from-profile` instead (or, if omitted, the standard AWS credential chain —
+`AWS_PROFILE` / the `default` profile). These are kept separate on purpose: if
+`--management-profile` itself resolves to an assumed role (an SSO profile, or one with
+`role_arn`/`source_profile` chaining), reusing its credentials to call `AssumeRole` again would
+be a double-hop assumption that most jump-role trust policies reject with `AccessDenied`.
+
+`--jump-from-profile` is commonly just a set of static/base credentials with no `region` of its
+own — its only purpose is calling `sts:AssumeRole`. If it (or the default profile/env, when the
+flag is omitted) has no region configured, its region falls back to `--management-profile`'s
+region, then to `us-east-1`, so the jump-role assumption never fails with a
+`ResolveEndpointError("Missing Region")` dispatch error.
+
+`--region` (repeatable, both on `collect` and `collect org`) overrides that resolution
+explicitly: its first value is used for every AWS SDK call the running command makes,
+regardless of what the profile(s) configure. Omit it to use the profile-resolved region (falling
+back to `us-east-1` as above).
+
 ```bash
 aws-iam-grapher collect org \
   --management-profile org-management \
+  --jump-from-profile default \
+  --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
   --exclude-ou ou-sandbox-1111 \
   --neo4j-pass "$NEO4J_PASSWORD"
