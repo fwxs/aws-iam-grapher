@@ -586,3 +586,53 @@ async fn ingest_trust_policy_with_not_principal_excludes_listed_entity() {
         "NotPrincipal-derived edge must stay conditional since the exclusion isn't fully resolved"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_stamps_ou_id_and_name_on_account_ingested_via_org_collection() {
+    let account_id = "777788889999";
+    let client = helpers::shared_client().await;
+    let mut config = helpers::test_config(account_id);
+    config.org_collection_run_id = Some(Uuid::new_v4().to_string());
+
+    let mut data = helpers::empty_data(account_id);
+    data.ou_id = Some("ou-root1-a1b2c3".to_string());
+    data.ou_name = Some("Sandbox".to_string());
+
+    let ingester = GraphIngester::new(client, config);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let accounts = iam_graph::list_accounts(ingester.client().inner())
+        .await
+        .expect("list_accounts query must succeed");
+    let account = accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .expect("ingested account must be present in list_accounts");
+    assert_eq!(account.ou_id.as_deref(), Some("ou-root1-a1b2c3"));
+    assert_eq!(account.ou_name.as_deref(), Some("Sandbox"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_leaves_ou_fields_blank_for_standalone_collection() {
+    let account_id = "888899990000";
+    let client = helpers::shared_client().await;
+    let config = helpers::test_config(account_id);
+
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let accounts = iam_graph::list_accounts(ingester.client().inner())
+        .await
+        .expect("list_accounts query must succeed");
+    let account = accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .expect("ingested account must be present in list_accounts");
+    assert_eq!(account.ou_id, None);
+    assert_eq!(account.ou_name, None);
+}
