@@ -25,11 +25,11 @@ The compiled binary is located at `target/release/aws-iam-grapher`.
 
 ---
 
-## Run with Docker
+## Run Neo4j with Docker
 
-A `docker-compose.yml` runs Neo4j and the grapher without a local Rust
-toolchain. Neo4j's `/data` directory is backed by the named volume
-`neo4j_data`, so snapshots survive container restarts.
+A `docker-compose.yml` runs Neo4j only; the `aws-iam-grapher` binary is built
+and run locally with `cargo`. Neo4j's `/data` directory is backed by the
+named volume `neo4j_data`, so snapshots survive container restarts.
 
 ```bash
 export NEO4J_PASSWORD=changeme   # required, no default password
@@ -37,33 +37,13 @@ export NEO4J_PASSWORD=changeme   # required, no default password
 # Start Neo4j and wait for it to become healthy
 docker compose up -d neo4j
 
-# Build the grapher image (multi-stage: only the release binary ships, no toolchain)
-docker compose build grapher
-
-# Offline collect — put your export under ./data, it's mounted at /import
-docker compose run --rm grapher collect \
+# Run the binary against it
+cargo run --release -- collect \
   --mode offline \
-  --input-file /import/auth-details.json \
-  --neo4j-uri bolt://neo4j:7687 \
-  --neo4j-user neo4j
-
-# Live/hybrid collect — needs AWS credentials. ~/.aws is mounted read-only
-# into the container; alternatively export AWS_* env vars before `run`.
-docker compose run --rm grapher collect \
-  --mode hybrid \
-  --neo4j-uri bolt://neo4j:7687 \
-  --neo4j-user neo4j
-
-# Query a previous snapshot
-docker compose run --rm grapher query list-snapshots \
-  --neo4j-uri bolt://neo4j:7687 \
+  --input-file ./data/auth-details.json \
+  --neo4j-uri bolt://localhost:7687 \
   --neo4j-user neo4j
 ```
-
-Only `--neo4j-pass` is read from the environment (`NEO4J_PASSWORD`, wired via
-clap's `env` attribute); `--neo4j-uri` and `--neo4j-user` must be passed
-explicitly since the compose default `bolt://localhost:7687` doesn't resolve
-to the `neo4j` service from inside the `grapher` container.
 
 **Persistence and reset:**
 
