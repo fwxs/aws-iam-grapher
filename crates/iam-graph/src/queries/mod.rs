@@ -15,7 +15,7 @@ pub use escalation::{
 };
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
 pub use snapshots::{
-    delete_snapshot, diff_permissions, latest_org_run_id, list_snapshots, PermissionDiff,
-    PermissionRecord, SnapshotRecord,
+    delete_snapshot, diff_permissions, latest_org_run_id, list_account_ids, list_snapshots,
+    snapshot_account_id, PermissionDiff, PermissionRecord, SnapshotRecord,
 };
 pub use stitch::stitch_cross_account;
