@@ -13,6 +13,7 @@ pub struct ActionCache {
     path: PathBuf,
     raw: RawCache,
     tries: HashMap<String, Trie>,
+    fetched_all: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -31,21 +32,39 @@ impl ActionCache {
             RawCache::default()
         };
         let tries = build_tries(&raw.actions);
-        Ok(Self { path, raw, tries })
+        Ok(Self {
+            path,
+            raw,
+            tries,
+            fetched_all: false,
+        })
     }
 
-    /// Returns the trie for `service`, fetching from the network when missing.
+    /// Returns the trie for `service`, fetching the full catalog from the
+    /// network when missing.
     ///
+    /// The remote API only exposes a bulk endpoint, so the first miss fetches
+    /// every service at once and populates the cache; subsequent misses in
+    /// the same run are treated as unknown services without another request.
     /// No longer persists on every miss — call [`flush`] once at end of run.
     pub(crate) async fn get_or_fetch(&mut self, service: &str) -> Result<&Trie, ExpanderError> {
         if !self.tries.contains_key(service) {
-            let actions = client::fetch_actions(service).await?;
-            let mut trie = Trie::new();
-            for action in &actions {
-                trie.insert(&format!("{service}:{action}"));
+            if self.fetched_all {
+                return Err(ExpanderError::UnknownService(service.to_string()));
             }
-            self.raw.actions.insert(service.to_string(), actions);
-            self.tries.insert(service.to_string(), trie);
+            let all = client::fetch_all_actions().await?;
+            self.fetched_all = true;
+            for (svc, actions) in all {
+                let mut trie = Trie::new();
+                for action in &actions {
+                    trie.insert(&format!("{svc}:{action}"));
+                }
+                self.raw.actions.insert(svc.clone(), actions);
+                self.tries.insert(svc, trie);
+            }
+            if !self.tries.contains_key(service) {
+                return Err(ExpanderError::UnknownService(service.to_string()));
+            }
         }
         // safe: we just inserted it above if it was missing
         Ok(self.tries.get(service).expect("service was just inserted"))
@@ -75,6 +94,7 @@ impl ActionCache {
             path,
             raw: RawCache { actions },
             tries,
+            fetched_all: false,
         }
     }
 }
