@@ -15,6 +15,11 @@ pub enum CollectorMode {
 pub struct CollectedData {
     pub source: CollectorMode,
     pub account_id: Option<String>,
+    /// Immediate parent OU id from an org-wide collection (`collect org`), or `None` for
+    /// standalone (live/offline/hybrid) collection or an account directly under the org root.
+    pub ou_id: Option<String>,
+    /// Immediate parent OU display name from an org-wide collection, or `None`.
+    pub ou_name: Option<String>,
     pub policies: Vec<IamPolicy>,
     pub roles: Vec<IamRole>,
     pub users: Vec<IamUser>,
@@ -29,6 +34,8 @@ impl Default for CollectedData {
         Self {
             source: CollectorMode::Offline,
             account_id: None,
+            ou_id: None,
+            ou_name: None,
             policies: Vec::new(),
             roles: Vec::new(),
             users: Vec::new(),

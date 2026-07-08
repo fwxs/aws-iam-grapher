@@ -91,6 +91,8 @@ impl GraphIngester {
         phase1.push(account::merge_account_query(
             acct_id,
             self.config.account_alias.as_deref(),
+            data.ou_id.as_deref(),
+            data.ou_name.as_deref(),
         ));
         // Collect all distinct service prefixes from policy statements
         let prefixes = collect_service_prefixes(data);

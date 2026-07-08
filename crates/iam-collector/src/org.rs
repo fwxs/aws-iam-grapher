@@ -16,6 +16,12 @@ pub struct OrgAccount {
     pub id: String,
     pub name: String,
     pub ou_path: Vec<String>,
+    /// Immediate parent OU id, or `None` if the account sits directly under the org root
+    /// (the root itself is not an organizational unit).
+    pub ou_id: Option<String>,
+    /// Immediate parent OU display name, or `None` if the account sits directly under the
+    /// org root.
+    pub ou_name: Option<String>,
 }
 
 /// `--exclude-ou-id` / `--exclude-ou-name` entries that never matched any OU encountered
@@ -214,7 +220,11 @@ impl OrgCollector {
                 "collecting account"
             );
             match self.collect_account(account).await {
-                Ok(data) => collected.push(data),
+                Ok(mut data) => {
+                    data.ou_id = account.ou_id.clone();
+                    data.ou_name = account.ou_name.clone();
+                    collected.push(data);
+                }
                 Err(e) => {
                     warn!(account_id = %account.id, error = %e, "skipping account in org collection");
                     warnings.push(CollectorWarning::PartialData(format!(
@@ -284,6 +294,7 @@ impl OrgCollector {
                 self.collect_accounts_under(
                     root_id.clone(),
                     vec![root_id],
+                    None,
                     &mut accounts,
                     &mut matched_excludes,
                 )
@@ -315,10 +326,14 @@ impl OrgCollector {
 
     /// Recursively walk OUs under `parent_id`, collecting accounts and pruning excluded
     /// OU subtrees. Boxed because async fns cannot recurse directly (infinite-sized future).
+    ///
+    /// `current_ou` is the immediate parent OU's (id, name), or `None` while still directly
+    /// under the org root — it is stamped onto every [`OrgAccount`] found at this level.
     fn collect_accounts_under<'a>(
         &'a self,
         parent_id: String,
         ou_path: Vec<String>,
+        current_ou: Option<(String, String)>,
         out: &'a mut Vec<OrgAccount>,
         matched_excludes: &'a mut MatchedExcludes,
     ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
@@ -337,6 +352,8 @@ impl OrgCollector {
                         id: a.id().unwrap_or_default().to_string(),
                         name: a.name().unwrap_or_default().to_string(),
                         ou_path: ou_path.clone(),
+                        ou_id: current_ou.as_ref().map(|(id, _)| id.clone()),
+                        ou_name: current_ou.as_ref().map(|(_, name)| name.clone()),
                     });
                 }
             }
@@ -352,7 +369,7 @@ impl OrgCollector {
                 let page = page.map_err(map_sdk_error)?;
                 for ou in page.organizational_units() {
                     let ou_id = ou.id().unwrap_or_default().to_string();
-                    let ou_name = ou.name().unwrap_or_default();
+                    let ou_name = ou.name().unwrap_or_default().to_string();
                     if self.exclude_ou_ids.contains(&ou_id) {
                         matched_excludes.matched_ids.insert(ou_id);
                         continue;
@@ -367,8 +384,14 @@ impl OrgCollector {
                     }
                     let mut child_path = ou_path.clone();
                     child_path.push(ou_id.clone());
-                    self.collect_accounts_under(ou_id, child_path, out, matched_excludes)
-                        .await?;
+                    self.collect_accounts_under(
+                        ou_id.clone(),
+                        child_path,
+                        Some((ou_id, ou_name)),
+                        out,
+                        matched_excludes,
+                    )
+                    .await?;
                 }
             }
 
@@ -725,6 +748,18 @@ mod tests {
             child.ou_path,
             vec!["r-root1".to_string(), "ou-child1".to_string()]
         );
+        assert_eq!(child.ou_id, Some("ou-child1".to_string()));
+        assert_eq!(child.ou_name, Some("Child".to_string()));
+
+        let root_account = accounts
+            .iter()
+            .find(|a| a.id == "111111111111")
+            .expect("root account present");
+        assert_eq!(
+            root_account.ou_id, None,
+            "an account directly under the org root has no OU"
+        );
+        assert_eq!(root_account.ou_name, None);
     }
 
     #[tokio::test]

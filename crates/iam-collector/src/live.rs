@@ -137,6 +137,8 @@ impl IamDataSource for LiveCollector {
         let mut data = CollectedData {
             source: CollectorMode::Live,
             account_id,
+            ou_id: None,
+            ou_name: None,
             policies,
             roles,
             users,
