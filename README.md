@@ -25,6 +25,39 @@ The compiled binary is located at `target/release/aws-iam-grapher`.
 
 ---
 
+## Run Neo4j with Docker
+
+A `docker-compose.yml` runs Neo4j only; the `aws-iam-grapher` binary is built
+and run locally with `cargo`. Neo4j's `/data` directory is backed by the
+named volume `neo4j_data`, so snapshots survive container restarts.
+
+```bash
+export NEO4J_PASSWORD=changeme   # required, no default password
+
+# Start Neo4j and wait for it to become healthy
+docker compose up -d neo4j
+
+# Run the binary against it
+cargo run --release -- collect \
+  --mode offline \
+  --input-file ./data/auth-details.json \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j
+```
+
+**Persistence and reset:**
+
+```bash
+docker compose down      # stops containers, keeps the neo4j_data volume
+docker compose up -d neo4j   # data from prior collect runs is still there
+
+docker volume inspect aws-iam-grapher_neo4j_data   # see where Docker stores it
+
+docker compose down -v   # drops the volume — full reset, all snapshots lost
+```
+
+---
+
 ## Running Tests
 
 ### Unit tests
