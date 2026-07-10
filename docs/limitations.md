@@ -18,7 +18,7 @@ Neo4j Community has no database-level user permissions. Any client with the bolt
 
 ### No online backup
 
-Neo4j Community does not include hot backup. To back up the graph, stop the container, copy the data directory, and restart.
+Neo4j Community does not include hot backup. To back up the graph, stop the container, copy the data directory, and restart. `scripts/neo4j-backup.sh` and `scripts/neo4j-restore.sh` automate this: they stop the `neo4j` compose service, tar the `aws-iam-grapher_neo4j_data` volume to (or from) a timestamped archive, and restart. Downtime equals the tar copy time — a few seconds for typical dev-sized snapshots. Neither script offers a hot/online path; both require the container to be stopped for the duration of the copy.
 
 ### No causal clustering
 
@@ -179,7 +179,11 @@ The UNWIND bulk-merge strategy (500-row batches, Phase 4) processes this load in
 
 **Practical ceiling for a single snapshot:** ~10,000 unique permission nodes ingested comfortably in under 2 minutes. Beyond this, Neo4j Community write latency dominates; consider sharding by account or increasing `batch_size` in `IngestConfig`.
 
-To reproduce: run the Docker-gated benchmark test:
+**Tuning `--batch-size`:** every `collect` subcommand exposes `--batch-size` (default 500), which sets `IngestConfig.batch_size` and controls how many Cypher rows are UNWOUND per transaction in `GraphIngester::execute_batch`. Larger batches reduce transaction overhead but hold more of the write in memory and in a single commit; smaller batches trade throughput for finer-grained failure recovery. Start from the default and increase in steps (e.g. 1000, 2000) while watching ingest wall-clock time — gains flatten once Neo4j's write path, not batching, is the bottleneck.
+
+**Sharding by account:** since every node and query is already scoped by `account_id` + `snapshot_id`, an account whose permission-node count approaches the ceiling can be collected into a **separate Neo4j instance** (its own `docker compose` project / data volume) rather than sharing one instance with other accounts. This keeps any single instance under the validated ceiling without code changes — `iam-grapher` already takes `--neo4j-uri` per invocation, so pointing different accounts at different instances is a deployment choice, not a schema change.
+
+To reproduce the benchmark: run the Docker-gated benchmark test:
 ```bash
 DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
   TESTCONTAINERS_RYUK_DISABLED=true \
