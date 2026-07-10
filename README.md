@@ -56,6 +56,26 @@ docker volume inspect aws-iam-grapher_neo4j_data   # see where Docker stores it
 docker compose down -v   # drops the volume — full reset, all snapshots lost
 ```
 
+**Backup and restore:**
+
+Neo4j Community has no online (hot) backup — only offline. `scripts/neo4j-backup.sh`
+and `scripts/neo4j-restore.sh` automate the offline procedure: stop the `neo4j`
+container, copy the `aws-iam-grapher_neo4j_data` volume to/from a timestamped
+tarball, restart. The container is down for the duration of the copy.
+
+```bash
+scripts/neo4j-backup.sh                          # writes ./backups/neo4j-backup-<timestamp>.tar.gz
+scripts/neo4j-restore.sh -f ./backups/neo4j-backup-<timestamp>.tar.gz
+```
+
+**Batch size and scale:**
+
+`--batch-size` (default 500, every `collect` subcommand) controls how many
+writes Neo4j commits per transaction during ingestion. See
+[`docs/limitations.md` § Validated scale ceiling](docs/limitations.md#validated-scale-ceiling)
+for tuning guidance and the account-sharding strategy for accounts that
+approach the ~10,000-permission-node practical ceiling.
+
 ---
 
 ## Running Tests
