@@ -236,6 +236,9 @@ ambiguous across accounts — pass `--account-id` to target one account instead.
 `diff` derives the account from its two snapshot ids when `--account-id` is omitted, and
 errors if the two snapshots belong to different accounts.
 
+`list-accounts` is inherently cross-account and never requires (or uses) `--account-id` — use
+it to discover which accounts exist in the graph before targeting one with `--account-id`.
+
 Add `--output-file <path>` to write the result as JSON to a file, regardless of `--output`. The
 human-readable table still prints to stdout — useful for downstream tooling that wants a clean
 JSON artifact without scraping stdout/stderr:
@@ -328,6 +331,23 @@ ENTITY                                           RISKY ACTIONS
 ──────────────────────────────────────────────── ──────────────────────────────────
 arn:aws:iam::123456789012:role/DevRole           iam:PassRole, iam:AttachRolePolicy
 arn:aws:iam::123456789012:user/developer         iam:CreatePolicyVersion
+```
+
+### List accounts
+
+No `--account-id` needed — lists every account currently in the graph. Accounts collected
+via `collect org` show their immediate Organizational Unit id/name; accounts collected via
+standalone `collect` (live/offline/hybrid) show blank OU columns.
+
+```bash
+aws-iam-grapher query list-accounts
+```
+
+```
+ACCOUNT ID     ALIAS         OU ID          OU NAME
+────────────── ───────────── ────────────── ───────────
+111122223333   production                              
+222233334444   staging       ou-root1-a1b2  Sandbox
 ```
 
 ### List snapshots

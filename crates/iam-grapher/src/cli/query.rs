@@ -3,7 +3,7 @@ use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
-    latest_org_run_id, list_account_ids, list_snapshots, org_escalation_paths,
+    latest_org_run_id, list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
     privilege_escalation_paths, snapshot_account_id, who_can, EntityRef, EscalationPath,
     GraphClient, OrgQueryContext, PermissionRow, QueryContext, DEFAULT_MAX_HOPS,
 };
@@ -218,6 +218,9 @@ enum QueryCommand {
     },
     /// List available snapshots for the account.
     ListSnapshots,
+    /// List every account in the graph, with its OU id/name if collected via `collect org`.
+    /// Cross-account by design — never requires `--account-id`.
+    ListAccounts,
     /// Compare permissions between two snapshots.
     Diff {
         snapshot_a: String,
@@ -279,6 +282,32 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             print!(
                 "{}",
                 table::format_table(&["SNAPSHOT ID", "ACCOUNT", "COLLECTED AT", "STATUS"], &rows)
+            );
+        }
+
+        QueryCommand::ListAccounts => {
+            let accounts = list_accounts(client.inner())
+                .await
+                .context("list-accounts query failed")?;
+
+            if !emit_json(&accounts, &args.output, args.output_file.as_deref())? {
+                return Ok(());
+            }
+
+            let rows: Vec<Vec<String>> = accounts
+                .iter()
+                .map(|a| {
+                    vec![
+                        a.id.clone(),
+                        a.alias.clone().unwrap_or_default(),
+                        a.ou_id.clone().unwrap_or_default(),
+                        a.ou_name.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            print!(
+                "{}",
+                table::format_table(&["ACCOUNT ID", "ALIAS", "OU ID", "OU NAME"], &rows)
             );
         }
 

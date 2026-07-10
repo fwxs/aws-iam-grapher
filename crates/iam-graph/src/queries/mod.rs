@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod analysis;
 pub mod context;
 pub mod escalation;
@@ -5,6 +6,7 @@ pub mod org_escalation;
 pub mod snapshots;
 pub mod stitch;
 
+pub use accounts::{list_accounts, AccountRecord};
 pub use analysis::{
     entity_permissions, instance_profiles_with_action, risky_instance_profiles, who_can, EntityRef,
     PermissionRow, RiskyInstanceProfile,

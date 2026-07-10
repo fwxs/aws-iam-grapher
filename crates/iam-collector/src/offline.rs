@@ -131,6 +131,8 @@ impl IamDataSource for OfflineCollector {
         let mut data = CollectedData {
             source: CollectorMode::Offline,
             account_id,
+            ou_id: None,
+            ou_name: None,
             policies,
             roles,
             users,
