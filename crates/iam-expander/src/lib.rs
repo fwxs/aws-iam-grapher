@@ -30,7 +30,9 @@ pub async fn expand_actions(
     prefix: Option<&str>,
 ) -> Result<Vec<String>, ExpanderError> {
     let mut cache = ActionCache::load().await?;
-    expand_actions_with_cache(service, prefix, &mut cache).await
+    let result = expand_actions_with_cache(service, prefix, &mut cache).await?;
+    cache.flush().await?;
+    Ok(result)
 }
 
 /// Expands all wildcards in a JSON policy document.
@@ -43,7 +45,9 @@ pub async fn expand_actions(
 /// cache load across all calls.
 pub async fn expand_policy_document(policy_json: &str) -> Result<String, ExpanderError> {
     let mut cache = ActionCache::load().await?;
-    expand_policy_document_with_cache(policy_json, &mut cache).await
+    let result = expand_policy_document_with_cache(policy_json, &mut cache).await?;
+    cache.flush().await?;
+    Ok(result)
 }
 
 /// Expands all wildcards in a JSON policy document using a caller-provided cache.
@@ -164,7 +168,10 @@ async fn expand_one_action(
 
 /// IAM wildcard match: `*` matches any sequence of characters, `?` matches one character.
 /// Matching is case-insensitive, consistent with AWS IAM policy evaluation.
-fn glob_match(pattern: &str, text: &str) -> bool {
+///
+/// `pattern` is the (possibly wildcarded) action string, e.g. a Deny statement's action;
+/// `text` is the concrete action being tested against it.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
     let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
     glob_match_inner(&p, &t)

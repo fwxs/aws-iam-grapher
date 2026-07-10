@@ -1,6 +1,6 @@
 [package]
 name = "iam-graph"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -13,6 +13,7 @@ serde_json    = { workspace = true }
 uuid          = { version = "^1.23.3", features = ["v4"] }
 iam-models    = { path = "../iam-models" }
 iam-collector = { path = "../iam-collector" }
+iam-expander  = { path = "../iam-expander" }
 
 [dev-dependencies]
 testcontainers         = "^0.27.3"

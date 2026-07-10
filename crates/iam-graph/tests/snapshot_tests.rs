@@ -1,6 +1,8 @@
 mod helpers;
 
-use iam_graph::{delete_snapshot, list_snapshots, GraphIngester};
+use iam_graph::{
+    delete_snapshot, list_account_ids, list_snapshots, snapshot_account_id, GraphIngester,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -150,4 +152,71 @@ async fn ingest_with_wildcards_not_expanded_warning_marks_snapshot_partial() {
             .contains(&"some wildcards not expanded".to_string()),
         "partial_reasons must include the wildcards reason"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn list_account_ids_returns_every_distinct_account_with_a_snapshot() {
+    let client = helpers::shared_client().await;
+    let account_a = "910000000001";
+    let account_b = "910000000002";
+
+    let ingester_a = GraphIngester::new(client, helpers::test_config(account_a));
+    ingester_a
+        .ingest(&helpers::empty_data(account_a))
+        .await
+        .expect("ingest A must succeed");
+
+    let client_b = helpers::shared_client().await;
+    let ingester_b = GraphIngester::new(client_b, helpers::test_config(account_b));
+    ingester_b
+        .ingest(&helpers::empty_data(account_b))
+        .await
+        .expect("ingest B must succeed");
+
+    let accounts = list_account_ids(ingester_b.client().inner())
+        .await
+        .expect("list_account_ids must succeed");
+
+    assert!(
+        accounts.contains(&account_a.to_string()),
+        "account A must be present"
+    );
+    assert!(
+        accounts.contains(&account_b.to_string()),
+        "account B must be present"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn snapshot_account_id_resolves_owning_account() {
+    let client = helpers::shared_client().await;
+    let account_id = "910000000003";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let resolved = snapshot_account_id(ingester.client().inner(), &snapshot_id)
+        .await
+        .expect("snapshot_account_id must succeed");
+
+    assert_eq!(resolved, Some(account_id.to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn snapshot_account_id_returns_none_for_unknown_snapshot() {
+    let client = helpers::shared_client().await;
+
+    let resolved = snapshot_account_id(client.inner(), "not-a-real-snapshot-id")
+        .await
+        .expect("snapshot_account_id must succeed");
+
+    assert_eq!(resolved, None);
 }

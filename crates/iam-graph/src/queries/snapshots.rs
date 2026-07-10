@@ -9,6 +9,7 @@ pub struct SnapshotRecord {
     pub collected_at: String,
     pub is_partial: bool,
     pub partial_reasons: Vec<String>,
+    pub org_collection_run_id: Option<String>,
 }
 
 const LIST_SNAPSHOTS_QUERY: &str = include_str!("../../queries/list_snapshots.cypher");
@@ -37,15 +38,80 @@ pub async fn list_snapshots(
             .get("is_partial")
             .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
         let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
+        let org_collection_run_id: Option<String> = row
+            .get::<String>("org_collection_run_id")
+            .ok()
+            .filter(|s| !s.is_empty());
         results.push(SnapshotRecord {
             id,
             account_id,
             collected_at,
             is_partial,
             partial_reasons,
+            org_collection_run_id,
         });
     }
     Ok(results)
+}
+
+const LIST_ACCOUNT_IDS_QUERY: &str = include_str!("../../queries/list_account_ids.cypher");
+
+/// Return every distinct account_id that has at least one snapshot in the graph.
+/// Used by the `query` CLI to fan out per-account when `--account-id` is omitted.
+pub async fn list_account_ids(graph: &Graph) -> Result<Vec<String>, GraphError> {
+    let mut stream = graph.execute(neo4rs::query(LIST_ACCOUNT_IDS_QUERY)).await?;
+
+    let mut results = Vec::new();
+    while let Some(row) = stream.next().await? {
+        let account_id: String = row
+            .get("account_id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        results.push(account_id);
+    }
+    Ok(results)
+}
+
+const SNAPSHOT_ACCOUNT_ID_QUERY: &str = include_str!("../../queries/snapshot_account_id.cypher");
+
+/// Look up the account_id a snapshot belongs to, or `None` if the snapshot doesn't exist.
+pub async fn snapshot_account_id(
+    graph: &Graph,
+    snapshot_id: &str,
+) -> Result<Option<String>, GraphError> {
+    let mut stream = graph
+        .execute(neo4rs::query(SNAPSHOT_ACCOUNT_ID_QUERY).param("snapshot_id", snapshot_id))
+        .await?;
+
+    if let Some(row) = stream.next().await? {
+        let account_id: String = row
+            .get("account_id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        Ok(Some(account_id))
+    } else {
+        Ok(None)
+    }
+}
+
+const LATEST_ORG_RUN_QUERY: &str = "
+    MATCH (s:Snapshot)
+    WHERE s.org_collection_run_id IS NOT NULL AND s.org_collection_run_id <> ''
+    RETURN s.org_collection_run_id AS org_run_id
+    ORDER BY s.collected_at DESC
+    LIMIT 1
+";
+
+/// Return the most recent org collection run id, or `None` if no org runs exist.
+pub async fn latest_org_run_id(graph: &Graph) -> Result<Option<String>, GraphError> {
+    let mut stream = graph.execute(neo4rs::query(LATEST_ORG_RUN_QUERY)).await?;
+
+    if let Some(row) = stream.next().await? {
+        let id: String = row
+            .get("org_run_id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        Ok(Some(id))
+    } else {
+        Ok(None)
+    }
 }
 
 const DELETE_SNAPSHOT_QUERY: &str = include_str!("../../queries/delete_snapshot.cypher");

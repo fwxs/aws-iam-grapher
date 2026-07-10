@@ -1,4 +1,5 @@
 use crate::nodes::uid::{entity_uid, excluded_permission_uid, inline_policy_uid, permission_uid};
+use iam_models::Condition;
 use neo4rs::{query, Query};
 
 const SNAPSHOT_INCLUDES: &str = "
@@ -44,6 +45,13 @@ const CAN_ASSUME: &str = "
     MERGE (pr)-[:CAN_ASSUME {conditional: $conditional}]->(r)
 ";
 
+const CAN_ASSUME_ROLE: &str = "
+    MATCH (assumer {arn: $principal_id, snapshot_id: $snapshot_id})
+    WHERE assumer:Role OR assumer:User
+    MATCH (r:Role {uid: $role_uid})
+    MERGE (assumer)-[:CAN_ASSUME_ROLE {conditional: $conditional}]->(r)
+";
+
 const CONTAINS_ROLE: &str = "
     MATCH (ip:InstanceProfile {uid: $profile_uid})
     MATCH (r:Role {uid: $role_uid})
@@ -55,6 +63,8 @@ const BOUNDED_BY: &str = "
     MATCH (p:Policy {uid: $policy_uid})
     MERGE (e)-[:BOUNDED_BY]->(p)
 ";
+
+const STITCH_CROSS_ACCOUNT: &str = include_str!("../../queries/stitch_cross_account.cypher");
 
 /// INCLUDES relationship from Snapshot to any entity node.
 pub fn snapshot_includes_query(snapshot_id: &str, entity_uid: &str) -> Query {
@@ -94,12 +104,13 @@ pub fn policy_grants_query(
     effect: &str,
     action: &str,
     resource: &str,
+    condition: Option<&Condition>,
 ) -> Query {
     query(POLICY_GRANTS)
         .param("policy_uid", entity_uid(snapshot_id, policy_arn))
         .param(
             "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource),
+            permission_uid(snapshot_id, effect, action, resource, condition),
         )
 }
 
@@ -111,6 +122,7 @@ pub fn inline_grants_query(
     effect: &str,
     action: &str,
     resource: &str,
+    condition: Option<&Condition>,
 ) -> Query {
     query(INLINE_GRANTS)
         .param(
@@ -119,7 +131,7 @@ pub fn inline_grants_query(
         )
         .param(
             "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource),
+            permission_uid(snapshot_id, effect, action, resource, condition),
         )
 }
 
@@ -130,12 +142,13 @@ pub fn policy_grants_excluded_query(
     effect: &str,
     resource: &str,
     excluded: &[String],
+    condition: Option<&Condition>,
 ) -> Query {
     query(POLICY_GRANTS)
         .param("policy_uid", entity_uid(snapshot_id, policy_arn))
         .param(
             "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
         )
 }
 
@@ -147,6 +160,7 @@ pub fn inline_grants_excluded_query(
     effect: &str,
     resource: &str,
     excluded: &[String],
+    condition: Option<&Condition>,
 ) -> Query {
     query(INLINE_GRANTS)
         .param(
@@ -155,7 +169,7 @@ pub fn inline_grants_excluded_query(
         )
         .param(
             "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
         )
 }
 
@@ -163,8 +177,12 @@ pub fn inline_grants_excluded_query(
 ///
 /// `principal_kind` should come from the trust policy block key (`AWS`, `Service`,
 /// `Federated`, `CanonicalUser`) rather than being re-inferred from the id string.
-/// `conditional` is `true` when the trust policy statement carries a `Condition` or
-/// `NotPrincipal` block — the edge is asserted but may not always hold at runtime.
+/// `conditional` is `true` when the edge's validity depends on a runtime value the
+/// ingester can't evaluate from collected data (e.g. `sts:ExternalId`, MFA, or an
+/// unresolved `NotPrincipal` exclusion) — see `ingester::classify_trust_condition`.
+/// Deterministic conditions (e.g. a `PrincipalAccount` check consistent with the
+/// listed principal) are folded into `false`; contradictory ones suppress the edge
+/// entirely before this function is even called.
 pub fn can_assume_query(
     snapshot_id: &str,
     principal_kind: &str,
@@ -175,6 +193,26 @@ pub fn can_assume_query(
     query(CAN_ASSUME)
         .param("principal_id", principal_id)
         .param("principal_type", principal_kind)
+        .param("role_uid", entity_uid(snapshot_id, role_arn))
+        .param("conditional", conditional)
+}
+
+/// CAN_ASSUME_ROLE from an in-snapshot Role/User entity to the Role it can assume.
+///
+/// Direct entity-to-entity bridge over `CAN_ASSUME` (which targets an ARN-keyed
+/// `Principal` node, not the entity node itself), materialized only when the trust
+/// policy principal resolves to a Role or User ARN present in this snapshot. This is
+/// what makes `CAN_ASSUME_ROLE*1..N` variable-length traversal possible for
+/// transitive `sts:AssumeRole` privilege-escalation analysis.
+pub fn can_assume_role_query(
+    snapshot_id: &str,
+    principal_arn: &str,
+    role_arn: &str,
+    conditional: bool,
+) -> Query {
+    query(CAN_ASSUME_ROLE)
+        .param("principal_id", principal_arn)
+        .param("snapshot_id", snapshot_id)
         .param("role_uid", entity_uid(snapshot_id, role_arn))
         .param("conditional", conditional)
 }
@@ -191,4 +229,14 @@ pub fn bounded_by_query(snapshot_id: &str, entity_arn: &str, boundary_arn: &str)
     query(BOUNDED_BY)
         .param("entity_uid", entity_uid(snapshot_id, entity_arn))
         .param("policy_uid", entity_uid(snapshot_id, boundary_arn))
+}
+
+/// Build the cross-account stitch query for one org collection run.
+///
+/// Materializes `CAN_ASSUME_ROLE {cross_account: true}` edges between entities in different
+/// account snapshots that share the same `org_collection_run_id`, validated against both the
+/// trust policy (via existing `CAN_ASSUME` → `Principal` nodes) and the assumer's own
+/// `sts:AssumeRole` grants. Idempotent — safe to re-run via `MERGE`.
+pub fn stitch_cross_account_query(org_run_id: &str) -> Query {
+    query(STITCH_CROSS_ACCOUNT).param("org_run_id", org_run_id)
 }

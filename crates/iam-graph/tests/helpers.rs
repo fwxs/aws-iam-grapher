@@ -104,6 +104,7 @@ pub fn test_config(account_id: &str) -> IngestConfig {
         account_id: account_id.to_string(),
         account_alias: Some("test-account".to_string()),
         dry_run: false,
+        org_collection_run_id: None,
     }
 }
 
@@ -483,6 +484,59 @@ pub fn data_with_full_admin_role(account_id: &str) -> CollectedData {
     }
 }
 
+/// Build CollectedData with a role holding `Action: "*"` scoped to a single `resource` (e.g. a
+/// specific bucket ARN), rather than the unrestricted `"*"` resource used by
+/// `data_with_full_admin_role`. Used to test `who_can`'s `--resource` intersection (M-A2).
+pub fn data_with_resource_scoped_full_admin_role(
+    account_id: &str,
+    resource: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/ScopedAdminRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "ScopedAdminPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["*".to_string()],
+                not_action: vec![],
+                resource: vec![resource.to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_SCOPED_ADMIN".to_string(),
+        role_name: "ScopedAdminRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData carrying a InstanceProfilesMissing warning.
 pub fn data_with_missing_profiles_warning(account_id: &str) -> CollectedData {
     use iam_collector::CollectorWarning;
@@ -560,6 +614,272 @@ pub fn data_with_allow_not_action(account_id: &str, excluded_action: &str) -> Co
     }
 }
 
+/// Build CollectedData with a role whose inline policy has `Allow Action: "*"` (full-admin)
+/// AND `Deny NotAction: [excluded_action]` (deny-all-except). The Deny should suppress every
+/// action except `excluded_action`, despite the full-admin Allow.
+///
+/// The role ARN is `arn:aws:iam::<account_id>:role/DenyNotActionRole`.
+pub fn data_with_full_admin_allow_and_deny_not_action(
+    account_id: &str,
+    excluded_action: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/DenyNotActionRole", account_id);
+    let inline = IamInlinePolicy {
+        policy_name: "DenyNotActionPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Allow,
+                    action: vec!["*".to_string()],
+                    not_action: vec![],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Deny,
+                    action: vec![],
+                    not_action: vec![excluded_action.to_string()],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_DENY_NOTACTION".to_string(),
+        role_name: "DenyNotActionRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a role whose inline policy has `Allow iam:PassRole` AND
+/// `Deny NotAction: [excluded_action]` (deny-all-except). Used to verify
+/// `privilege_escalation_paths` suppresses a risky action covered by a deny-all-except node.
+///
+/// The role ARN is `arn:aws:iam::<account_id>:role/EscalationDenyNotActionRole`.
+pub fn data_with_pass_role_and_deny_not_action(
+    account_id: &str,
+    excluded_action: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!(
+        "arn:aws:iam::{}:role/EscalationDenyNotActionRole",
+        account_id
+    );
+    let inline = IamInlinePolicy {
+        policy_name: "EscalationDenyNotActionPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Allow,
+                    action: vec!["iam:PassRole".to_string()],
+                    not_action: vec![],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+                PolicyStatement {
+                    sid: None,
+                    effect: Effect::Deny,
+                    action: vec![],
+                    not_action: vec![excluded_action.to_string()],
+                    resource: vec!["*".to_string()],
+                    not_resource: vec![],
+                    principal: None,
+                    not_principal: None,
+                    condition: None,
+                },
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_ESCALATION_DENY_NOTACTION".to_string(),
+        role_name: "EscalationDenyNotActionRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a role that has `Allow $action` AND `Deny $deny_action_pattern`
+/// (e.g. `s3:Delete*`) in an inline policy. Used to verify wildcard Deny suppresses Allow.
+pub fn data_with_allow_and_wildcard_deny(
+    account_id: &str,
+    action: &str,
+    deny_action_pattern: &str,
+) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/WildcardDenyTestRole", account_id);
+    let make_stmt = |effect: Effect, action: &str| PolicyStatement {
+        sid: None,
+        effect,
+        action: vec![action.to_string()],
+        not_action: vec![],
+        resource: vec!["*".to_string()],
+        not_resource: vec![],
+        principal: None,
+        not_principal: None,
+        condition: None,
+    };
+    let inline = IamInlinePolicy {
+        policy_name: "AllowAndWildcardDenyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![
+                make_stmt(Effect::Allow, action),
+                make_stmt(Effect::Deny, deny_action_pattern),
+            ],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROATEST_WILDCARD_DENY".to_string(),
+        role_name: "WildcardDenyTestRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build CollectedData with a user Allowed `action` on its own inline policy, and a group
+/// (that the user is a member of) Denying the same action via the group's inline policy.
+/// Used to verify group-inherited Deny suppresses a user's own Allow.
+pub fn data_with_user_allow_and_group_deny(account_id: &str, action: &str) -> CollectedData {
+    use iam_models::{Effect, IamGroup, IamInlinePolicy, IamUser, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let user_arn = format!("arn:aws:iam::{}:user/GroupDeniedUser", account_id);
+    let group_arn = format!("arn:aws:iam::{}:group/DenyingGroup", account_id);
+
+    let make_stmt = |effect: Effect| PolicyStatement {
+        sid: None,
+        effect,
+        action: vec![action.to_string()],
+        not_action: vec![],
+        resource: vec!["*".to_string()],
+        not_resource: vec![],
+        principal: None,
+        not_principal: None,
+        condition: None,
+    };
+
+    let group = IamGroup {
+        arn: group_arn.clone(),
+        group_id: "AGPADENYGROUP".to_string(),
+        group_name: "DenyingGroup".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![IamInlinePolicy {
+            policy_name: "GroupDenyPolicy".to_string(),
+            policy_document: PolicyDocument {
+                version: Some("2012-10-17".to_string()),
+                statement: vec![make_stmt(Effect::Deny)],
+            },
+        }],
+    };
+
+    let user = IamUser {
+        arn: user_arn.clone(),
+        user_id: "AIDAGROUPDENIED".to_string(),
+        user_name: "GroupDeniedUser".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![IamInlinePolicy {
+            policy_name: "UserAllowPolicy".to_string(),
+            policy_document: PolicyDocument {
+                version: Some("2012-10-17".to_string()),
+                statement: vec![make_stmt(Effect::Allow)],
+            },
+        }],
+        group_list: vec!["DenyingGroup".to_string()],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        groups: vec![group],
+        users: vec![user],
+        ..Default::default()
+    }
+}
+
 /// Build CollectedData with a role that has the given action in an inline policy.
 pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool) -> CollectedData {
     use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
@@ -611,4 +931,377 @@ pub fn data_with_role_action(account_id: &str, action: &str, effect_allow: bool)
         roles: vec![role],
         ..Default::default()
     }
+}
+
+/// Build CollectedData with a role that has the given action gated by
+/// `aws:MultiFactorAuthPresent: true` in an inline policy.
+pub fn data_with_mfa_gated_role_action(account_id: &str, action: &str) -> CollectedData {
+    use iam_models::{
+        ConditionValues, Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/MfaGatedRole", account_id);
+    let mut condition_inner = HashMap::new();
+    condition_inner.insert(
+        "aws:MultiFactorAuthPresent".to_string(),
+        ConditionValues(vec!["true".to_string()]),
+    );
+    let mut condition = HashMap::new();
+    condition.insert("Bool".to_string(), condition_inner);
+
+    let inline = IamInlinePolicy {
+        policy_name: "MfaGatedPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec![action.to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: Some(condition),
+            }],
+        },
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROAMFAGATED".to_string(),
+        role_name: "MfaGatedRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    }
+}
+
+/// Build a role with a trust policy that lets `assumer_arn` assume it.
+fn role_with_trust(
+    account_id: &str,
+    role_name: &str,
+    assumer_arn: &str,
+    inline_policies: Vec<iam_models::IamInlinePolicy>,
+) -> iam_models::IamRole {
+    use iam_models::{PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: iam_models::Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"AWS": assumer_arn})),
+            not_principal: None,
+            condition: None,
+        }],
+    };
+    iam_models::IamRole {
+        arn: format!("arn:aws:iam::{}:role/{}", account_id, role_name),
+        role_id: format!("AROA{}", role_name.to_uppercase()),
+        role_name: role_name.to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies,
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    }
+}
+
+/// Build a role with a trust policy that lets `assumer_arn` assume it, gated by a
+/// runtime trust `Condition` (e.g. `sts:ExternalId`) that can't be evaluated from
+/// collected data — the resulting `CAN_ASSUME`/`CAN_ASSUME_ROLE` edges must stay
+/// `conditional = true` (M-A4).
+fn role_with_runtime_condition(
+    account_id: &str,
+    role_name: &str,
+    assumer_arn: &str,
+    inline_policies: Vec<iam_models::IamInlinePolicy>,
+) -> iam_models::IamRole {
+    use iam_models::{ConditionValues, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: iam_models::Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"AWS": assumer_arn})),
+            not_principal: None,
+            condition: Some(HashMap::from([(
+                "StringEquals".to_string(),
+                HashMap::from([(
+                    "sts:ExternalId".to_string(),
+                    ConditionValues(vec!["secret".to_string()]),
+                )]),
+            )])),
+        }],
+    };
+    iam_models::IamRole {
+        arn: format!("arn:aws:iam::{}:role/{}", account_id, role_name),
+        role_id: format!("AROA{}", role_name.to_uppercase()),
+        role_name: role_name.to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies,
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    }
+}
+
+/// Build a 2-hop `sts:AssumeRole` chain X -> C, where the trust policy on `C` gates
+/// assumption with a runtime `sts:ExternalId` condition (unevaluated) and `C` holds a
+/// risky permission (`iam:PassRole`). Used to verify `privilege_escalation_paths`
+/// flags the path `conditional = true` rather than asserting it unconditionally (M-A4).
+pub fn data_with_conditional_assume_role(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let x_arn = format!("arn:aws:iam::{}:role/CondChainX", account_id);
+
+    let role_x = role_with_trust(
+        account_id,
+        "CondChainX",
+        "arn:aws:iam::000000000000:root",
+        vec![],
+    );
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role_c = role_with_runtime_condition(account_id, "CondChainC", &x_arn, vec![risky_inline]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_x, role_c],
+        ..Default::default()
+    }
+}
+
+/// Build a 4-hop `sts:AssumeRole` chain X -> A -> B -> C, where only the terminal role
+/// `C` holds a risky permission (`iam:PassRole`). Used to test deep transitive
+/// privilege-escalation traversal (M-A3).
+pub fn data_with_assume_role_chain(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let x_arn = format!("arn:aws:iam::{}:role/ChainX", account_id);
+    let a_arn = format!("arn:aws:iam::{}:role/ChainA", account_id);
+    let b_arn = format!("arn:aws:iam::{}:role/ChainB", account_id);
+
+    let role_x = role_with_trust(
+        account_id,
+        "ChainX",
+        "arn:aws:iam::000000000000:root",
+        vec![],
+    );
+    let role_a = role_with_trust(account_id, "ChainA", &x_arn, vec![]);
+    let role_b = role_with_trust(account_id, "ChainB", &a_arn, vec![]);
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let role_c = role_with_trust(account_id, "ChainC", &b_arn, vec![risky_inline]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_x, role_a, role_b, role_c],
+        ..Default::default()
+    }
+}
+
+/// Build a 2-cycle `sts:AssumeRole` relationship: A can assume B and B can assume A.
+/// Only `CycleA` holds a risky permission (`iam:PassRole`), so the cycle exercises both
+/// the direct arm (CycleA escalates directly) and the transitive arm (CycleB escalates
+/// by assuming CycleA) over the same cyclic edge set — including a 2-hop path back to
+/// CycleA itself (A -> B -> A). Used to test that cyclic CAN_ASSUME_ROLE traversal
+/// terminates without hanging and reports each entity exactly once (M-A3).
+pub fn data_with_assume_role_cycle(account_id: &str) -> CollectedData {
+    use iam_models::{Effect, IamInlinePolicy, PolicyDocument, PolicyStatement};
+
+    let a_arn = format!("arn:aws:iam::{}:role/CycleA", account_id);
+    let b_arn = format!("arn:aws:iam::{}:role/CycleB", account_id);
+
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let role_a = role_with_trust(account_id, "CycleA", &b_arn, vec![risky_inline]);
+    let role_b = role_with_trust(account_id, "CycleB", &a_arn, vec![]);
+
+    CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role_a, role_b],
+        ..Default::default()
+    }
+}
+
+/// Build a role granted concrete `s3:GetObject` and `s3:DeleteObject` actions (simulating
+/// already-wildcard-expanded grants, as `iam-collector` produces before ingestion) but bounded
+/// by a Permission Boundary policy that only Allows `boundary_action` (e.g. `s3:Get*`). The
+/// boundary side is intentionally left wildcarded and matched at query time via
+/// `iam_expander::glob_match`, mirroring how Deny wildcards are evaluated. Used to test that
+/// `who_can` / `entity_perms` intersect grants with the boundary ceiling.
+pub fn data_with_bounded_role(account_id: &str, boundary_action: &str) -> (CollectedData, String) {
+    use iam_models::{Effect, IamInlinePolicy, IamPolicy, IamRole, PermissionsBoundary};
+    use iam_models::{PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/BoundedRole", account_id);
+    let boundary_arn = format!("arn:aws:iam::{}:policy/BoundaryPolicy", account_id);
+
+    let inline = IamInlinePolicy {
+        policy_name: "InlineActionsPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["s3:GetObject".to_string(), "s3:DeleteObject".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+    let boundary_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec![boundary_action.to_string()],
+            not_action: vec![],
+            resource: vec!["*".to_string()],
+            not_resource: vec![],
+            principal: None,
+            not_principal: None,
+            condition: None,
+        }],
+    };
+    let boundary_policy = IamPolicy {
+        arn: boundary_arn.clone(),
+        policy_id: "ANPABOUNDARY".to_string(),
+        policy_name: "BoundaryPolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 0,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(boundary_doc),
+        tags: HashMap::new(),
+    };
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROABOUNDED".to_string(),
+        role_name: "BoundedRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![inline],
+        permissions_boundary: Some(PermissionsBoundary {
+            permissions_boundary_type: "PermissionsBoundaryPolicy".to_string(),
+            permissions_boundary_arn: boundary_arn,
+        }),
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        policies: vec![boundary_policy],
+        ..Default::default()
+    };
+    (data, role_arn)
 }

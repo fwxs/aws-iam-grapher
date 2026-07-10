@@ -1,6 +1,7 @@
 //! IAM entity models — pure data types, no network calls.
 
 mod common;
+pub mod condition;
 mod group;
 mod instance_profile;
 mod policy;

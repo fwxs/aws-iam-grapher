@@ -5,7 +5,7 @@ on:
     branches: [main, develop]
     paths:
       - "**.rs"
-      - "Cargo.toml"
+      - "**/Cargo.toml"
       - "Cargo.lock"
 
 env:
@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -35,6 +37,8 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -51,6 +55,8 @@ jobs:
     needs: test
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

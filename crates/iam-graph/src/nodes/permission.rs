@@ -1,4 +1,5 @@
 use crate::nodes::uid::{excluded_permission_uid, permission_uid};
+use iam_models::Condition;
 use neo4rs::{query, Query};
 
 const MERGE_AWS_SERVICE: &str = "
@@ -12,7 +13,8 @@ const MERGE_PERMISSION: &str = "
         perm.resource = $resource,
         perm.effect = $effect,
         perm.account_id = $account_id,
-        perm.snapshot_id = $snapshot_id
+        perm.snapshot_id = $snapshot_id,
+        perm.condition = $condition
 ";
 
 const PERMISSION_ON_SERVICE: &str = "
@@ -28,7 +30,8 @@ const MERGE_EXCLUDED_PERMISSION: &str = "
         perm.effect = $effect,
         perm.account_id = $account_id,
         perm.snapshot_id = $snapshot_id,
-        perm.excluded_actions = $excluded_actions
+        perm.excluded_actions = $excluded_actions,
+        perm.condition = $condition
 ";
 
 /// Build a query to MERGE an AwsService node.
@@ -40,14 +43,19 @@ pub fn merge_aws_service_query(prefix: &str) -> Query {
 }
 
 /// Build a query to MERGE a Permission node.
+///
+/// `condition` (if present and non-empty) is stored as a JSON string on `perm.condition`
+/// so query-time evaluators (see `iam_models::condition`) can read it back and flag
+/// gated grants instead of treating them as unconditional.
 pub fn merge_permission_query(
     snapshot_id: &str,
     account_id: &str,
     effect: &str,
     action: &str,
     resource: &str,
+    condition: Option<&Condition>,
 ) -> Query {
-    let uid = permission_uid(snapshot_id, effect, action, resource);
+    let uid = permission_uid(snapshot_id, effect, action, resource, condition);
     query(MERGE_PERMISSION)
         .param("uid", uid)
         .param("action", action)
@@ -55,6 +63,7 @@ pub fn merge_permission_query(
         .param("effect", effect)
         .param("account_id", account_id)
         .param("snapshot_id", snapshot_id)
+        .param("condition", condition_json(condition))
 }
 
 /// Build a query to MERGE an allow-all-except Permission node (from a `NotAction` statement).
@@ -68,8 +77,9 @@ pub fn merge_excluded_permission_query(
     effect: &str,
     resource: &str,
     excluded: &[String],
+    condition: Option<&Condition>,
 ) -> Query {
-    let uid = excluded_permission_uid(snapshot_id, effect, resource, excluded);
+    let uid = excluded_permission_uid(snapshot_id, effect, resource, excluded, condition);
     query(MERGE_EXCLUDED_PERMISSION)
         .param("uid", uid)
         .param("resource", resource)
@@ -77,6 +87,7 @@ pub fn merge_excluded_permission_query(
         .param("account_id", account_id)
         .param("snapshot_id", snapshot_id)
         .param("excluded_actions", excluded.to_vec())
+        .param("condition", condition_json(condition))
 }
 
 /// Build a query to link a Permission to its AwsService.
@@ -86,11 +97,19 @@ pub fn permission_on_service_query(
     action: &str,
     resource: &str,
     prefix: &str,
+    condition: Option<&Condition>,
 ) -> Query {
-    let uid = permission_uid(snapshot_id, effect, action, resource);
+    let uid = permission_uid(snapshot_id, effect, action, resource, condition);
     query(PERMISSION_ON_SERVICE)
         .param("uid", uid)
         .param("prefix", prefix)
+}
+
+/// Serialize a `Condition` block to a JSON string for storage, or `None` if absent/empty.
+fn condition_json(condition: Option<&Condition>) -> Option<String> {
+    condition
+        .filter(|c| !c.is_empty())
+        .map(|c| serde_json::to_string(c).expect("Condition serializes to JSON"))
 }
 
 /// Extract the service prefix from an IAM action (e.g. `s3:GetObject` → `s3`).

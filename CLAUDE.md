@@ -21,9 +21,6 @@ cargo test -p iam-graph test_name
 DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
   TESTCONTAINERS_RYUK_DISABLED=true \
   cargo test --workspace -- --ignored
-
-# Release build (catches cfg/feature issues)
-cargo build --release
 ```
 
 All four commands must pass before any task is considered complete.
@@ -64,7 +61,7 @@ All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before re
 6. Entity relationships: `HAS_ATTACHED_POLICY`, `HAS_INLINE_POLICY`, `GRANTS`, `MEMBER_OF`, `CONTAINS_ROLE`, `CAN_ASSUME`, `BOUNDED_BY`
 
 *Queries* (`src/queries/`): All queries require `QueryContext` (snapshot_id + account_id) for tenant isolation. Key queries:
-- `who_can(action)` — returns entities with Allow for the action, excluding those with an explicit Deny; also matches entities holding `Action: "*"` (flagged `is_full_admin: true`)
+- `who_can(action, resource)` — returns entities with Allow for the action, excluding those with an explicit Deny; also matches entities holding `Action: "*"` (flagged `is_full_admin: true`). Optional `resource` intersects wildcard (`Action: "*"`) grants against the queried resource via IAM resource-glob semantics
 - `privilege_escalation_paths()` — entities with any of 9 risky IAM actions
 - `diff_permissions(snap_a, snap_b)` — permission delta between snapshots
 - `list_snapshots(account_id)` — returns `SnapshotRecord` including `is_partial` and `partial_reasons`

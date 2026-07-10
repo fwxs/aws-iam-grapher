@@ -25,6 +25,59 @@ The compiled binary is located at `target/release/aws-iam-grapher`.
 
 ---
 
+## Run Neo4j with Docker
+
+A `docker-compose.yml` runs Neo4j only; the `aws-iam-grapher` binary is built
+and run locally with `cargo`. Neo4j's `/data` directory is backed by the
+named volume `neo4j_data`, so snapshots survive container restarts.
+
+```bash
+export NEO4J_PASSWORD=changeme   # required, no default password
+
+# Start Neo4j and wait for it to become healthy
+docker compose up -d neo4j
+
+# Run the binary against it
+cargo run --release -- collect \
+  --mode offline \
+  --input-file ./data/auth-details.json \
+  --neo4j-uri bolt://localhost:7687 \
+  --neo4j-user neo4j
+```
+
+**Persistence and reset:**
+
+```bash
+docker compose down      # stops containers, keeps the neo4j_data volume
+docker compose up -d neo4j   # data from prior collect runs is still there
+
+docker volume inspect aws-iam-grapher_neo4j_data   # see where Docker stores it
+
+docker compose down -v   # drops the volume — full reset, all snapshots lost
+```
+
+**Backup and restore:**
+
+Neo4j Community has no online (hot) backup — only offline. `scripts/neo4j-backup.sh`
+and `scripts/neo4j-restore.sh` automate the offline procedure: stop the `neo4j`
+container, copy the `aws-iam-grapher_neo4j_data` volume to/from a timestamped
+tarball, restart. The container is down for the duration of the copy.
+
+```bash
+scripts/neo4j-backup.sh                          # writes ./backups/neo4j-backup-<timestamp>.tar.gz
+scripts/neo4j-restore.sh -f ./backups/neo4j-backup-<timestamp>.tar.gz
+```
+
+**Batch size and scale:**
+
+`--batch-size` (default 500, every `collect` subcommand) controls how many
+writes Neo4j commits per transaction during ingestion. See
+[`docs/limitations.md` § Validated scale ceiling](docs/limitations.md#validated-scale-ceiling)
+for tuning guidance and the account-sharding strategy for accounts that
+approach the ~10,000-permission-node practical ceiling.
+
+---
+
 ## Running Tests
 
 ### Unit tests
@@ -133,6 +186,18 @@ aws-iam-grapher collect --mode hybrid --account-alias production
 
 ---
 
+## Logging
+
+`collect` and `collect org` log each AWS API call they make (region resolution, pagination
+progress, per-account jump-role assumption, etc.) at `info`/`debug` level via `tracing`.
+`info`-level logs are shown by default; for more detail (e.g. every paginated page fetched), set:
+
+```bash
+RUST_LOG=iam_collector=debug aws-iam-grapher collect --mode live --account-alias production
+```
+
+---
+
 ## Data Coverage by Collection Mode
 
 The table below shows what data is available in each mode. Missing data can silently skew analysis results — review this before interpreting the graph output.
@@ -155,7 +220,37 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 ## Query Commands
 
-All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable) and `--account-id`. If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+
+`--account-id` is optional. When it's provided, the query scopes to exactly that account (as
+before). When it's **omitted**, `query` resolves every distinct account with at least one
+snapshot in the graph and runs the query once per account, each correctly scoped to its own
+`(account_id, snapshot_id)` — never merging results across accounts. This applies to
+`who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`, and
+`list-snapshots`. Output (table and JSON) groups results under an `=== Account: ... ===`
+header (table) or an `account_id`/`snapshot_id`/`results` envelope per account (JSON). A
+graph with only one account degrades to a single group. `--snapshot-id` cannot be combined
+with multi-account mode (more than one account resolved) since a snapshot id would be
+ambiguous across accounts — pass `--account-id` to target one account instead.
+
+`diff` derives the account from its two snapshot ids when `--account-id` is omitted, and
+errors if the two snapshots belong to different accounts.
+
+`list-accounts` is inherently cross-account and never requires (or uses) `--account-id` — use
+it to discover which accounts exist in the graph before targeting one with `--account-id`.
+
+Add `--output-file <path>` to write the result as JSON to a file, regardless of `--output`. The
+human-readable table still prints to stdout — useful for downstream tooling that wants a clean
+JSON artifact without scraping stdout/stderr:
+
+```bash
+aws-iam-grapher query \
+    --account-id 123456789012 \
+    --output-file who-can.json \
+    who-can s3:DeleteObject
+```
+
+The `collect` subcommand supports the same `--output-file` flag for its summary.
 
 ### Who can perform an action?
 
@@ -168,12 +263,24 @@ aws-iam-grapher query \
 ```
 Entities with permission s3:DeleteObject (snapshot: a3f2c1d0)
 
-TYPE   ARN
-────── ──────────────────────────────────────────────────────
-Role   arn:aws:iam::123456789012:role/DataEngineer
-Role   arn:aws:iam::123456789012:role/S3AdminRole
-User   arn:aws:iam::123456789012:user/alice
+TYPE   ARN                                              RESOURCE
+────── ──────────────────────────────────────────────── ─────────
+Role   arn:aws:iam::123456789012:role/DataEngineer       *
+Role   arn:aws:iam::123456789012:role/S3AdminRole        *
+User   arn:aws:iam::123456789012:user/alice              *
 ```
+
+Add `--resource <arn>` to intersect `Action: "*"` (full-admin) grants against a specific
+resource, excluding grants whose resource scope doesn't cover it:
+
+```bash
+aws-iam-grapher query \
+    --account-id 123456789012 \
+    who-can s3:DeleteObject --resource arn:aws:s3:::my-bucket/object.txt
+```
+
+A principal with `"Action": "*", "Resource": "arn:aws:s3:::my-bucket"` is excluded here since
+the grant is bucket-scoped, not object-scoped. See [`docs/limitations.md`](docs/limitations.md).
 
 ### All permissions for an entity
 
@@ -224,6 +331,23 @@ ENTITY                                           RISKY ACTIONS
 ──────────────────────────────────────────────── ──────────────────────────────────
 arn:aws:iam::123456789012:role/DevRole           iam:PassRole, iam:AttachRolePolicy
 arn:aws:iam::123456789012:user/developer         iam:CreatePolicyVersion
+```
+
+### List accounts
+
+No `--account-id` needed — lists every account currently in the graph. Accounts collected
+via `collect org` show their immediate Organizational Unit id/name; accounts collected via
+standalone `collect` (live/offline/hybrid) show blank OU columns.
+
+```bash
+aws-iam-grapher query list-accounts
+```
+
+```
+ACCOUNT ID     ALIAS         OU ID          OU NAME
+────────────── ───────────── ────────────── ───────────
+111122223333   production                              
+222233334444   staging       ou-root1-a1b2  Sandbox
 ```
 
 ### List snapshots

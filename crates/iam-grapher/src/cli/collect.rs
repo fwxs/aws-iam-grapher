@@ -17,6 +17,41 @@ pub enum CollectMode {
     Hybrid,
 }
 
+/// Neo4j connection + output args shared by every `collect` subcommand.
+#[derive(Args)]
+pub struct SharedCollectArgs {
+    /// Neo4j bolt URI.
+    #[arg(long, default_value = "bolt://localhost:7687")]
+    pub neo4j_uri: String,
+
+    /// Neo4j username.
+    #[arg(long, default_value = "neo4j")]
+    pub neo4j_user: String,
+
+    /// Neo4j password. Required via flag or NEO4J_PASSWORD env var, but not enforced by
+    /// clap directly since this struct is also flattened into the `collect org` parent
+    /// command where it is unused — see `resolve_neo4j_pass`.
+    #[arg(long, env = "NEO4J_PASSWORD")]
+    pub neo4j_pass: Option<String>,
+
+    /// Batch size for Neo4j writes.
+    #[arg(long, default_value = "500")]
+    pub batch_size: usize,
+
+    /// Show what would happen without writing to Neo4j.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "table")]
+    pub output: OutputFormat,
+
+    /// Write JSON summary to this file. Overrides --output to JSON for the file;
+    /// the human-readable summary still prints to stdout.
+    #[arg(long)]
+    pub output_file: Option<PathBuf>,
+}
+
 #[derive(Args)]
 pub struct CollectArgs {
     /// Collection mode.
@@ -31,17 +66,8 @@ pub struct CollectArgs {
     #[arg(long)]
     pub profiles_file: Option<PathBuf>,
 
-    /// Neo4j bolt URI.
-    #[arg(long, default_value = "bolt://localhost:7687")]
-    pub neo4j_uri: String,
-
-    /// Neo4j username.
-    #[arg(long, default_value = "neo4j")]
-    pub neo4j_user: String,
-
-    /// Neo4j password.
-    #[arg(long, env = "NEO4J_PASSWORD")]
-    pub neo4j_pass: String,
+    #[command(flatten)]
+    pub shared: SharedCollectArgs,
 
     /// AWS account ID (12-digit number). If omitted, derived automatically from entity ARNs
     /// in the collected data. Required when no entities are present (e.g. empty account).
@@ -52,17 +78,11 @@ pub struct CollectArgs {
     #[arg(long)]
     pub account_alias: Option<String>,
 
-    /// Batch size for Neo4j writes.
-    #[arg(long, default_value = "500")]
-    pub batch_size: usize,
-
-    /// Show what would happen without writing to Neo4j.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value = "table")]
-    pub output: OutputFormat,
+    /// AWS region(s) to use for API calls. Repeatable; the first entry wins and overrides
+    /// whatever region the profile/environment resolves. Ignored in offline mode. If omitted,
+    /// falls back to the profile/environment's configured region, then us-east-1.
+    #[arg(long = "region")]
+    pub regions: Vec<String>,
 }
 
 /// Validate argument combinations before making any network calls.
@@ -75,6 +95,16 @@ pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Resolve the Neo4j password, erroring with a friendly message if it's missing.
+/// Not enforced by clap directly because `SharedCollectArgs` is also flattened into the
+/// `collect org` parent command, where this particular instance of it goes unused.
+pub fn resolve_neo4j_pass(shared: &SharedCollectArgs) -> anyhow::Result<String> {
+    shared
+        .neo4j_pass
+        .clone()
+        .context("Neo4j password required: pass --neo4j-pass or set the NEO4J_PASSWORD env var")
 }
 
 pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
@@ -91,15 +121,16 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
 
     print_warnings(&data);
 
-    if args.dry_run {
+    if args.shared.dry_run {
         print_dry_run_summary(&data, &args);
         return Ok(());
     }
 
     let snapshot_id = Uuid::new_v4().to_string();
-    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &args.neo4j_pass)
+    let neo4j_pass = resolve_neo4j_pass(&args.shared)?;
+    let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
         .await
-        .with_context(|| format!("failed to connect to Neo4j at {}", args.neo4j_uri))?;
+        .with_context(|| format!("failed to connect to Neo4j at {}", args.shared.neo4j_uri))?;
     client
         .initialize_schema()
         .await
@@ -123,8 +154,9 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         snapshot_id: snapshot_id.clone(),
         account_id,
         account_alias: args.account_alias.clone(),
-        batch_size: args.batch_size,
+        batch_size: args.shared.batch_size,
         dry_run: false,
+        org_collection_run_id: None,
     };
 
     let mode_label = mode_label(&args.mode);
@@ -143,7 +175,8 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         &data,
         &stats,
         duration_secs,
-        &args.output,
+        &args.shared.output,
+        args.shared.output_file.as_deref(),
     )?;
     Ok(())
 }
@@ -152,12 +185,12 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     match args.mode {
         CollectMode::Live => {
             info!("building live collector");
-            let collector = LiveCollector::from_env().await?;
+            let collector = LiveCollector::from_env(&args.regions).await?;
             collector.collect().await
         }
         CollectMode::Hybrid => {
             info!("building hybrid collector");
-            let collector = HybridCollector::from_env().await?;
+            let collector = HybridCollector::from_env(&args.regions).await?;
             collector.collect().await
         }
         CollectMode::Offline => {
@@ -228,6 +261,7 @@ fn print_collect_summary(
     stats: &IngestStats,
     duration_secs: f64,
     format: &OutputFormat,
+    output_file: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let total_nodes = stats.accounts_merged
         + stats.snapshots_created
@@ -238,23 +272,26 @@ fn print_collect_summary(
         + stats.instance_profiles_merged
         + stats.permissions_merged;
 
-    if *format == OutputFormat::Json {
-        let summary = serde_json::json!({
-            "snapshot_id": snapshot_id,
-            "mode": mode_label,
-            "collected": {
-                "policies": data.policies.len(),
-                "roles": data.roles.len(),
-                "users": data.users.len(),
-                "groups": data.groups.len(),
-                "instance_profiles": data.instance_profiles.len(),
-            },
-            "ingested": {
-                "nodes_created": total_nodes,
-                "relationships_created": stats.relationships_created,
-                "duration_secs": duration_secs,
-            }
-        });
+    let summary = serde_json::json!({
+        "snapshot_id": snapshot_id,
+        "mode": mode_label,
+        "collected": {
+            "policies": data.policies.len(),
+            "roles": data.roles.len(),
+            "users": data.users.len(),
+            "groups": data.groups.len(),
+            "instance_profiles": data.instance_profiles.len(),
+        },
+        "ingested": {
+            "nodes_created": total_nodes,
+            "relationships_created": stats.relationships_created,
+            "duration_secs": duration_secs,
+        }
+    });
+
+    if let Some(path) = output_file {
+        crate::output::json::write_json(&summary, path)?;
+    } else if *format == OutputFormat::Json {
         let json = serde_json::to_string_pretty(&summary)
             .context("failed to serialize collect summary")?;
         println!("{json}");
