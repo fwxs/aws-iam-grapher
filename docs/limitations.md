@@ -8,13 +8,19 @@ This document describes known analysis limitations of the V1 release. Understand
 
 ### Single database
 
+**Status:** accepted (won't-fix in V-series). Neo4j Community supports exactly one database per instance; Enterprise's multi-database feature is not in scope.
+
 Neo4j Community supports exactly one database per instance. All accounts, all collection runs, and all snapshots coexist in this database. There is no physical isolation between tenants.
 
 **Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See [QUERIES.md § 1](../QUERIES.md#1-mandatory-filter-context).
 
+**Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
+
 ### No role-based access control (RBAC)
 
-Neo4j Community has no database-level user permissions. Any client with the bolt password can read or delete all data. Do not store multi-tenant data from untrusted sources in a shared instance.
+**Status:** accepted (won't-fix in V-series). Neo4j Community has no database-level user permissions. Any client with the bolt password can read or delete all data. Do not store multi-tenant data from untrusted sources in a shared instance.
+
+**Mitigation:** this is a deployment-hygiene concern, not an application-code one — network isolation (no public bolt exposure) and secret management for the bolt password are the compensating controls. RBAC itself requires Neo4j Enterprise and will not be added to Community deployments.
 
 ### No online backup
 
@@ -22,7 +28,7 @@ Neo4j Community does not include hot backup. To back up the graph, stop the cont
 
 ### No causal clustering
 
-Neo4j Community is single-node only. For high availability or read replicas, Neo4j Enterprise is required. V1 does not support or test multi-node deployments.
+**Status:** accepted (won't-fix in V-series). Neo4j Community is single-node only. For high availability or read replicas, Neo4j Enterprise is required. V1 does not support or test multi-node deployments. HA/read-replicas remain out of scope for the V-series; there is no planned migration path off Community for this reason alone.
 
 ---
 
