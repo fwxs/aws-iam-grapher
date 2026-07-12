@@ -157,6 +157,10 @@ impl From<RawUserDetail> for IamUser {
             access_keys: Vec::new(),
             is_aws_managed: false,
             tags,
+            has_mfa: false,
+            mfa_method: None,
+            console_login_enabled: false,
+            last_activity_date: None,
         }
     }
 }

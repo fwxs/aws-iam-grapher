@@ -2,13 +2,20 @@ use crate::errors::{CollectorError, CollectorWarning};
 use crate::expand::expand_collected_data;
 use crate::traits::{CollectedData, CollectorMode, IamDataSource};
 use crate::util::{account_id_from_arns, map_sdk_error};
+use aws_sdk_iam::error::SdkError;
+use aws_sdk_iam::operation::get_login_profile::GetLoginProfileError;
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt};
 use iam_models::{
-    IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy, IamRole, IamUser,
+    IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy, IamRole, IamUser, MfaDeviceType,
     PermissionsBoundary, PolicyDocument, PolicyRef, RoleLastUsed,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
+
+/// Bounded concurrency for per-user enrichment calls (MFA/login/access-key lookups).
+/// IAM rate-limits aggressively; this keeps a large account from tripping throttling.
+const USER_ENRICHMENT_CONCURRENCY: usize = 8;
 
 /// Collects IAM data from the live AWS API.
 pub struct LiveCollector {
@@ -87,6 +94,48 @@ impl IamDataSource for LiveCollector {
             policies = policies.len(),
             "collected entities"
         );
+
+        info!(
+            users = users.len(),
+            "enriching users with MFA/login/activity data"
+        );
+        let user_names: Vec<(usize, String)> = users
+            .iter()
+            .enumerate()
+            .map(|(i, u)| (i, u.user_name.clone()))
+            .collect();
+        let client = &self.iam_client;
+        let enrichment_results: Vec<(usize, UserEnrichment, Vec<EnrichmentWarning>)> =
+            stream::iter(user_names)
+                .map(|(i, user_name)| async move {
+                    let (enrichment, warns) = enrich_user(client, &user_name).await;
+                    (i, enrichment, warns)
+                })
+                .buffer_unordered(USER_ENRICHMENT_CONCURRENCY)
+                .collect()
+                .await;
+
+        let mut enrichment_warnings: HashSet<EnrichmentWarning> = HashSet::new();
+        for (i, enrichment, warns) in enrichment_results {
+            users[i].has_mfa = enrichment.has_mfa;
+            users[i].mfa_method = enrichment.mfa_method;
+            users[i].console_login_enabled = enrichment.console_login_enabled;
+            users[i].password_last_used = enrichment.password_last_used;
+            users[i].last_activity_date = enrichment.last_activity_date;
+            enrichment_warnings.extend(warns);
+        }
+        if enrichment_warnings.contains(&EnrichmentWarning::Mfa) {
+            warn!("insufficient permissions for ListMFADevices on one or more users");
+            warnings.push(CollectorWarning::MfaDevicesMissing);
+        }
+        if enrichment_warnings.contains(&EnrichmentWarning::LoginProfile) {
+            warn!("insufficient permissions for GetLoginProfile on one or more users");
+            warnings.push(CollectorWarning::LoginProfileMissing);
+        }
+        if enrichment_warnings.contains(&EnrichmentWarning::AccessKeyActivity) {
+            warn!("insufficient permissions for access key activity lookups on one or more users");
+            warnings.push(CollectorWarning::AccessKeyActivityMissing);
+        }
 
         // Paginate ListInstanceProfiles (non-fatal on 403)
         info!("fetching ListInstanceProfiles");
@@ -249,10 +298,16 @@ fn sdk_user_to_model(u: &aws_sdk_iam::types::UserDetail) -> IamUser {
         inline_policies: u.user_policy_list().iter().filter_map(sdk_inline).collect(),
         group_list: u.group_list().to_vec(),
         permissions_boundary: sdk_boundary(u.permissions_boundary()),
+        // GetAccountAuthorizationDetails' UserDetail carries no password_last_used field
+        // (unlike ListUsers/GetUser's User type); populated by enrich_user() below.
         password_last_used: None,
         access_keys: Vec::new(),
         is_aws_managed: false,
         tags: sdk_tags(u.tags()),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
     }
 }
 
@@ -376,5 +431,508 @@ fn sdk_instance_profile_to_model(ip: &aws_sdk_iam::types::InstanceProfile) -> Ia
         .unwrap_or_else(Utc::now),
         roles,
         is_aws_managed,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-user enrichment (MFA, console login, activity)
+// ---------------------------------------------------------------------------
+
+struct UserEnrichment {
+    has_mfa: bool,
+    mfa_method: Option<MfaDeviceType>,
+    console_login_enabled: bool,
+    password_last_used: Option<DateTime<Utc>>,
+    last_activity_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EnrichmentWarning {
+    Mfa,
+    LoginProfile,
+    AccessKeyActivity,
+}
+
+fn sdk_dt_opt(d: Option<&aws_smithy_types::DateTime>) -> Option<DateTime<Utc>> {
+    d.and_then(|d| DateTime::from_timestamp(d.secs(), d.subsec_nanos()))
+}
+
+fn max_option(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(d), None) | (None, Some(d)) => Some(d),
+        (None, None) => None,
+    }
+}
+
+/// Fetch MFA, console login, and activity data for a single user. Every call is
+/// non-fatal: a failure is recorded as a warning (except `GetLoginProfile`'s
+/// `NoSuchEntity`, which means "no console login" and is not an error) and the
+/// corresponding field is left at its default.
+async fn enrich_user(
+    client: &aws_sdk_iam::Client,
+    user_name: &str,
+) -> (UserEnrichment, Vec<EnrichmentWarning>) {
+    let mut warnings = Vec::new();
+
+    let (has_mfa, mfa_method) = match client.list_mfa_devices().user_name(user_name).send().await {
+        Ok(out) => {
+            let device = out.mfa_devices().first();
+            let method = device.and_then(|d| MfaDeviceType::from_serial(d.serial_number()));
+            (device.is_some(), method)
+        }
+        Err(e) => {
+            debug!(%user_name, error = ?e, "ListMFADevices failed");
+            warnings.push(EnrichmentWarning::Mfa);
+            (false, None)
+        }
+    };
+
+    let console_login_enabled = match client.get_login_profile().user_name(user_name).send().await {
+        Ok(_) => true,
+        Err(SdkError::ServiceError(ref se))
+            if matches!(se.err(), GetLoginProfileError::NoSuchEntityException(_)) =>
+        {
+            false
+        }
+        Err(e) => {
+            debug!(%user_name, error = ?e, "GetLoginProfile failed");
+            warnings.push(EnrichmentWarning::LoginProfile);
+            false
+        }
+    };
+
+    // GetUser is the only source for password_last_used: GetAccountAuthorizationDetails'
+    // UserDetail does not carry this field. A failure here is folded into the access-key
+    // warning bucket rather than a fourth warning kind, since it feeds the same
+    // last_activity_date computation.
+    let mut access_key_ok = true;
+    let password_last_used = match client.get_user().user_name(user_name).send().await {
+        Ok(out) => out.user().and_then(|u| sdk_dt_opt(u.password_last_used())),
+        Err(e) => {
+            debug!(%user_name, error = ?e, "GetUser failed");
+            access_key_ok = false;
+            None
+        }
+    };
+
+    let mut last_activity_date = password_last_used;
+    match client.list_access_keys().user_name(user_name).send().await {
+        Ok(out) => {
+            for key in out.access_key_metadata() {
+                let Some(key_id) = key.access_key_id() else {
+                    continue;
+                };
+                match client
+                    .get_access_key_last_used()
+                    .access_key_id(key_id)
+                    .send()
+                    .await
+                {
+                    Ok(lu) => {
+                        let used = lu
+                            .access_key_last_used()
+                            .and_then(|a| sdk_dt_opt(a.last_used_date()));
+                        last_activity_date = max_option(last_activity_date, used);
+                    }
+                    Err(e) => {
+                        debug!(%user_name, %key_id, error = ?e, "GetAccessKeyLastUsed failed");
+                        access_key_ok = false;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            debug!(%user_name, error = ?e, "ListAccessKeys failed");
+            access_key_ok = false;
+        }
+    }
+    if !access_key_ok {
+        warnings.push(EnrichmentWarning::AccessKeyActivity);
+    }
+
+    (
+        UserEnrichment {
+            has_mfa,
+            mfa_method,
+            console_login_enabled,
+            password_last_used,
+            last_activity_date,
+        },
+        warnings,
+    )
+}
+
+#[cfg(test)]
+mod enrichment_tests {
+    use super::*;
+    use aws_smithy_mocks::{mock, mock_client, RuleMode};
+
+    fn mfa_device(user_name: &str, serial: &str) -> aws_sdk_iam::types::MfaDevice {
+        aws_sdk_iam::types::MfaDevice::builder()
+            .user_name(user_name)
+            .serial_number(serial)
+            .enable_date(aws_smithy_types::DateTime::from_secs(1_700_000_000))
+            .build()
+            .expect("valid MfaDevice")
+    }
+
+    fn login_profile_output(
+        user_name: &str,
+    ) -> aws_sdk_iam::operation::get_login_profile::GetLoginProfileOutput {
+        aws_sdk_iam::operation::get_login_profile::GetLoginProfileOutput::builder()
+            .login_profile(
+                aws_sdk_iam::types::LoginProfile::builder()
+                    .user_name(user_name)
+                    .create_date(aws_smithy_types::DateTime::from_secs(1_700_000_000))
+                    .build()
+                    .expect("valid LoginProfile"),
+            )
+            .build()
+    }
+
+    fn no_such_entity_error() -> aws_sdk_iam::operation::get_login_profile::GetLoginProfileError {
+        aws_sdk_iam::operation::get_login_profile::GetLoginProfileError::NoSuchEntityException(
+            aws_sdk_iam::types::error::NoSuchEntityException::builder()
+                .message("no login profile")
+                .build(),
+        )
+    }
+
+    fn access_denied_login_profile_error(
+    ) -> aws_sdk_iam::operation::get_login_profile::GetLoginProfileError {
+        aws_sdk_iam::operation::get_login_profile::GetLoginProfileError::generic(
+            aws_smithy_types::error::ErrorMetadata::builder()
+                .code("AccessDenied")
+                .build(),
+        )
+    }
+
+    fn get_user_output(
+        user_name: &str,
+        password_last_used_secs: Option<i64>,
+    ) -> aws_sdk_iam::operation::get_user::GetUserOutput {
+        let mut builder = aws_sdk_iam::types::User::builder()
+            .path("/")
+            .user_name(user_name)
+            .user_id("AIDAEXAMPLE")
+            .arn(format!("arn:aws:iam::123456789012:user/{user_name}"))
+            .create_date(aws_smithy_types::DateTime::from_secs(1_600_000_000));
+        if let Some(secs) = password_last_used_secs {
+            builder = builder.password_last_used(aws_smithy_types::DateTime::from_secs(secs));
+        }
+        aws_sdk_iam::operation::get_user::GetUserOutput::builder()
+            .user(builder.build().expect("valid User"))
+            .build()
+    }
+
+    fn empty_access_keys_output() -> aws_sdk_iam::operation::list_access_keys::ListAccessKeysOutput
+    {
+        aws_sdk_iam::operation::list_access_keys::ListAccessKeysOutput::builder()
+            .set_access_key_metadata(Some(Vec::new()))
+            .is_truncated(false)
+            .build()
+            .expect("valid ListAccessKeysOutput")
+    }
+
+    fn access_keys_output(
+        user_name: &str,
+        key_id: &str,
+    ) -> aws_sdk_iam::operation::list_access_keys::ListAccessKeysOutput {
+        aws_sdk_iam::operation::list_access_keys::ListAccessKeysOutput::builder()
+            .access_key_metadata(
+                aws_sdk_iam::types::AccessKeyMetadata::builder()
+                    .user_name(user_name)
+                    .access_key_id(key_id)
+                    .status(aws_sdk_iam::types::StatusType::Active)
+                    .create_date(aws_smithy_types::DateTime::from_secs(1_600_000_000))
+                    .build(),
+            )
+            .is_truncated(false)
+            .build()
+            .expect("valid ListAccessKeysOutput")
+    }
+
+    fn access_key_last_used_output(
+        last_used_secs: Option<i64>,
+    ) -> aws_sdk_iam::operation::get_access_key_last_used::GetAccessKeyLastUsedOutput {
+        let mut builder = aws_sdk_iam::types::AccessKeyLastUsed::builder()
+            .service_name("s3")
+            .region("us-east-1");
+        if let Some(secs) = last_used_secs {
+            builder = builder.last_used_date(aws_smithy_types::DateTime::from_secs(secs));
+        }
+        aws_sdk_iam::operation::get_access_key_last_used::GetAccessKeyLastUsedOutput::builder()
+            .access_key_last_used(builder.build().expect("valid AccessKeyLastUsed"))
+            .build()
+    }
+
+    /// Client whose calls all succeed with empty/default responses: no MFA devices, no
+    /// console login (`NoSuchEntity`), no password use, no access keys.
+    fn baseline_client() -> aws_sdk_iam::Client {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule =
+            mock!(aws_sdk_iam::Client::list_access_keys).then_output(empty_access_keys_output);
+        mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        )
+    }
+
+    #[tokio::test]
+    async fn enrich_user_baseline_has_no_mfa_no_login_no_activity() {
+        let client = baseline_client();
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(!enrichment.has_mfa);
+        assert!(enrichment.mfa_method.is_none());
+        assert!(!enrichment.console_login_enabled);
+        assert!(enrichment.last_activity_date.is_none());
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn enrich_user_detects_virtual_mfa_device() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .mfa_devices(mfa_device("alice", "arn:aws:iam::123456789012:mfa/alice"))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule =
+            mock!(aws_sdk_iam::Client::list_access_keys).then_output(empty_access_keys_output);
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(enrichment.has_mfa);
+        assert_eq!(enrichment.mfa_method, Some(MfaDeviceType::Virtual));
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn enrich_user_list_mfa_devices_denied_pushes_warning() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_error(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMFADevicesError::generic(
+                aws_smithy_types::error::ErrorMetadata::builder()
+                    .code("AccessDenied")
+                    .build(),
+            )
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule =
+            mock!(aws_sdk_iam::Client::list_access_keys).then_output(empty_access_keys_output);
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(!enrichment.has_mfa);
+        assert_eq!(warnings, vec![EnrichmentWarning::Mfa]);
+    }
+
+    #[tokio::test]
+    async fn enrich_user_console_login_true_when_profile_present() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule = mock!(aws_sdk_iam::Client::get_login_profile)
+            .then_output(|| login_profile_output("alice"));
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule =
+            mock!(aws_sdk_iam::Client::list_access_keys).then_output(empty_access_keys_output);
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(enrichment.console_login_enabled);
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn enrich_user_console_login_no_such_entity_is_false_without_warning() {
+        // NoSuchEntity means "no login profile" — this is a valid, non-error result.
+        let client = baseline_client();
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(!enrichment.console_login_enabled);
+        assert!(
+            !warnings.contains(&EnrichmentWarning::LoginProfile),
+            "NoSuchEntity must not produce a warning: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_user_login_profile_other_error_pushes_warning() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule = mock!(aws_sdk_iam::Client::get_login_profile)
+            .then_error(access_denied_login_profile_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule =
+            mock!(aws_sdk_iam::Client::list_access_keys).then_output(empty_access_keys_output);
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(!enrichment.console_login_enabled);
+        assert_eq!(warnings, vec![EnrichmentWarning::LoginProfile]);
+    }
+
+    #[tokio::test]
+    async fn enrich_user_last_activity_is_max_of_password_and_key_last_used() {
+        // password_last_used (T1) is older than the access key's last-used date (T2);
+        // last_activity_date must be the max, T2.
+        let t1 = 1_700_000_000;
+        let t2 = 1_800_000_000;
+
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule = mock!(aws_sdk_iam::Client::get_user)
+            .then_output(move || get_user_output("alice", Some(t1)));
+        let keys_rule = mock!(aws_sdk_iam::Client::list_access_keys)
+            .then_output(|| access_keys_output("alice", "AKIAEXAMPLE"));
+        let last_used_rule = mock!(aws_sdk_iam::Client::get_access_key_last_used)
+            .then_output(move || access_key_last_used_output(Some(t2)));
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[
+                &mfa_rule,
+                &login_rule,
+                &get_user_rule,
+                &keys_rule,
+                &last_used_rule
+            ]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        let expected = DateTime::from_timestamp(t2, 0).unwrap();
+        assert_eq!(enrichment.last_activity_date, Some(expected));
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn enrich_user_last_activity_prefers_password_last_used_when_more_recent() {
+        let t1 = 1_800_000_000;
+        let t2 = 1_700_000_000;
+
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule = mock!(aws_sdk_iam::Client::get_user)
+            .then_output(move || get_user_output("alice", Some(t1)));
+        let keys_rule = mock!(aws_sdk_iam::Client::list_access_keys)
+            .then_output(|| access_keys_output("alice", "AKIAEXAMPLE"));
+        let last_used_rule = mock!(aws_sdk_iam::Client::get_access_key_last_used)
+            .then_output(move || access_key_last_used_output(Some(t2)));
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[
+                &mfa_rule,
+                &login_rule,
+                &get_user_rule,
+                &keys_rule,
+                &last_used_rule
+            ]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        let expected = DateTime::from_timestamp(t1, 0).unwrap();
+        assert_eq!(enrichment.last_activity_date, Some(expected));
+        assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn enrich_user_list_access_keys_denied_pushes_warning() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule = mock!(aws_sdk_iam::Client::list_access_keys).then_error(|| {
+            aws_sdk_iam::operation::list_access_keys::ListAccessKeysError::generic(
+                aws_smithy_types::error::ErrorMetadata::builder()
+                    .code("AccessDenied")
+                    .build(),
+            )
+        });
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[&mfa_rule, &login_rule, &get_user_rule, &keys_rule]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        assert!(enrichment.last_activity_date.is_none());
+        assert_eq!(warnings, vec![EnrichmentWarning::AccessKeyActivity]);
     }
 }

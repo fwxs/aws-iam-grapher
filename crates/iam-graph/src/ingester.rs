@@ -112,6 +112,10 @@ impl GraphIngester {
                     | iam_collector::CollectorWarning::InlinePoliciesNotResolved
                     | iam_collector::CollectorWarning::WildcardsNotExpanded
                     | iam_collector::CollectorWarning::PartialData(_)
+                    | iam_collector::CollectorWarning::MfaDevicesMissing
+                    | iam_collector::CollectorWarning::LoginProfileMissing
+                    | iam_collector::CollectorWarning::AccessKeyActivityMissing
+                    | iam_collector::CollectorWarning::UserSecurityAttributesNotCollected
             )
         });
         let partial_reasons: Vec<String> = data
@@ -126,6 +130,19 @@ impl GraphIngester {
                 }
                 iam_collector::CollectorWarning::WildcardsNotExpanded => {
                     "some wildcards not expanded".to_string()
+                }
+                iam_collector::CollectorWarning::MfaDevicesMissing => {
+                    "some users' MFA devices could not be listed".to_string()
+                }
+                iam_collector::CollectorWarning::LoginProfileMissing => {
+                    "some users' console login status could not be determined".to_string()
+                }
+                iam_collector::CollectorWarning::AccessKeyActivityMissing => {
+                    "some users' access key activity could not be determined".to_string()
+                }
+                iam_collector::CollectorWarning::UserSecurityAttributesNotCollected => {
+                    "offline collection does not populate user MFA/login/activity attributes"
+                        .to_string()
                 }
                 iam_collector::CollectorWarning::PartialData(msg) => msg.clone(),
             })

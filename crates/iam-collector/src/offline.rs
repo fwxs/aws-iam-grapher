@@ -66,7 +66,7 @@ impl IamDataSource for OfflineCollector {
 
     async fn collect(&self) -> Result<CollectedData, CollectorError> {
         info!("starting offline IAM collection");
-        let mut warnings = Vec::new();
+        let mut warnings = vec![CollectorWarning::UserSecurityAttributesNotCollected];
 
         let details: AccountAuthorizationDetails = serde_json::from_str(&self.auth_details_json)?;
 
