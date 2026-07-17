@@ -27,4 +27,15 @@ pub enum CollectorWarning {
     InlinePoliciesNotResolved,
     WildcardsNotExpanded,
     PartialData(String),
+    /// One or more users' MFA devices could not be listed (`ListMFADevices` failed).
+    MfaDevicesMissing,
+    /// One or more users' console login profile could not be determined
+    /// (`GetLoginProfile` failed with something other than `NoSuchEntity`).
+    LoginProfileMissing,
+    /// One or more users' access key activity could not be determined
+    /// (`ListAccessKeys` or `GetAccessKeyLastUsed` failed).
+    AccessKeyActivityMissing,
+    /// User security attributes (MFA, console login, last activity) were not collected
+    /// at all — offline collection has no data source for them.
+    UserSecurityAttributesNotCollected,
 }

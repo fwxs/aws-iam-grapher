@@ -352,6 +352,10 @@ pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
         access_keys: vec![],
         is_aws_managed: false,
         tags: HashMap::new(),
+        has_mfa: true,
+        mfa_method: Some(iam_models::MfaDeviceType::Virtual),
+        console_login_enabled: true,
+        last_activity_date: Some(Utc::now()),
     };
 
     let dave_inline = IamInlinePolicy {
@@ -373,6 +377,10 @@ pub fn data_with_user_group_and_inline(account_id: &str) -> CollectedData {
         access_keys: vec![],
         is_aws_managed: false,
         tags: HashMap::new(),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
     };
 
     CollectedData {
@@ -868,6 +876,10 @@ pub fn data_with_user_allow_and_group_deny(account_id: &str, action: &str) -> Co
         access_keys: vec![],
         is_aws_managed: false,
         tags: HashMap::new(),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
     };
 
     CollectedData {

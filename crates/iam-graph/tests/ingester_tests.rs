@@ -636,3 +636,72 @@ async fn ingest_leaves_ou_fields_blank_for_standalone_collection() {
     assert_eq!(account.ou_id, None);
     assert_eq!(account.ou_name, None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_writes_user_mfa_login_and_activity_properties() {
+    let client = helpers::shared_client().await;
+    let account_id = "222233334444";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let carol_uid = format!("{snapshot_id}|arn:aws:iam::{account_id}:user/carol");
+    let rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (u:User {uid: $uid}) RETURN u.has_mfa AS has_mfa, \
+                 u.mfa_method AS mfa_method, u.console_login_enabled AS console_login_enabled, \
+                 u.last_activity_date AS last_activity_date",
+            )
+            .param("uid", carol_uid.as_str()),
+        )
+        .await
+        .expect("user query must succeed");
+    assert!(!rows.is_empty(), "carol's User node must exist");
+
+    let has_mfa: bool = rows[0].get("has_mfa").expect("has_mfa must be set");
+    let mfa_method: String = rows[0].get("mfa_method").expect("mfa_method must be set");
+    let console_login_enabled: bool = rows[0]
+        .get("console_login_enabled")
+        .expect("console_login_enabled must be set");
+    let last_activity_date: String = rows[0]
+        .get("last_activity_date")
+        .expect("last_activity_date must be set");
+
+    assert!(has_mfa, "carol must have has_mfa=true");
+    assert_eq!(mfa_method, "virtual");
+    assert!(
+        console_login_enabled,
+        "carol must have console login enabled"
+    );
+    assert!(
+        !last_activity_date.is_empty(),
+        "carol must have a last_activity_date"
+    );
+
+    let dave_uid = format!("{snapshot_id}|arn:aws:iam::{account_id}:user/dave");
+    let rows = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (u:User {uid: $uid}) RETURN u.has_mfa AS has_mfa, \
+                 u.mfa_method AS mfa_method",
+            )
+            .param("uid", dave_uid.as_str()),
+        )
+        .await
+        .expect("user query must succeed");
+    assert!(!rows.is_empty(), "dave's User node must exist");
+    let has_mfa: bool = rows[0].get("has_mfa").expect("has_mfa must be set");
+    let mfa_method: String = rows[0].get("mfa_method").expect("mfa_method must be set");
+    assert!(!has_mfa, "dave must default has_mfa=false");
+    assert_eq!(
+        mfa_method, "",
+        "dave's mfa_method must be the empty string when unset"
+    );
+}

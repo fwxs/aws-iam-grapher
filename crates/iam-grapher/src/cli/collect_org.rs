@@ -70,6 +70,19 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
             CollectorWarning::WildcardsNotExpanded => {
                 "wildcard actions in some policies could not be expanded".to_string()
             }
+            CollectorWarning::MfaDevicesMissing => {
+                "some users' MFA devices could not be listed".to_string()
+            }
+            CollectorWarning::LoginProfileMissing => {
+                "some users' console login status could not be determined".to_string()
+            }
+            CollectorWarning::AccessKeyActivityMissing => {
+                "some users' access key activity could not be determined".to_string()
+            }
+            CollectorWarning::UserSecurityAttributesNotCollected => {
+                "offline collection does not populate user MFA/login/activity attributes"
+                    .to_string()
+            }
             CollectorWarning::PartialData(msg) => msg.clone(),
         };
         eprintln!("[!] {msg}");

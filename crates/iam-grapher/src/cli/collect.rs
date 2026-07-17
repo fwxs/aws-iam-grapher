@@ -230,6 +230,19 @@ fn print_warnings(data: &CollectedData) {
             CollectorWarning::WildcardsNotExpanded => {
                 "Wildcard actions in some policies could not be expanded."
             }
+            CollectorWarning::MfaDevicesMissing => {
+                "Some users' MFA devices could not be listed (ListMFADevices denied)."
+            }
+            CollectorWarning::LoginProfileMissing => {
+                "Some users' console login status could not be determined (GetLoginProfile denied)."
+            }
+            CollectorWarning::AccessKeyActivityMissing => {
+                "Some users' access key activity could not be determined."
+            }
+            CollectorWarning::UserSecurityAttributesNotCollected => {
+                "Offline collection does not populate MFA, console login, or last-activity \
+                 attributes for users."
+            }
             CollectorWarning::PartialData(msg) => msg,
         };
         eprintln!("[!] {msg}");

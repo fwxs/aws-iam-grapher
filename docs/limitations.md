@@ -173,6 +173,28 @@ When an entity has multiple wildcard grants across different resources, only one
 `resource` value is surfaced per entity (the first one Rust-side dedup encounters) — `who_can`
 already deduplicates by ARN, collapsing multiple matching grants into a single row.
 
+### User MFA, console login, and last-activity attributes are live-collection-only
+
+`IamUser` carries `has_mfa`, `mfa_method`, `console_login_enabled`, and `last_activity_date`,
+populated by a per-user enrichment pass (`ListMFADevices`, `GetLoginProfile`, `GetUser`,
+`ListAccessKeys` + `GetAccessKeyLastUsed`) in `LiveCollector`. `HybridCollector` inherits this
+since it delegates to `LiveCollector` for the live path.
+
+**`OfflineCollector` does not populate these fields** — `GetAccountAuthorizationDetails` and
+`ListInstanceProfiles` (its only inputs) carry none of this data. Offline snapshots always default
+them (`has_mfa: false`, `mfa_method: None`, `console_login_enabled: false`,
+`last_activity_date: None`) and are marked partial via
+`CollectorWarning::UserSecurityAttributesNotCollected`. Do not treat `has_mfa: false` on a snapshot
+ingested from an offline collection as evidence a user actually lacks MFA — check
+`Snapshot.partial_reasons` first.
+
+**Per-user call failures are non-fatal** — a 403 on `ListMFADevices`, `GetLoginProfile`, or the
+access-key calls for one user does not fail the whole collection; it is folded into an
+account-wide `CollectorWarning` (`MfaDevicesMissing`, `LoginProfileMissing`,
+`AccessKeyActivityMissing`) and the affected fields default for that user. A `GetLoginProfile`
+`NoSuchEntity` response is not an error — it means the user has no console login profile
+(`console_login_enabled: false`) and is not reported as a warning.
+
 ### Validated scale ceiling
 
 The ingestion pipeline has been load-tested against a synthetic account of:
