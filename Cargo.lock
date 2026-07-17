@@ -274,19 +274,20 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-organizations"
-version = "1.118.0"
+version = "1.119.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc95b5a38646d43c642b4851b353464834e6b19390a5c7d90bde5a7d939fab65"
+checksum = "3a6492c6be5f8f8f1f8245327cd156d061dc9ee8433b2653a3e76f0b47e29966"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
  "aws-runtime",
  "aws-smithy-async",
- "aws-smithy-http 0.63.6",
- "aws-smithy-json 0.62.7",
- "aws-smithy-observability 0.2.6",
+ "aws-smithy-http 0.64.0",
+ "aws-smithy-json 0.63.0",
+ "aws-smithy-observability 0.3.0",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
+ "aws-smithy-schema 0.2.0",
  "aws-smithy-types",
  "aws-types",
  "bytes",
