@@ -52,14 +52,35 @@ struct MatchedExcludes {
     matched_names: std::collections::HashSet<String>,
 }
 
+/// `--include-ou-name` entries that never scoped in any account, split by *why*: `never_matched`
+/// means the name was never seen on any OU encountered while walking the tree (likely a typo);
+/// `shadowed_by_exclude` means an OU with that exact name was encountered but was itself pruned
+/// by `--exclude-ou-id`/`--exclude-ou-name` before the include check ran, so it looks unmatched
+/// even though the name is correct — reported separately so that case doesn't read as a typo hint.
+#[derive(Debug, Default)]
+struct UnmatchedIncludes {
+    never_matched: Vec<String>,
+    shadowed_by_exclude: Vec<String>,
+}
+
+#[cfg(test)]
+impl UnmatchedIncludes {
+    fn is_empty(&self) -> bool {
+        self.never_matched.is_empty() && self.shadowed_by_exclude.is_empty()
+    }
+}
+
 /// Mutable accumulators threaded through the recursive [`OrgCollector::collect_accounts_under`]
 /// walk. Bundled into one struct so the walk stays under clippy's argument-count lint instead of
-/// carrying four separate `&mut` accumulators as positional parameters.
+/// carrying five separate `&mut` accumulators as positional parameters.
 struct WalkState<'a> {
     out: &'a mut Vec<OrgAccount>,
     matched_excludes: &'a mut MatchedExcludes,
     matched_overrides: &'a mut std::collections::HashSet<String>,
     matched_includes: &'a mut std::collections::HashSet<String>,
+    /// `--include-ou-name` values matched by an OU that was itself excluded — see
+    /// [`UnmatchedIncludes::shadowed_by_exclude`].
+    shadowed_includes: &'a mut std::collections::HashSet<String>,
 }
 
 /// Result of one AWS Organizations collection run: one `CollectedData` per account that
@@ -247,7 +268,7 @@ impl OrgCollector {
     pub async fn collect(&self) -> Result<OrgCollectionResult, CollectorError> {
         let run_id = Uuid::new_v4().to_string();
         info!(run_id = %run_id, "starting org-wide collection: enumerating accounts");
-        let (accounts, unmatched_excludes, unmatched_override_keys, unmatched_include_names) =
+        let (accounts, unmatched_excludes, unmatched_override_keys, unmatched_includes) =
             self.enumerate_accounts().await?;
         info!(accounts = accounts.len(), "enumerated org accounts");
 
@@ -298,12 +319,20 @@ impl OrgCollector {
                  enumerated root"
             )));
         }
-        for ou_name in &unmatched_include_names {
+        for ou_name in &unmatched_includes.never_matched {
             warn!(ou_name = %ou_name, "--include-ou-name did not match any OU encountered during enumeration");
             warnings.push(CollectorWarning::PartialData(format!(
                 "--include-ou-name {ou_name} did not match any organizational unit's display \
                  name in this organization — check spelling and that it is reachable from an \
                  enumerated root"
+            )));
+        }
+        for ou_name in &unmatched_includes.shadowed_by_exclude {
+            warn!(ou_name = %ou_name, "--include-ou-name matched an OU that was also excluded; the exclude took precedence");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--include-ou-name {ou_name} matched an organizational unit's display name, but \
+                 that OU was also pruned by --exclude-ou-id/--exclude-ou-name — the exclude took \
+                 precedence, so no accounts under it were included"
             )));
         }
 
@@ -398,8 +427,15 @@ impl OrgCollector {
     /// each would otherwise silently collect everything / never apply / never scope anything).
     async fn enumerate_accounts(
         &self,
-    ) -> Result<(Vec<OrgAccount>, UnmatchedExcludes, Vec<String>, Vec<String>), CollectorError>
-    {
+    ) -> Result<
+        (
+            Vec<OrgAccount>,
+            UnmatchedExcludes,
+            Vec<String>,
+            UnmatchedIncludes,
+        ),
+        CollectorError,
+    > {
         debug!("fetching ListRoots");
         let mut accounts = Vec::new();
         let mut matched_excludes = MatchedExcludes::default();
@@ -407,12 +443,15 @@ impl OrgCollector {
             std::collections::HashSet::new();
         let mut matched_includes: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut shadowed_includes: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         {
             let mut state = WalkState {
                 out: &mut accounts,
                 matched_excludes: &mut matched_excludes,
                 matched_overrides: &mut matched_overrides,
                 matched_includes: &mut matched_includes,
+                shadowed_includes: &mut shadowed_includes,
             };
             let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
             while let Some(page) = root_paginator.next().await {
@@ -451,10 +490,16 @@ impl OrgCollector {
             .filter(|key| !matched_overrides.contains(*key))
             .cloned()
             .collect();
-        let unmatched_include_names: Vec<String> = self
+        let shadowed_include_names: Vec<String> = self
             .include_ou_names
             .iter()
-            .filter(|name| !matched_includes.contains(*name))
+            .filter(|name| !matched_includes.contains(*name) && shadowed_includes.contains(*name))
+            .cloned()
+            .collect();
+        let never_matched_include_names: Vec<String> = self
+            .include_ou_names
+            .iter()
+            .filter(|name| !matched_includes.contains(*name) && !shadowed_includes.contains(*name))
             .cloned()
             .collect();
 
@@ -465,7 +510,10 @@ impl OrgCollector {
                 names: unmatched_names,
             },
             unmatched_override_keys,
-            unmatched_include_names,
+            UnmatchedIncludes {
+                never_matched: never_matched_include_names,
+                shadowed_by_exclude: shadowed_include_names,
+            },
         ))
     }
 
@@ -494,27 +542,30 @@ impl OrgCollector {
         'a: 'b,
     {
         Box::pin(async move {
-            debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
-            let mut acct_paginator = self
-                .orgs_client
-                .list_accounts_for_parent()
-                .parent_id(&parent_id)
-                .into_paginator()
-                .send();
-            while let Some(page) = acct_paginator.next().await {
-                let page = page.map_err(map_sdk_error)?;
-                for a in page.accounts() {
-                    if !self.include_ou_names.is_empty() && !included {
-                        continue;
+            // Loop-invariant: whether this subtree is in scope depends only on `included` /
+            // `include_ou_names`, never on the individual accounts fetched below — so the
+            // ListAccountsForParent call itself is skipped entirely for an out-of-scope subtree
+            // rather than fetched and then discarded per account.
+            if self.include_ou_names.is_empty() || included {
+                debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
+                let mut acct_paginator = self
+                    .orgs_client
+                    .list_accounts_for_parent()
+                    .parent_id(&parent_id)
+                    .into_paginator()
+                    .send();
+                while let Some(page) = acct_paginator.next().await {
+                    let page = page.map_err(map_sdk_error)?;
+                    for a in page.accounts() {
+                        state.out.push(OrgAccount {
+                            id: a.id().unwrap_or_default().to_string(),
+                            name: a.name().unwrap_or_default().to_string(),
+                            ou_path: ou_path.clone(),
+                            ou_id: current_ou.as_ref().map(|(id, _)| id.clone()),
+                            ou_name: current_ou.as_ref().map(|(_, name)| name.clone()),
+                            profile_override: current_override.clone(),
+                        });
                     }
-                    state.out.push(OrgAccount {
-                        id: a.id().unwrap_or_default().to_string(),
-                        name: a.name().unwrap_or_default().to_string(),
-                        ou_path: ou_path.clone(),
-                        ou_id: current_ou.as_ref().map(|(id, _)| id.clone()),
-                        ou_name: current_ou.as_ref().map(|(_, name)| name.clone()),
-                        profile_override: current_override.clone(),
-                    });
                 }
             }
 
@@ -532,6 +583,13 @@ impl OrgCollector {
                     let ou_name = ou.name().unwrap_or_default().to_string();
                     if self.exclude_ou_ids.contains(&ou_id) {
                         state.matched_excludes.matched_ids.insert(ou_id);
+                        if let Some(name) = self
+                            .include_ou_names
+                            .iter()
+                            .find(|name| name.as_str() == ou_name)
+                        {
+                            state.shadowed_includes.insert(name.clone());
+                        }
                         continue;
                     }
                     if let Some(name) = self
@@ -540,6 +598,13 @@ impl OrgCollector {
                         .find(|name| name.as_str() == ou_name)
                     {
                         state.matched_excludes.matched_names.insert(name.clone());
+                        if let Some(name) = self
+                            .include_ou_names
+                            .iter()
+                            .find(|name| name.as_str() == ou_name)
+                        {
+                            state.shadowed_includes.insert(name.clone());
+                        }
                         continue;
                     }
 
@@ -1401,12 +1466,16 @@ mod tests {
             .await
             .expect("enumeration succeeds");
 
-        // Assert: ou-prod was excluded, so the include filter never got a chance to match it —
-        // it surfaces as an unmatched include, same as any other typo'd --include-ou-name.
+        // Assert: ou-prod was excluded before the include check ran, so "Prod" is reported as
+        // shadowed-by-exclude, not as a plain typo'd unmatched include.
         assert_eq!(accounts.len(), 0);
         assert!(unmatched_excludes.is_empty());
         assert!(unmatched_overrides.is_empty());
-        assert_eq!(unmatched_includes, vec!["Prod".to_string()]);
+        assert!(unmatched_includes.never_matched.is_empty());
+        assert_eq!(
+            unmatched_includes.shadowed_by_exclude,
+            vec!["Prod".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1451,6 +1520,54 @@ mod tests {
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("Prod"))
         );
+    }
+
+    #[tokio::test]
+    async fn collect_surfaces_distinct_warning_for_include_shadowed_by_exclude() {
+        // Arrange: ou-prod (name "Prod") matches --include-ou-name but is also excluded by id.
+        // The warning message must say it was shadowed by the exclude, not that "Prod" never
+        // matched anything — the name was correct, it was just pruned first.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-prod", "Prod")]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec!["ou-prod".to_string()],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 0);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            &result.warnings[0],
+            CollectorWarning::PartialData(msg)
+                if msg.contains("Prod") && msg.contains("also pruned by --exclude-ou")
+        ));
     }
 
     #[tokio::test]
