@@ -3,9 +3,10 @@ use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
-    latest_org_run_id, list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
-    privilege_escalation_paths, snapshot_account_id, who_can, EntityRef, EscalationPath,
-    GraphClient, OrgQueryContext, PermissionRow, QueryContext, DEFAULT_MAX_HOPS,
+    list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
+    privilege_escalation_paths, resolve_contexts, resolve_org_context, snapshot_account_id,
+    who_can, EntityRef, EscalationPath, GraphClient, GraphError, PermissionRow, ScopeSelector,
+    DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -158,10 +159,7 @@ async fn resolve_all_account_ids(client: &GraphClient) -> anyhow::Result<Vec<Str
         .await
         .context("failed to list accounts")?;
     if accounts.is_empty() {
-        anyhow::bail!(
-            "no snapshots found in the graph.\n\
-             Run first: aws-iam-grapher collect --account-alias my-account"
-        );
+        return Err(GraphError::NoSnapshots.into());
     }
     Ok(accounts)
 }
@@ -322,19 +320,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             max_hops,
             org_run_id,
         } => {
-            let run_id = match org_run_id {
-                Some(id) => id,
-                None => latest_org_run_id(client.inner())
-                    .await
-                    .context("failed to look up latest org run")?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no org collection runs found.\n\
-                             Run first: aws-iam-grapher collect org ..."
-                        )
-                    })?,
-            };
-            let ctx = OrgQueryContext::new(&run_id);
+            let ctx = resolve_org_context(client.inner(), org_run_id).await?;
+            let run_id = ctx.org_run_id.clone();
             let paths = org_escalation_paths(client.inner(), &ctx, max_hops)
                 .await
                 .context("org-escalation query failed")?;
@@ -428,9 +415,18 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
         ref cmd => match args.account_id.as_deref() {
             Some(account_id) => {
-                let snapshot_id =
-                    resolve_snapshot_id(args.snapshot_id.as_deref(), &client, account_id).await?;
-                let ctx = QueryContext::new(snapshot_id.clone(), account_id);
+                let selector = match args.snapshot_id.clone() {
+                    Some(snapshot_id) => ScopeSelector::Snapshot {
+                        snapshot_id,
+                        expected_account: Some(account_id.to_owned()),
+                    },
+                    None => ScopeSelector::Account {
+                        account_id: account_id.to_owned(),
+                    },
+                };
+                let mut contexts = resolve_contexts(client.inner(), selector).await?;
+                let ctx = contexts.remove(0);
+                let snapshot_id = ctx.snapshot_id.clone();
                 warn_if_partial(&client, account_id, &snapshot_id).await;
 
                 match cmd {
@@ -563,15 +559,25 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             }
 
             None => {
-                let accounts = resolve_all_account_ids(&client).await?;
-                if accounts.len() > 1 && args.snapshot_id.is_some() {
-                    anyhow::bail!(
-                        "--snapshot-id cannot be combined with multi-account mode \
-                         (no --account-id, {} accounts found); pass --account-id to \
-                         target a single account",
-                        accounts.len()
-                    );
-                }
+                let selector = match args.snapshot_id.clone() {
+                    Some(snapshot_id) => {
+                        let accounts = resolve_all_account_ids(&client).await?;
+                        if accounts.len() > 1 {
+                            anyhow::bail!(
+                                "--snapshot-id cannot be combined with multi-account mode \
+                                 (no --account-id, {} accounts found); pass --account-id to \
+                                 target a single account",
+                                accounts.len()
+                            );
+                        }
+                        ScopeSelector::Snapshot {
+                            snapshot_id,
+                            expected_account: None,
+                        }
+                    }
+                    None => ScopeSelector::AllAccounts,
+                };
+                let contexts = resolve_contexts(client.inner(), selector).await?;
 
                 match cmd {
                     QueryCommand::WhoCan {
@@ -582,19 +588,12 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         principal_tags,
                     } => {
                         let condition_ctx = parse_condition_context(region, *mfa, principal_tags)?;
-                        let mut groups = Vec::with_capacity(accounts.len());
-                        for account_id in &accounts {
-                            let snapshot_id = resolve_snapshot_id(
-                                args.snapshot_id.as_deref(),
-                                &client,
-                                account_id,
-                            )
-                            .await?;
-                            warn_if_partial(&client, account_id, &snapshot_id).await;
-                            let ctx = QueryContext::new(snapshot_id.clone(), account_id.clone());
+                        let mut groups = Vec::with_capacity(contexts.len());
+                        for ctx in &contexts {
+                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
                             let results = who_can(
                                 client.inner(),
-                                &ctx,
+                                ctx,
                                 action,
                                 resource.as_deref(),
                                 &condition_ctx,
@@ -602,8 +601,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                             .await
                             .context("who-can query failed")?;
                             groups.push(AccountGroup {
-                                account_id: account_id.clone(),
-                                snapshot_id,
+                                account_id: ctx.account_id.clone(),
+                                snapshot_id: ctx.snapshot_id.clone(),
                                 results,
                             });
                         }
@@ -634,23 +633,16 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
 
                     QueryCommand::EntityPerms { arn } => {
-                        let mut groups = Vec::with_capacity(accounts.len());
-                        for account_id in &accounts {
-                            let snapshot_id = resolve_snapshot_id(
-                                args.snapshot_id.as_deref(),
-                                &client,
-                                account_id,
-                            )
-                            .await?;
-                            warn_if_partial(&client, account_id, &snapshot_id).await;
-                            let ctx = QueryContext::new(snapshot_id.clone(), account_id.clone());
-                            let uid = format!("{}|{}", snapshot_id, arn);
-                            let perms = entity_permissions(client.inner(), &ctx, &uid)
+                        let mut groups = Vec::with_capacity(contexts.len());
+                        for ctx in &contexts {
+                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                            let uid = format!("{}|{}", ctx.snapshot_id, arn);
+                            let perms = entity_permissions(client.inner(), ctx, &uid)
                                 .await
                                 .context("entity-perms query failed")?;
                             groups.push(AccountGroup {
-                                account_id: account_id.clone(),
-                                snapshot_id,
+                                account_id: ctx.account_id.clone(),
+                                snapshot_id: ctx.snapshot_id.clone(),
                                 results: perms,
                             });
                         }
@@ -681,23 +673,16 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
 
                     QueryCommand::InstanceProfilesWith { action } => {
-                        let mut groups = Vec::with_capacity(accounts.len());
-                        for account_id in &accounts {
-                            let snapshot_id = resolve_snapshot_id(
-                                args.snapshot_id.as_deref(),
-                                &client,
-                                account_id,
-                            )
-                            .await?;
-                            warn_if_partial(&client, account_id, &snapshot_id).await;
-                            let ctx = QueryContext::new(snapshot_id.clone(), account_id.clone());
+                        let mut groups = Vec::with_capacity(contexts.len());
+                        for ctx in &contexts {
+                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
                             let results =
-                                instance_profiles_with_action(client.inner(), &ctx, action)
+                                instance_profiles_with_action(client.inner(), ctx, action)
                                     .await
                                     .context("instance-profiles-with query failed")?;
                             groups.push(AccountGroup {
-                                account_id: account_id.clone(),
-                                snapshot_id,
+                                account_id: ctx.account_id.clone(),
+                                snapshot_id: ctx.snapshot_id.clone(),
                                 results,
                             });
                         }
@@ -729,22 +714,15 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
                     QueryCommand::PrivilegeEscalation { max_hops } => {
                         let max_hops = *max_hops;
-                        let mut groups = Vec::with_capacity(accounts.len());
-                        for account_id in &accounts {
-                            let snapshot_id = resolve_snapshot_id(
-                                args.snapshot_id.as_deref(),
-                                &client,
-                                account_id,
-                            )
-                            .await?;
-                            warn_if_partial(&client, account_id, &snapshot_id).await;
-                            let ctx = QueryContext::new(snapshot_id.clone(), account_id.clone());
-                            let paths = privilege_escalation_paths(client.inner(), &ctx, max_hops)
+                        let mut groups = Vec::with_capacity(contexts.len());
+                        for ctx in &contexts {
+                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                            let paths = privilege_escalation_paths(client.inner(), ctx, max_hops)
                                 .await
                                 .context("privilege-escalation query failed")?;
                             groups.push(AccountGroup {
-                                account_id: account_id.clone(),
-                                snapshot_id,
+                                account_id: ctx.account_id.clone(),
+                                snapshot_id: ctx.snapshot_id.clone(),
                                 results: paths,
                             });
                         }
@@ -813,10 +791,10 @@ async fn resolve_diff_account_id(
 ) -> anyhow::Result<String> {
     let account_a = snapshot_account_id(client.inner(), snapshot_a)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("snapshot {snapshot_a} not found"))?;
+        .ok_or_else(|| GraphError::SnapshotNotFound(snapshot_a.to_owned()))?;
     let account_b = snapshot_account_id(client.inner(), snapshot_b)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("snapshot {snapshot_b} not found"))?;
+        .ok_or_else(|| GraphError::SnapshotNotFound(snapshot_b.to_owned()))?;
 
     if account_a != account_b {
         anyhow::bail!(
@@ -825,27 +803,6 @@ async fn resolve_diff_account_id(
         );
     }
     Ok(account_a)
-}
-
-async fn resolve_snapshot_id(
-    snapshot_id: Option<&str>,
-    client: &GraphClient,
-    account_id: &str,
-) -> anyhow::Result<String> {
-    if let Some(id) = snapshot_id {
-        return Ok(id.to_owned());
-    }
-
-    let snapshots = list_snapshots(client.inner(), account_id)
-        .await
-        .context("failed to list snapshots while resolving latest")?;
-
-    snapshots.into_iter().next().map(|s| s.id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no snapshots found for account {account_id}.\n\
-                 Run first: aws-iam-grapher collect --account-alias my-account"
-        )
-    })
 }
 
 fn short_id(id: &str) -> &str {
