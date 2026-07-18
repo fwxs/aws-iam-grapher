@@ -678,7 +678,7 @@ impl GraphIngester {
         &self,
         phase: u8,
         cypher: &str,
-        rows: Vec<Row>,
+        mut rows: Vec<Row>,
     ) -> Result<(), GraphError> {
         if rows.is_empty() {
             return Ok(());
@@ -692,11 +692,15 @@ impl GraphIngester {
             return Ok(());
         }
         let graph = self.client.inner();
-        let mut statements = 0u64;
-        for chunk in rows.chunks(self.config.batch_size) {
+        while !rows.is_empty() {
+            let take = self.config.batch_size.min(rows.len());
+            // Drain owned rows rather than slicing + cloning: `.param()` takes
+            // ownership, and `chunks()` would only yield borrowed slices.
+            let chunk: Vec<Row> = rows.drain(..take).collect();
+            let chunk_len = chunk.len();
             let started = Instant::now();
             let mut txn = graph.start_txn().await?;
-            txn.run(neo4rs::query(cypher).param("rows", chunk.to_vec()))
+            txn.run(neo4rs::query(cypher).param("rows", chunk))
                 .await
                 .map_err(|e| GraphError::Ingestion {
                     phase,
@@ -706,20 +710,13 @@ impl GraphIngester {
                 phase,
                 cause: e.to_string(),
             })?;
-            statements += 1;
             debug!(
                 phase,
-                rows = chunk.len(),
+                rows = chunk_len,
                 duration_ms = started.elapsed().as_millis(),
                 "chunk committed"
             );
         }
-        debug!(
-            phase,
-            statements,
-            total_rows = rows.len(),
-            "phase rows executed"
-        );
         Ok(())
     }
 }
