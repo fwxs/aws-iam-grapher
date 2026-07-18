@@ -232,6 +232,34 @@ mod tests {
     }
 
     #[test]
+    fn collect_org_parses_include_ou_name() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "org",
+            "--management-profile",
+            "mgmt",
+            "--assume-role-name",
+            "OrgAccess",
+            "--neo4j-pass",
+            "test",
+            "--include-ou-name",
+            "Prod",
+            "--include-ou-name",
+            "Shared",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        let Some(CollectVerb::Org(org_args)) = top.verb else {
+            panic!("expected Org verb");
+        };
+        assert_eq!(org_args.include_ou_names, vec!["Prod", "Shared"]);
+        assert!(org_args.exclude_ou_names.is_empty());
+    }
+
+    #[test]
     fn collect_org_parses_jump_from_profile() {
         let cli = Cli::try_parse_from([
             "aws-iam-grapher",
