@@ -287,3 +287,32 @@ wrong organization — it is reported as a warning (`--exclude-ou-id <id> did no
 organizational unit ...` / `--exclude-ou-name <name> did not match any organizational unit's
 display name ...`) instead of being silently ignored, so a misconfigured exclusion doesn't look
 identical to "nothing needed excluding."
+
+### Mixed-authentication orgs (`--ou-profile-override`)
+
+Some organizations are not authentication-homogeneous: most accounts are reachable via the
+`--management-profile` → `sts:AssumeRole` jump-role path, but a subset — often quarantined into
+their own OU for exactly this reason — can only be authenticated to via a separate local AWS
+profile (e.g. long-lived static credentials, or its own SSO profile). `--ou-profile-override
+<ou_id_or_name>=<aws_profile>` (repeatable) collects accounts under a matching OU, and all its
+descendant OUs, directly with the named local profile's credentials instead of assuming the jump
+role — while still filing every account, from both paths, into the same
+`org_collection_run_id`:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --ou-profile-override Quarantine=legacy-static-creds \
+  --ou-profile-override ThirdParty=vendor-keys \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
+id and its display name. When nested overridden OUs disagree, the innermost (nearest ancestor)
+override wins for a given account. Unlike `--exclude-ou-*`, an override key that never matches
+any OU encountered while walking the tree is a **fatal** validation error — collection is aborted
+before any account is touched, rather than proceeding as if the override had no effect. Likewise,
+an override's local profile must resolve real credentials before collection starts; an unresolvable
+profile also fails fast with a validation error.
