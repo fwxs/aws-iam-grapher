@@ -1,5 +1,6 @@
 /// Errors produced by the graph ingestion layer.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GraphError {
     /// Neo4j driver / connection error.
     #[error("neo4j error: {0}")]
@@ -49,4 +50,39 @@ pub enum GraphError {
         expected: String,
         actual: String,
     },
+}
+
+impl GraphError {
+    /// Construct a [`GraphError::SnapshotNotFound`] error.
+    pub fn snapshot_not_found(snapshot_id: impl Into<String>) -> Self {
+        Self::SnapshotNotFound(snapshot_id.into())
+    }
+
+    /// Construct a [`GraphError::NoSnapshotsForAccount`] error.
+    pub fn no_snapshots_for_account(account_id: impl Into<String>) -> Self {
+        Self::NoSnapshotsForAccount(account_id.into())
+    }
+
+    /// Construct a [`GraphError::NoSnapshots`] error.
+    pub fn no_snapshots() -> Self {
+        Self::NoSnapshots
+    }
+
+    /// Construct a [`GraphError::NoOrgRuns`] error.
+    pub fn no_org_runs() -> Self {
+        Self::NoOrgRuns
+    }
+
+    /// Construct a [`GraphError::AccountMismatch`] error.
+    pub fn account_mismatch(
+        snapshot_id: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::AccountMismatch {
+            snapshot_id: snapshot_id.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
 }
