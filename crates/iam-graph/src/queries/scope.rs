@@ -6,6 +6,7 @@ use crate::queries::snapshots::{
 use neo4rs::Graph;
 
 /// How the caller wants a query scoped.
+#[non_exhaustive]
 pub enum ScopeSelector {
     /// Explicit snapshot. The owning account is derived from the graph; if
     /// `expected_account` is `Some` and differs from the derived owner, resolution
@@ -18,6 +19,28 @@ pub enum ScopeSelector {
     Account { account_id: String },
     /// Latest snapshot of every account that has one (fan-out).
     AllAccounts,
+}
+
+impl ScopeSelector {
+    /// An explicit snapshot scope. See [`ScopeSelector::Snapshot`].
+    pub fn snapshot(snapshot_id: impl Into<String>, expected_account: Option<String>) -> Self {
+        Self::Snapshot {
+            snapshot_id: snapshot_id.into(),
+            expected_account,
+        }
+    }
+
+    /// The latest snapshot of one account. See [`ScopeSelector::Account`].
+    pub fn account(account_id: impl Into<String>) -> Self {
+        Self::Account {
+            account_id: account_id.into(),
+        }
+    }
+
+    /// The latest snapshot of every account. See [`ScopeSelector::AllAccounts`].
+    pub fn all_accounts() -> Self {
+        Self::AllAccounts
+    }
 }
 
 /// Resolve a selector into one or more concrete [`QueryContext`]s.
@@ -65,6 +88,9 @@ pub async fn resolve_contexts(
 
             let mut contexts = Vec::with_capacity(accounts.len());
             for account_id in accounts {
+                // list_account_ids only returns accounts with >=1 snapshot, so this
+                // is unreachable today; kept as a defensive guard against that
+                // invariant changing rather than an unwrap.
                 let latest = list_snapshots(graph, &account_id)
                     .await?
                     .into_iter()
