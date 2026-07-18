@@ -1,5 +1,6 @@
 /// Errors produced by the graph ingestion layer.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GraphError {
     /// Neo4j driver / connection error.
     #[error("neo4j error: {0}")]
@@ -16,4 +17,72 @@ pub enum GraphError {
     /// Query returned unexpected shape.
     #[error("unexpected query result: {0}")]
     UnexpectedResult(String),
+
+    /// Requested snapshot does not exist in the graph.
+    #[error("snapshot {0} not found")]
+    SnapshotNotFound(String),
+
+    /// Account has no snapshots in the graph.
+    #[error(
+        "no snapshots found for account {0}.\n\
+         Run first: aws-iam-grapher collect --account-alias my-account"
+    )]
+    NoSnapshotsForAccount(String),
+
+    /// Graph has no snapshots at all.
+    #[error(
+        "no snapshots found in the graph.\n\
+         Run first: aws-iam-grapher collect --account-alias my-account"
+    )]
+    NoSnapshots,
+
+    /// No org collection runs exist in the graph.
+    #[error(
+        "no org collection runs found.\n\
+         Run first: aws-iam-grapher collect org ..."
+    )]
+    NoOrgRuns,
+
+    /// Explicit snapshot belongs to a different account than expected.
+    #[error("snapshot {snapshot_id} belongs to account {actual} but expected account {expected}")]
+    AccountMismatch {
+        snapshot_id: String,
+        expected: String,
+        actual: String,
+    },
+}
+
+impl GraphError {
+    /// Construct a [`GraphError::SnapshotNotFound`] error.
+    pub fn snapshot_not_found(snapshot_id: impl Into<String>) -> Self {
+        Self::SnapshotNotFound(snapshot_id.into())
+    }
+
+    /// Construct a [`GraphError::NoSnapshotsForAccount`] error.
+    pub fn no_snapshots_for_account(account_id: impl Into<String>) -> Self {
+        Self::NoSnapshotsForAccount(account_id.into())
+    }
+
+    /// Construct a [`GraphError::NoSnapshots`] error.
+    pub fn no_snapshots() -> Self {
+        Self::NoSnapshots
+    }
+
+    /// Construct a [`GraphError::NoOrgRuns`] error.
+    pub fn no_org_runs() -> Self {
+        Self::NoOrgRuns
+    }
+
+    /// Construct a [`GraphError::AccountMismatch`] error.
+    pub fn account_mismatch(
+        snapshot_id: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::AccountMismatch {
+            snapshot_id: snapshot_id.into(),
+            expected: expected.into(),
+            actual: actual.into(),
+        }
+    }
 }
