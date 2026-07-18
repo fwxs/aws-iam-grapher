@@ -1,6 +1,6 @@
 [package]
 name = "iam-collector"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,7 @@ aws-sdk-organizations = { workspace = true }
 aws-sdk-sts           = { workspace = true }
 aws-smithy-types  = { workspace = true }
 chrono       = { workspace = true }
+futures      = { workspace = true }
 iam-expander = { path = "../iam-expander" }
 iam-models   = { path = "../iam-models" }
 serde        = { workspace = true }

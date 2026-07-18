@@ -3,7 +3,8 @@ use crate::live::LiveCollector;
 use crate::traits::CollectedData;
 use crate::traits::IamDataSource;
 use crate::util::map_sdk_error;
-use aws_sdk_iam::config::{Credentials, Region};
+use aws_sdk_iam::config::{Credentials, ProvideCredentials, Region};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::SystemTime;
@@ -22,6 +23,10 @@ pub struct OrgAccount {
     /// Immediate parent OU display name, or `None` if the account sits directly under the
     /// org root.
     pub ou_name: Option<String>,
+    /// Named local AWS profile to collect this account with instead of assume-role, resolved
+    /// from `--ou-profile-override` against this account's OU ancestry (most specific/innermost
+    /// matching OU wins). `None` means the default assume-role path applies.
+    pub profile_override: Option<String>,
 }
 
 /// `--exclude-ou-id` / `--exclude-ou-name` entries that never matched any OU encountered
@@ -45,6 +50,37 @@ impl UnmatchedExcludes {
 struct MatchedExcludes {
     matched_ids: std::collections::HashSet<String>,
     matched_names: std::collections::HashSet<String>,
+}
+
+/// `--include-ou-name` entries that never scoped in any account, split by *why*: `never_matched`
+/// means the name was never seen on any OU encountered while walking the tree (likely a typo);
+/// `shadowed_by_exclude` means an OU with that exact name was encountered but was itself pruned
+/// by `--exclude-ou-id`/`--exclude-ou-name` before the include check ran, so it looks unmatched
+/// even though the name is correct — reported separately so that case doesn't read as a typo hint.
+#[derive(Debug, Default)]
+struct UnmatchedIncludes {
+    never_matched: Vec<String>,
+    shadowed_by_exclude: Vec<String>,
+}
+
+#[cfg(test)]
+impl UnmatchedIncludes {
+    fn is_empty(&self) -> bool {
+        self.never_matched.is_empty() && self.shadowed_by_exclude.is_empty()
+    }
+}
+
+/// Mutable accumulators threaded through the recursive [`OrgCollector::collect_accounts_under`]
+/// walk. Bundled into one struct so the walk stays under clippy's argument-count lint instead of
+/// carrying five separate `&mut` accumulators as positional parameters.
+struct WalkState<'a> {
+    out: &'a mut Vec<OrgAccount>,
+    matched_excludes: &'a mut MatchedExcludes,
+    matched_overrides: &'a mut std::collections::HashSet<String>,
+    matched_includes: &'a mut std::collections::HashSet<String>,
+    /// `--include-ou-name` values matched by an OU that was itself excluded — see
+    /// [`UnmatchedIncludes::shadowed_by_exclude`].
+    shadowed_includes: &'a mut std::collections::HashSet<String>,
 }
 
 /// Result of one AWS Organizations collection run: one `CollectedData` per account that
@@ -133,6 +169,15 @@ pub struct OrgCollector {
     assume_role_name: String,
     exclude_ou_ids: Vec<String>,
     exclude_ou_names: Vec<String>,
+    /// `--include-ou-name` values: when non-empty, only accounts under an OU whose display
+    /// name matches one of these (or a descendant of one) are collected — every other account
+    /// is skipped. Matched against OU display name only (unlike excludes, no id form exists,
+    /// since the issue driving this only asked for name-based scoping). Empty means unchanged
+    /// behavior (collect everything, minus excludes).
+    include_ou_names: Vec<String>,
+    /// `(ou_id_or_name, aws_profile)` pairs from `--ou-profile-override`, matched against both
+    /// OU id and OU display name — same dual-match as `exclude_ou_ids`/`exclude_ou_names`.
+    ou_profile_overrides: Vec<(String, String)>,
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
 }
@@ -153,6 +198,9 @@ impl OrgCollector {
     /// profile) rather than `management_profile`.
     ///
     /// `regions` is the CLI `--region` flag; see [`resolve_configs`].
+    // Each parameter maps 1:1 to a distinct `collect org` CLI flag; bundling them into a params
+    // struct would just move the same fields one level of indirection away from their call site.
+    #[allow(clippy::too_many_arguments)]
     pub async fn from_profile(
         management_profile: impl Into<String>,
         jump_from_profile: Option<impl Into<String>>,
@@ -160,6 +208,8 @@ impl OrgCollector {
         assume_role_name: impl Into<String>,
         exclude_ou_ids: Vec<String>,
         exclude_ou_names: Vec<String>,
+        include_ou_names: Vec<String>,
+        ou_profile_overrides: Vec<(String, String)>,
     ) -> Result<Self, CollectorError> {
         let (discovery_config, jump_from_config) = resolve_configs(
             management_profile.into(),
@@ -179,8 +229,37 @@ impl OrgCollector {
             assume_role_name: assume_role_name.into(),
             exclude_ou_ids,
             exclude_ou_names,
+            include_ou_names,
+            ou_profile_overrides,
             region,
             client_factory: Box::new(RealIamClientFactory),
+        })
+    }
+
+    /// Resolves the credentials of a named local AWS profile eagerly (no network call for
+    /// static-credential profiles), so an unresolvable `--ou-profile-override` profile fails
+    /// fast as a validation error rather than surfacing later as an opaque per-account failure.
+    ///
+    /// Resolved once, up front, and reused for every account under that override for the rest
+    /// of the run: fine for the intended static long-lived-credential use case, but a
+    /// short-lived SSO/STS-backed override profile can expire mid-run on a large org. Revisit
+    /// (e.g. re-resolve per account) if that use case is needed.
+    async fn resolve_override_profile_credentials(
+        profile: &str,
+    ) -> Result<Credentials, CollectorError> {
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .profile_name(profile)
+            .load()
+            .await;
+        let provider = config.credentials_provider().ok_or_else(|| {
+            CollectorError::InvalidOuProfileOverride(format!(
+                "profile `{profile}` was not found in the local AWS config/credentials files"
+            ))
+        })?;
+        provider.provide_credentials().await.map_err(|e| {
+            CollectorError::InvalidOuProfileOverride(format!(
+                "profile `{profile}` credentials could not be resolved: {e}"
+            ))
         })
     }
 
@@ -189,11 +268,40 @@ impl OrgCollector {
     pub async fn collect(&self) -> Result<OrgCollectionResult, CollectorError> {
         let run_id = Uuid::new_v4().to_string();
         info!(run_id = %run_id, "starting org-wide collection: enumerating accounts");
-        let (accounts, unmatched_excludes) = self.enumerate_accounts().await?;
+        let (accounts, unmatched_excludes, unmatched_override_keys, unmatched_includes) =
+            self.enumerate_accounts().await?;
         info!(accounts = accounts.len(), "enumerated org accounts");
+
+        if !unmatched_override_keys.is_empty() {
+            let keys = unmatched_override_keys.join("`, `");
+            return Err(CollectorError::InvalidOuProfileOverride(format!(
+                "--ou-profile-override key(s) `{keys}` did not match any organizational unit's \
+                 id or display name in this organization — check spelling and that they are \
+                 reachable from an enumerated root"
+            )));
+        }
+
+        let mut override_credentials: HashMap<String, Credentials> = HashMap::new();
+        for (_, profile) in &self.ou_profile_overrides {
+            if !override_credentials.contains_key(profile) {
+                let creds = Self::resolve_override_profile_credentials(profile).await?;
+                override_credentials.insert(profile.clone(), creds);
+            }
+        }
 
         let mut collected = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
+
+        let mut seen_override_keys = std::collections::HashSet::new();
+        for (key, _) in &self.ou_profile_overrides {
+            if !seen_override_keys.insert(key) {
+                warn!(key = %key, "--ou-profile-override key given more than once; only the first profile for it is used");
+                warnings.push(CollectorWarning::PartialData(format!(
+                    "--ou-profile-override key `{key}` was given more than once — only its \
+                     first `=<aws_profile>` value is used, the rest are ignored"
+                )));
+            }
+        }
 
         for ou_id in &unmatched_excludes.ids {
             warn!(ou_id = %ou_id, "--exclude-ou-id did not match any OU encountered during enumeration");
@@ -211,6 +319,22 @@ impl OrgCollector {
                  enumerated root"
             )));
         }
+        for ou_name in &unmatched_includes.never_matched {
+            warn!(ou_name = %ou_name, "--include-ou-name did not match any OU encountered during enumeration");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--include-ou-name {ou_name} did not match any organizational unit's display \
+                 name in this organization — check spelling and that it is reachable from an \
+                 enumerated root"
+            )));
+        }
+        for ou_name in &unmatched_includes.shadowed_by_exclude {
+            warn!(ou_name = %ou_name, "--include-ou-name matched an OU that was also excluded; the exclude took precedence");
+            warnings.push(CollectorWarning::PartialData(format!(
+                "--include-ou-name {ou_name} matched an organizational unit's display name, but \
+                 that OU was also pruned by --exclude-ou-id/--exclude-ou-name — the exclude took \
+                 precedence, so no accounts under it were included"
+            )));
+        }
 
         for (index, account) in accounts.iter().enumerate() {
             info!(
@@ -219,7 +343,7 @@ impl OrgCollector {
                 progress = format!("{}/{}", index + 1, accounts.len()),
                 "collecting account"
             );
-            match self.collect_account(account).await {
+            match self.collect_account(account, &override_credentials).await {
                 Ok(mut data) => {
                     data.ou_id = account.ou_id.clone();
                     data.ou_name = account.ou_name.clone();
@@ -242,7 +366,32 @@ impl OrgCollector {
         })
     }
 
-    async fn collect_account(&self, account: &OrgAccount) -> Result<CollectedData, CollectorError> {
+    /// Collects one account: via its `--ou-profile-override` credentials directly if
+    /// `account.profile_override` is set (bypassing assume-role entirely), otherwise via the
+    /// default `sts:AssumeRole` jump-role path.
+    async fn collect_account(
+        &self,
+        account: &OrgAccount,
+        override_credentials: &HashMap<String, Credentials>,
+    ) -> Result<CollectedData, CollectorError> {
+        let credentials = if let Some(profile) = &account.profile_override {
+            override_credentials.get(profile).cloned().ok_or_else(|| {
+                CollectorError::InvalidOuProfileOverride(format!(
+                    "internal error: no resolved credentials cached for profile `{profile}`"
+                ))
+            })?
+        } else {
+            self.assume_jump_role(account).await?
+        };
+
+        let iam_client = self
+            .client_factory
+            .build(&account.id, credentials, self.region.clone());
+
+        LiveCollector::new(iam_client).collect().await
+    }
+
+    async fn assume_jump_role(&self, account: &OrgAccount) -> Result<Credentials, CollectorError> {
         let role_arn = format!("arn:aws:iam::{}:role/{}", account.id, self.assume_role_name);
         info!(role_arn = %role_arn, region = %self.region, "assuming jump role");
         let assumed = self
@@ -261,44 +410,64 @@ impl OrgCollector {
         })?;
 
         let expires_after = SystemTime::try_from(*creds.expiration()).ok();
-        let credentials = Credentials::new(
+        Ok(Credentials::new(
             creds.access_key_id().to_string(),
             creds.secret_access_key().to_string(),
             Some(creds.session_token().to_string()),
             expires_after,
             "aws-iam-grapher-org-assume-role",
-        );
-
-        let iam_client = self
-            .client_factory
-            .build(&account.id, credentials, self.region.clone());
-
-        LiveCollector::new(iam_client).collect().await
+        ))
     }
 
     /// Enumerates every account reachable from the org roots, applying `--exclude-ou-id` /
-    /// `--exclude-ou-name` pruning. Returns the surviving accounts alongside any exclude
-    /// entries that never matched an OU encountered during the walk (a strong signal of a typo,
-    /// both of which would otherwise silently collect everything).
+    /// `--exclude-ou-name` pruning, `--include-ou-name` scoping, and `--ou-profile-override`
+    /// tagging. Returns the surviving accounts, any exclude entries that never matched an OU
+    /// encountered during the walk, any override keys that never matched one either, and any
+    /// `--include-ou-name` values that never matched one either (a strong signal of a typo —
+    /// each would otherwise silently collect everything / never apply / never scope anything).
     async fn enumerate_accounts(
         &self,
-    ) -> Result<(Vec<OrgAccount>, UnmatchedExcludes), CollectorError> {
+    ) -> Result<
+        (
+            Vec<OrgAccount>,
+            UnmatchedExcludes,
+            Vec<String>,
+            UnmatchedIncludes,
+        ),
+        CollectorError,
+    > {
         debug!("fetching ListRoots");
         let mut accounts = Vec::new();
         let mut matched_excludes = MatchedExcludes::default();
-        let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
-        while let Some(page) = root_paginator.next().await {
-            let page = page.map_err(map_sdk_error)?;
-            for root in page.roots() {
-                let root_id = root.id().unwrap_or_default().to_string();
-                self.collect_accounts_under(
-                    root_id.clone(),
-                    vec![root_id],
-                    None,
-                    &mut accounts,
-                    &mut matched_excludes,
-                )
-                .await?;
+        let mut matched_overrides: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut matched_includes: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut shadowed_includes: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        {
+            let mut state = WalkState {
+                out: &mut accounts,
+                matched_excludes: &mut matched_excludes,
+                matched_overrides: &mut matched_overrides,
+                matched_includes: &mut matched_includes,
+                shadowed_includes: &mut shadowed_includes,
+            };
+            let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
+            while let Some(page) = root_paginator.next().await {
+                let page = page.map_err(map_sdk_error)?;
+                for root in page.roots() {
+                    let root_id = root.id().unwrap_or_default().to_string();
+                    self.collect_accounts_under(
+                        root_id.clone(),
+                        vec![root_id],
+                        None,
+                        None,
+                        false,
+                        &mut state,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -314,6 +483,25 @@ impl OrgCollector {
             .filter(|name| !matched_excludes.matched_names.contains(*name))
             .cloned()
             .collect();
+        let unmatched_override_keys: Vec<String> = self
+            .ou_profile_overrides
+            .iter()
+            .map(|(key, _)| key)
+            .filter(|key| !matched_overrides.contains(*key))
+            .cloned()
+            .collect();
+        let shadowed_include_names: Vec<String> = self
+            .include_ou_names
+            .iter()
+            .filter(|name| !matched_includes.contains(*name) && shadowed_includes.contains(*name))
+            .cloned()
+            .collect();
+        let never_matched_include_names: Vec<String> = self
+            .include_ou_names
+            .iter()
+            .filter(|name| !matched_includes.contains(*name) && !shadowed_includes.contains(*name))
+            .cloned()
+            .collect();
 
         Ok((
             accounts,
@@ -321,40 +509,63 @@ impl OrgCollector {
                 ids: unmatched_ids,
                 names: unmatched_names,
             },
+            unmatched_override_keys,
+            UnmatchedIncludes {
+                never_matched: never_matched_include_names,
+                shadowed_by_exclude: shadowed_include_names,
+            },
         ))
     }
 
-    /// Recursively walk OUs under `parent_id`, collecting accounts and pruning excluded
-    /// OU subtrees. Boxed because async fns cannot recurse directly (infinite-sized future).
+    /// Recursively walk OUs under `parent_id`, collecting accounts, pruning excluded OU
+    /// subtrees, and tagging accounts with the innermost matching `--ou-profile-override`
+    /// profile. Boxed because async fns cannot recurse directly (infinite-sized future).
     ///
     /// `current_ou` is the immediate parent OU's (id, name), or `None` while still directly
     /// under the org root — it is stamped onto every [`OrgAccount`] found at this level.
-    fn collect_accounts_under<'a>(
+    /// `current_override` is the profile inherited from the nearest matching ancestor OU (or
+    /// `None`); a nested OU with its own match replaces it for its own subtree.
+    /// `included` is whether this subtree already sits under an OU that matched
+    /// `--include-ou-name` (inherited like `current_override`, never reset back to `false` for
+    /// descendants); when `include_ou_names` is empty the flag is ignored and everything is
+    /// collected as before.
+    fn collect_accounts_under<'a, 'b>(
         &'a self,
         parent_id: String,
         ou_path: Vec<String>,
         current_ou: Option<(String, String)>,
-        out: &'a mut Vec<OrgAccount>,
-        matched_excludes: &'a mut MatchedExcludes,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
+        current_override: Option<String>,
+        included: bool,
+        state: &'b mut WalkState<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'b>>
+    where
+        'a: 'b,
+    {
         Box::pin(async move {
-            debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
-            let mut acct_paginator = self
-                .orgs_client
-                .list_accounts_for_parent()
-                .parent_id(&parent_id)
-                .into_paginator()
-                .send();
-            while let Some(page) = acct_paginator.next().await {
-                let page = page.map_err(map_sdk_error)?;
-                for a in page.accounts() {
-                    out.push(OrgAccount {
-                        id: a.id().unwrap_or_default().to_string(),
-                        name: a.name().unwrap_or_default().to_string(),
-                        ou_path: ou_path.clone(),
-                        ou_id: current_ou.as_ref().map(|(id, _)| id.clone()),
-                        ou_name: current_ou.as_ref().map(|(_, name)| name.clone()),
-                    });
+            // Loop-invariant: whether this subtree is in scope depends only on `included` /
+            // `include_ou_names`, never on the individual accounts fetched below — so the
+            // ListAccountsForParent call itself is skipped entirely for an out-of-scope subtree
+            // rather than fetched and then discarded per account.
+            if self.include_ou_names.is_empty() || included {
+                debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
+                let mut acct_paginator = self
+                    .orgs_client
+                    .list_accounts_for_parent()
+                    .parent_id(&parent_id)
+                    .into_paginator()
+                    .send();
+                while let Some(page) = acct_paginator.next().await {
+                    let page = page.map_err(map_sdk_error)?;
+                    for a in page.accounts() {
+                        state.out.push(OrgAccount {
+                            id: a.id().unwrap_or_default().to_string(),
+                            name: a.name().unwrap_or_default().to_string(),
+                            ou_path: ou_path.clone(),
+                            ou_id: current_ou.as_ref().map(|(id, _)| id.clone()),
+                            ou_name: current_ou.as_ref().map(|(_, name)| name.clone()),
+                            profile_override: current_override.clone(),
+                        });
+                    }
                 }
             }
 
@@ -371,7 +582,14 @@ impl OrgCollector {
                     let ou_id = ou.id().unwrap_or_default().to_string();
                     let ou_name = ou.name().unwrap_or_default().to_string();
                     if self.exclude_ou_ids.contains(&ou_id) {
-                        matched_excludes.matched_ids.insert(ou_id);
+                        state.matched_excludes.matched_ids.insert(ou_id);
+                        if let Some(name) = self
+                            .include_ou_names
+                            .iter()
+                            .find(|name| name.as_str() == ou_name)
+                        {
+                            state.shadowed_includes.insert(name.clone());
+                        }
                         continue;
                     }
                     if let Some(name) = self
@@ -379,17 +597,45 @@ impl OrgCollector {
                         .iter()
                         .find(|name| name.as_str() == ou_name)
                     {
-                        matched_excludes.matched_names.insert(name.clone());
+                        state.matched_excludes.matched_names.insert(name.clone());
+                        if let Some(name) = self
+                            .include_ou_names
+                            .iter()
+                            .find(|name| name.as_str() == ou_name)
+                        {
+                            state.shadowed_includes.insert(name.clone());
+                        }
                         continue;
                     }
+
+                    let child_override = self
+                        .ou_profile_overrides
+                        .iter()
+                        .find(|(key, _)| key == &ou_id || key == &ou_name)
+                        .map(|(key, profile)| {
+                            state.matched_overrides.insert(key.clone());
+                            profile.clone()
+                        })
+                        .or_else(|| current_override.clone());
+
+                    let name_matches_include = self
+                        .include_ou_names
+                        .iter()
+                        .find(|name| name.as_str() == ou_name);
+                    if let Some(name) = name_matches_include {
+                        state.matched_includes.insert(name.clone());
+                    }
+                    let child_included = included || name_matches_include.is_some();
+
                     let mut child_path = ou_path.clone();
                     child_path.push(ou_id.clone());
                     self.collect_accounts_under(
                         ou_id.clone(),
                         child_path,
                         Some((ou_id, ou_name)),
-                        out,
-                        matched_excludes,
+                        child_override,
+                        child_included,
+                        state,
                     )
                     .await?;
                 }
@@ -404,7 +650,6 @@ impl OrgCollector {
 mod tests {
     use super::*;
     use aws_smithy_mocks::{mock, mock_client, RuleMode};
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
     struct TestIamClientFactory {
@@ -468,12 +713,53 @@ mod tests {
         exclude_ou_names: Vec<String>,
         client_factory: Box<dyn IamClientFactory>,
     ) -> OrgCollector {
+        org_collector_with_overrides(
+            orgs_client,
+            sts_client,
+            exclude_ou_ids,
+            exclude_ou_names,
+            vec![],
+            client_factory,
+        )
+    }
+
+    fn org_collector_with_includes(
+        orgs_client: aws_sdk_organizations::Client,
+        sts_client: aws_sdk_sts::Client,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
+        include_ou_names: Vec<String>,
+        client_factory: Box<dyn IamClientFactory>,
+    ) -> OrgCollector {
         OrgCollector {
             orgs_client,
             sts_client,
             assume_role_name: "OrgJumpRole".to_string(),
             exclude_ou_ids,
             exclude_ou_names,
+            include_ou_names,
+            ou_profile_overrides: vec![],
+            region: Region::new("us-east-1"),
+            client_factory,
+        }
+    }
+
+    fn org_collector_with_overrides(
+        orgs_client: aws_sdk_organizations::Client,
+        sts_client: aws_sdk_sts::Client,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
+        ou_profile_overrides: Vec<(String, String)>,
+        client_factory: Box<dyn IamClientFactory>,
+    ) -> OrgCollector {
+        OrgCollector {
+            orgs_client,
+            sts_client,
+            assume_role_name: "OrgJumpRole".to_string(),
+            exclude_ou_ids,
+            exclude_ou_names,
+            include_ou_names: vec![],
+            ou_profile_overrides,
             region: Region::new("us-east-1"),
             client_factory,
         }
@@ -730,13 +1016,15 @@ mod tests {
         );
 
         // Act
-        let (accounts, unmatched_excludes) = collector
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
 
         // Assert
         assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
         let mut ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, ["111111111111", "222222222222"]);
@@ -808,7 +1096,7 @@ mod tests {
         );
 
         // Act
-        let (accounts, unmatched_excludes) = collector
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -818,6 +1106,8 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "333333333333");
         assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
     }
 
     #[tokio::test]
@@ -853,7 +1143,7 @@ mod tests {
         );
 
         // Act
-        let (accounts, unmatched_excludes) = collector
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -865,6 +1155,8 @@ mod tests {
             vec!["ou-does-not-exist".to_string()]
         );
         assert!(unmatched_excludes.names.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
     }
 
     #[tokio::test]
@@ -914,7 +1206,7 @@ mod tests {
 
         // Act: if pruning fails, this panics (no rule registered for parent_id == "ou-excluded"
         // or "ou-nested").
-        let (accounts, unmatched_excludes) = collector
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -922,6 +1214,8 @@ mod tests {
         // Assert
         assert_eq!(accounts.len(), 0);
         assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
     }
 
     #[tokio::test]
@@ -972,7 +1266,7 @@ mod tests {
         );
 
         // Act
-        let (accounts, unmatched_excludes) = collector
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
             .enumerate_accounts()
             .await
             .expect("enumeration succeeds");
@@ -982,6 +1276,298 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "333333333333");
         assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_include_ou_name_scopes_to_matching_subtree() {
+        // Arrange: root has child OUs "ou-prod" (name "Prod", matches --include-ou-name) and
+        // "ou-dev" (name "Dev", does not) — only the Prod account should survive.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-prod", "Prod"), ("ou-dev", "Dev")]));
+        let prod_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-prod"))
+                .then_output(|| ou_output(vec![]));
+        let dev_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-dev"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let prod_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-prod"))
+            .then_output(|| accounts_output(vec![("333333333333", "prod-account")]));
+        let dev_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-dev"))
+            .then_output(|| accounts_output(vec![("444444444444", "dev-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &prod_ous_rule,
+                &dev_ous_rule,
+                &root_accounts_rule,
+                &prod_accounts_rule,
+                &dev_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert: only the Prod-subtree account shows up; Dev is skipped despite being walked.
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "333333333333");
+        assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_include_ou_name_covers_nested_descendant_ou() {
+        // Arrange: root -> ou-prod (name "Prod", matches) -> ou-nested -> account. The account
+        // two levels under the matching OU must still be included (inherited, not just the
+        // immediate children of the matching OU).
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-prod", "Prod")]));
+        let prod_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-prod"))
+                .then_output(|| ou_output(vec![("ou-nested", "Nested")]));
+        let nested_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-nested"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let prod_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-prod"))
+            .then_output(|| accounts_output(vec![]));
+        let nested_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-nested"))
+            .then_output(|| accounts_output(vec![("555555555555", "nested-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &prod_ous_rule,
+                &nested_ous_rule,
+                &root_accounts_rule,
+                &prod_accounts_rule,
+                &nested_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "555555555555");
+        assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_exclude_wins_over_matching_include_name() {
+        // Arrange: root -> ou-prod (name "Prod", matches --include-ou-name) which is *also*
+        // excluded by id. The exclude must still prune it even though its name matches the
+        // include filter.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-prod", "Prod")]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec!["ou-prod".to_string()],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act: if exclude didn't win, this would panic (no rule registered for
+        // parent_id == "ou-prod").
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert: ou-prod was excluded before the include check ran, so "Prod" is reported as
+        // shadowed-by-exclude, not as a plain typo'd unmatched include.
+        assert_eq!(accounts.len(), 0);
+        assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.never_matched.is_empty());
+        assert_eq!(
+            unmatched_includes.shadowed_by_exclude,
+            vec!["Prod".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_surfaces_warning_for_include_ou_name_that_matched_nothing() {
+        // Arrange: no OUs exist at all, but the caller passed --include-ou-name for one anyway.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act: --include-ou-name matches nothing, so every account is skipped, but the run
+        // still succeeds and warns rather than erroring — an unmatched include is a hint
+        // (likely a typo), not a fatal misconfiguration like an unmatched override.
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 0);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(
+            matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("Prod"))
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_surfaces_distinct_warning_for_include_shadowed_by_exclude() {
+        // Arrange: ou-prod (name "Prod") matches --include-ou-name but is also excluded by id.
+        // The warning message must say it was shadowed by the exclude, not that "Prod" never
+        // matched anything — the name was correct, it was just pruned first.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-prod", "Prod")]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_includes(
+            orgs_client,
+            sts_client,
+            vec!["ou-prod".to_string()],
+            vec![],
+            vec!["Prod".to_string()],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 0);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(matches!(
+            &result.warnings[0],
+            CollectorWarning::PartialData(msg)
+                if msg.contains("Prod") && msg.contains("also pruned by --exclude-ou")
+        ));
     }
 
     #[tokio::test]
@@ -1134,5 +1720,308 @@ mod tests {
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("ou-typo"))
         );
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_tags_override_ou_subtree_by_name() {
+        // Arrange: root has child OU "ou-legacy" (name "Legacy") overridden by name; sibling
+        // OU "ou-kept" is untouched.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-legacy", "Legacy"), ("ou-kept", "Kept")]));
+        let legacy_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-legacy"))
+                .then_output(|| ou_output(vec![]));
+        let kept_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-kept"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let legacy_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-legacy"))
+            .then_output(|| accounts_output(vec![("333333333333", "legacy-account")]));
+        let kept_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-kept"))
+            .then_output(|| accounts_output(vec![("444444444444", "kept-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &legacy_ous_rule,
+                &kept_ous_rule,
+                &root_accounts_rule,
+                &legacy_accounts_rule,
+                &kept_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_overrides(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec![("Legacy".to_string(), "legacy-profile".to_string())],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
+        let legacy_account = accounts
+            .iter()
+            .find(|a| a.id == "333333333333")
+            .expect("legacy account present");
+        assert_eq!(
+            legacy_account.profile_override,
+            Some("legacy-profile".to_string())
+        );
+        let kept_account = accounts
+            .iter()
+            .find(|a| a.id == "444444444444")
+            .expect("kept account present");
+        assert_eq!(kept_account.profile_override, None);
+    }
+
+    #[tokio::test]
+    async fn enumerate_accounts_nested_override_replaces_ancestor_override() {
+        // Arrange: root -> ou-outer (override "outer-profile") -> ou-inner (override
+        // "inner-profile") -> account. The account must get the innermost match, not the
+        // outer one.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-outer", "Outer")]));
+        let outer_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-outer"))
+                .then_output(|| ou_output(vec![("ou-inner", "Inner")]));
+        let inner_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-inner"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let outer_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-outer"))
+            .then_output(|| accounts_output(vec![]));
+        let inner_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-inner"))
+            .then_output(|| accounts_output(vec![("555555555555", "inner-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &outer_ous_rule,
+                &inner_ous_rule,
+                &root_accounts_rule,
+                &outer_accounts_rule,
+                &inner_accounts_rule,
+            ]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_overrides(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec![
+                ("Outer".to_string(), "outer-profile".to_string()),
+                ("Inner".to_string(), "inner-profile".to_string()),
+            ],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act
+        let (accounts, unmatched_excludes, unmatched_overrides, unmatched_includes) = collector
+            .enumerate_accounts()
+            .await
+            .expect("enumeration succeeds");
+
+        // Assert
+        assert!(unmatched_excludes.is_empty());
+        assert!(unmatched_overrides.is_empty());
+        assert!(unmatched_includes.is_empty());
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0].profile_override,
+            Some("inner-profile".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_returns_fatal_error_for_ou_profile_override_that_matched_nothing() {
+        // Arrange: no OUs exist at all, but the caller passed --ou-profile-override for one
+        // anyway (typo'd id/name). Unlike --exclude-ou (warning-only), an unmatched override
+        // must be a fatal error per the issue's acceptance criteria — a silent no-op here would
+        // mean the account still goes through assume-role despite the user asking for a
+        // different credential path entirely.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+        let sts_client = mock_client!(
+            aws_sdk_sts,
+            RuleMode::MatchAny,
+            &[] as &[&aws_smithy_mocks::Rule]
+        );
+        let collector = org_collector_with_overrides(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec![("ou-does-not-exist".to_string(), "some-profile".to_string())],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(HashMap::new()),
+            }),
+        );
+
+        // Act: if this incorrectly proceeded to collection, it would panic — no assume_role or
+        // IAM mock rule is registered.
+        let result = collector.collect().await;
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(CollectorError::InvalidOuProfileOverride(msg)) if msg.contains("ou-does-not-exist")
+        ));
+    }
+
+    #[tokio::test]
+    async fn collect_mixed_org_assume_role_and_profile_override_share_run_id() {
+        // Arrange: root -> ou-sso (default assume-role account) ; root -> ou-legacy (account
+        // collected via a static-credential profile override). Both must land in one
+        // OrgCollectionResult sharing run_id, satisfying the issue's mixed-auth acceptance
+        // criterion.
+        let _guard = AWS_ENV_LOCK.lock().await;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let creds_path = dir.path().join("credentials");
+        std::fs::write(
+            &creds_path,
+            "[legacy]\naws_access_key_id = LEGACY_KEY\naws_secret_access_key = legacy-secret\n",
+        )
+        .expect("write credentials file");
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+        std::env::remove_var("AWS_CONFIG_FILE");
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        std::env::remove_var("AWS_SESSION_TOKEN");
+
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("r-root1"))
+                .then_output(|| ou_output(vec![("ou-sso", "Sso"), ("ou-legacy", "Legacy")]));
+        let sso_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-sso"))
+                .then_output(|| ou_output(vec![]));
+        let legacy_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .match_requests(|req| req.parent_id() == Some("ou-legacy"))
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("r-root1"))
+            .then_output(|| accounts_output(vec![]));
+        let sso_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-sso"))
+            .then_output(|| accounts_output(vec![("111111111111", "sso-account")]));
+        let legacy_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .match_requests(|req| req.parent_id() == Some("ou-legacy"))
+            .then_output(|| accounts_output(vec![("222222222222", "legacy-account")]));
+
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[
+                &list_roots_rule,
+                &root_ous_rule,
+                &sso_ous_rule,
+                &legacy_ous_rule,
+                &root_accounts_rule,
+                &sso_accounts_rule,
+                &legacy_accounts_rule,
+            ]
+        );
+
+        // Only the ou-sso account may ever call sts:AssumeRole — a mock rule scoped to its
+        // role ARN means a regression that routes the override account through assume-role too
+        // panics on an unmatched request instead of silently passing.
+        let assume_rule = mock!(aws_sdk_sts::Client::assume_role)
+            .match_requests(|req| {
+                req.role_arn() == Some("arn:aws:iam::111111111111:role/OrgJumpRole")
+            })
+            .then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert("111111111111".to_string(), empty_auth_details_client());
+        clients.insert("222222222222".to_string(), empty_auth_details_client());
+
+        let collector = org_collector_with_overrides(
+            orgs_client,
+            sts_client,
+            vec![],
+            vec![],
+            vec![("Legacy".to_string(), "legacy".to_string())],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+
+        // Act
+        let result = collector.collect().await;
+
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        let result = result.expect("mixed-auth org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 2);
+        assert!(result.warnings.is_empty());
+        assert!(!result.run_id.is_empty());
     }
 }

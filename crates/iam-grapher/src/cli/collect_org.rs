@@ -32,6 +32,23 @@ pub struct OrgArgs {
     #[arg(long = "exclude-ou-name")]
     pub exclude_ou_names: Vec<String>,
 
+    /// Organizational Unit display name to scope collection to (and its descendants).
+    /// Repeatable; when given, only accounts under a matching OU are collected — everything
+    /// else is skipped. `--exclude-ou-id`/`--exclude-ou-name` still prune even a matching
+    /// subtree. OU names are not guaranteed unique across an organization — this matches any
+    /// OU in the tree with that name, not a single unambiguous path; prefer `--exclude-ou-id`
+    /// when precision matters.
+    #[arg(long = "include-ou-name")]
+    pub include_ou_names: Vec<String>,
+
+    /// Collect accounts under this OU (by id or display name, matched against both — and its
+    /// descendants) via a named local AWS profile directly, bypassing assume-role for that
+    /// subtree entirely. Repeatable; form is `<ou_id_or_name>=<aws_profile>`. Nested overrides
+    /// take precedence over an ancestor's. Every account collected this way still joins the
+    /// same org collection run id.
+    #[arg(long = "ou-profile-override")]
+    pub ou_profile_overrides: Vec<String>,
+
     /// AWS region(s) to use for org discovery and jump-role assumption. Repeatable; the first
     /// entry wins and overrides whatever region --management-profile / --jump-from-profile
     /// resolve. If omitted, falls back to the resolved profile region, then us-east-1.
@@ -43,6 +60,8 @@ pub struct OrgArgs {
 }
 
 pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
+    let ou_profile_overrides = parse_ou_profile_overrides(&args.ou_profile_overrides)?;
+
     let collector = OrgCollector::from_profile(
         args.management_profile.clone(),
         args.jump_from_profile.clone(),
@@ -50,6 +69,8 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         args.assume_role_name.clone(),
         args.exclude_ou_ids.clone(),
         args.exclude_ou_names.clone(),
+        args.include_ou_names.clone(),
+        ou_profile_overrides,
     )
     .await
     .context("failed to build org collector")?;
@@ -69,6 +90,19 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
             }
             CollectorWarning::WildcardsNotExpanded => {
                 "wildcard actions in some policies could not be expanded".to_string()
+            }
+            CollectorWarning::MfaDevicesMissing => {
+                "some users' MFA devices could not be listed".to_string()
+            }
+            CollectorWarning::LoginProfileMissing => {
+                "some users' console login status could not be determined".to_string()
+            }
+            CollectorWarning::AccessKeyActivityMissing => {
+                "some users' access key activity could not be determined".to_string()
+            }
+            CollectorWarning::UserSecurityAttributesNotCollected => {
+                "offline collection does not populate user MFA/login/activity attributes"
+                    .to_string()
             }
             CollectorWarning::PartialData(msg) => msg.clone(),
         };
@@ -132,4 +166,20 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         result.warnings.len()
     );
     Ok(())
+}
+
+/// Parses repeatable `--ou-profile-override <ou_id_or_name>=<aws_profile>` entries into
+/// `(ou_id_or_name, aws_profile)` pairs. OU-existence and profile-existence validation happen
+/// later, inside `OrgCollector::collect()`, once the org tree has actually been enumerated —
+/// this only validates the flag's `key=value` shape.
+fn parse_ou_profile_overrides(entries: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (ou, profile) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--ou-profile-override must be in `ou=profile` form, got `{entry}`")
+            })?;
+            Ok((ou.to_string(), profile.to_string()))
+        })
+        .collect()
 }

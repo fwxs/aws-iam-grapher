@@ -173,6 +173,28 @@ When an entity has multiple wildcard grants across different resources, only one
 `resource` value is surfaced per entity (the first one Rust-side dedup encounters) — `who_can`
 already deduplicates by ARN, collapsing multiple matching grants into a single row.
 
+### User MFA, console login, and last-activity attributes are live-collection-only
+
+`IamUser` carries `has_mfa`, `mfa_method`, `console_login_enabled`, and `last_activity_date`,
+populated by a per-user enrichment pass (`ListMFADevices`, `GetLoginProfile`, `GetUser`,
+`ListAccessKeys` + `GetAccessKeyLastUsed`) in `LiveCollector`. `HybridCollector` inherits this
+since it delegates to `LiveCollector` for the live path.
+
+**`OfflineCollector` does not populate these fields** — `GetAccountAuthorizationDetails` and
+`ListInstanceProfiles` (its only inputs) carry none of this data. Offline snapshots always default
+them (`has_mfa: false`, `mfa_method: None`, `console_login_enabled: false`,
+`last_activity_date: None`) and are marked partial via
+`CollectorWarning::UserSecurityAttributesNotCollected`. Do not treat `has_mfa: false` on a snapshot
+ingested from an offline collection as evidence a user actually lacks MFA — check
+`Snapshot.partial_reasons` first.
+
+**Per-user call failures are non-fatal** — a 403 on `ListMFADevices`, `GetLoginProfile`, or the
+access-key calls for one user does not fail the whole collection; it is folded into an
+account-wide `CollectorWarning` (`MfaDevicesMissing`, `LoginProfileMissing`,
+`AccessKeyActivityMissing`) and the affected fields default for that user. A `GetLoginProfile`
+`NoSuchEntity` response is not an error — it means the user has no console login profile
+(`console_login_enabled: false`) and is not reported as a warning.
+
 ### Validated scale ceiling
 
 The ingestion pipeline has been load-tested against a synthetic account of:
@@ -265,3 +287,58 @@ wrong organization — it is reported as a warning (`--exclude-ou-id <id> did no
 organizational unit ...` / `--exclude-ou-name <name> did not match any organizational unit's
 display name ...`) instead of being silently ignored, so a misconfigured exclusion doesn't look
 identical to "nothing needed excluding."
+
+### Scoping collection to named OUs (`--include-ou-name`)
+
+`--exclude-ou-*` is opt-**out**: everything is collected except pruned subtrees. `--include-ou-name
+<name>` (repeatable) is the opt-**in** counterpart — when given at least once, only accounts under
+an OU whose display name matches one of the given values (or any of its descendant OUs) are
+collected; every other account is skipped:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --include-ou-name Prod \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Omitting `--include-ou-name` collects the full org tree as usual. Repeating it ORs the filter
+across multiple named OUs. It combines with `--exclude-ou-id`/`--exclude-ou-name`: an OU excluded
+by id or name is still pruned even if it also matches an `--include-ou-name` value — exclude wins.
+
+**OU names are not guaranteed unique across an organization** — two sibling OUs under different
+parents can share a name. `--include-ou-name` matches **any** OU in the tree with that name, not a
+single unambiguous path. Prefer `--exclude-ou-id` (id-based, unambiguous) when precision matters.
+Like the other OU flags, an `--include-ou-name` value that never matches any OU encountered while
+walking the tree is reported as a warning, not silently ignored.
+
+### Mixed-authentication orgs (`--ou-profile-override`)
+
+Some organizations are not authentication-homogeneous: most accounts are reachable via the
+`--management-profile` → `sts:AssumeRole` jump-role path, but a subset — often quarantined into
+their own OU for exactly this reason — can only be authenticated to via a separate local AWS
+profile (e.g. long-lived static credentials, or its own SSO profile). `--ou-profile-override
+<ou_id_or_name>=<aws_profile>` (repeatable) collects accounts under a matching OU, and all its
+descendant OUs, directly with the named local profile's credentials instead of assuming the jump
+role — while still filing every account, from both paths, into the same
+`org_collection_run_id`:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --ou-profile-override Quarantine=legacy-static-creds \
+  --ou-profile-override ThirdParty=vendor-keys \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
+id and its display name. When nested overridden OUs disagree, the innermost (nearest ancestor)
+override wins for a given account. Unlike `--exclude-ou-*`, an override key that never matches
+any OU encountered while walking the tree is a **fatal** validation error — collection is aborted
+before any account is touched, rather than proceeding as if the override had no effect. Likewise,
+an override's local profile must resolve real credentials before collection starts; an unresolvable
+profile also fails fast with a validation error.
