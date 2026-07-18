@@ -18,6 +18,9 @@ pub enum CollectorError {
 
     #[error("expander error: {0}")]
     Expander(#[from] iam_expander::ExpanderError),
+
+    #[error("invalid --ou-profile-override: {0}")]
+    InvalidOuProfileOverride(String),
 }
 
 /// Non-fatal warnings produced during collection.
