@@ -3,6 +3,7 @@ pub mod analysis;
 pub mod context;
 pub mod escalation;
 pub mod org_escalation;
+pub mod scope;
 pub mod snapshots;
 pub mod stitch;
 
@@ -16,6 +17,7 @@ pub use escalation::{
     privilege_escalation_paths, EscalationPath, Hop, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
+pub use scope::{resolve_contexts, resolve_org_context, ScopeSelector};
 pub use snapshots::{
     delete_snapshot, diff_permissions, latest_org_run_id, list_account_ids, list_snapshots,
     snapshot_account_id, PermissionDiff, PermissionRecord, SnapshotRecord,
