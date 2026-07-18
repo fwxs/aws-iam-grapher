@@ -32,6 +32,15 @@ pub struct OrgArgs {
     #[arg(long = "exclude-ou-name")]
     pub exclude_ou_names: Vec<String>,
 
+    /// Organizational Unit display name to scope collection to (and its descendants).
+    /// Repeatable; when given, only accounts under a matching OU are collected — everything
+    /// else is skipped. `--exclude-ou-id`/`--exclude-ou-name` still prune even a matching
+    /// subtree. OU names are not guaranteed unique across an organization — this matches any
+    /// OU in the tree with that name, not a single unambiguous path; prefer `--exclude-ou-id`
+    /// when precision matters.
+    #[arg(long = "include-ou-name")]
+    pub include_ou_names: Vec<String>,
+
     /// Collect accounts under this OU (by id or display name, matched against both — and its
     /// descendants) via a named local AWS profile directly, bypassing assume-role for that
     /// subtree entirely. Repeatable; form is `<ou_id_or_name>=<aws_profile>`. Nested overrides
@@ -60,6 +69,7 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         args.assume_role_name.clone(),
         args.exclude_ou_ids.clone(),
         args.exclude_ou_names.clone(),
+        args.include_ou_names.clone(),
         ou_profile_overrides,
     )
     .await
