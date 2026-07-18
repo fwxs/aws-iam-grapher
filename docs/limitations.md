@@ -288,6 +288,32 @@ organizational unit ...` / `--exclude-ou-name <name> did not match any organizat
 display name ...`) instead of being silently ignored, so a misconfigured exclusion doesn't look
 identical to "nothing needed excluding."
 
+### Scoping collection to named OUs (`--include-ou-name`)
+
+`--exclude-ou-*` is opt-**out**: everything is collected except pruned subtrees. `--include-ou-name
+<name>` (repeatable) is the opt-**in** counterpart — when given at least once, only accounts under
+an OU whose display name matches one of the given values (or any of its descendant OUs) are
+collected; every other account is skipped:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --include-ou-name Prod \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Omitting `--include-ou-name` collects the full org tree as usual. Repeating it ORs the filter
+across multiple named OUs. It combines with `--exclude-ou-id`/`--exclude-ou-name`: an OU excluded
+by id or name is still pruned even if it also matches an `--include-ou-name` value — exclude wins.
+
+**OU names are not guaranteed unique across an organization** — two sibling OUs under different
+parents can share a name. `--include-ou-name` matches **any** OU in the tree with that name, not a
+single unambiguous path. Prefer `--exclude-ou-id` (id-based, unambiguous) when precision matters.
+Like the other OU flags, an `--include-ou-name` value that never matches any OU encountered while
+walking the tree is reported as a warning, not silently ignored.
+
 ### Mixed-authentication orgs (`--ou-profile-override`)
 
 Some organizations are not authentication-homogeneous: most accounts are reachable via the
