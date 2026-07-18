@@ -30,9 +30,7 @@ async fn account_selector_picks_newest_snapshot() {
 
     let contexts = resolve_contexts(
         ingester_newer.client().inner(),
-        ScopeSelector::Account {
-            account_id: account_id.to_string(),
-        },
+        ScopeSelector::account(account_id),
     )
     .await
     .expect("resolve_contexts must succeed");
@@ -66,7 +64,7 @@ async fn all_accounts_selector_returns_one_context_per_account_pinned_to_latest(
         .await
         .expect("ingest B must succeed");
 
-    let contexts = resolve_contexts(ingester_b.client().inner(), ScopeSelector::AllAccounts)
+    let contexts = resolve_contexts(ingester_b.client().inner(), ScopeSelector::all_accounts())
         .await
         .expect("resolve_contexts must succeed");
 
@@ -98,10 +96,7 @@ async fn snapshot_selector_derives_account_and_accepts_matching_expected_account
 
     let contexts = resolve_contexts(
         ingester.client().inner(),
-        ScopeSelector::Snapshot {
-            snapshot_id: snapshot_id.clone(),
-            expected_account: Some(account_id.to_string()),
-        },
+        ScopeSelector::snapshot(snapshot_id.clone(), Some(account_id.to_string())),
     )
     .await
     .expect("resolve_contexts must succeed");
@@ -126,10 +121,7 @@ async fn snapshot_selector_errors_on_account_mismatch() {
 
     let result = resolve_contexts(
         ingester.client().inner(),
-        ScopeSelector::Snapshot {
-            snapshot_id: snapshot_id.clone(),
-            expected_account: Some("999999999999".to_string()),
-        },
+        ScopeSelector::snapshot(snapshot_id.clone(), Some("999999999999".to_string())),
     )
     .await;
 
@@ -154,10 +146,7 @@ async fn snapshot_selector_errors_on_unknown_snapshot() {
 
     let result = resolve_contexts(
         client.inner(),
-        ScopeSelector::Snapshot {
-            snapshot_id: "not-a-real-snapshot-id".to_string(),
-            expected_account: None,
-        },
+        ScopeSelector::snapshot("not-a-real-snapshot-id", None),
     )
     .await;
 
@@ -172,13 +161,7 @@ async fn snapshot_selector_errors_on_unknown_snapshot() {
 async fn account_selector_errors_when_account_has_no_snapshots() {
     let client = helpers::shared_client().await;
 
-    let result = resolve_contexts(
-        client.inner(),
-        ScopeSelector::Account {
-            account_id: "no-such-account".to_string(),
-        },
-    )
-    .await;
+    let result = resolve_contexts(client.inner(), ScopeSelector::account("no-such-account")).await;
 
     match result {
         Err(GraphError::NoSnapshotsForAccount(id)) => assert_eq!(id, "no-such-account"),
