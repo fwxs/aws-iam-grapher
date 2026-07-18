@@ -5,7 +5,6 @@ use crate::nodes::{
 };
 use iam_collector::CollectedData;
 use iam_models::{Condition, Effect, IamInlinePolicy, PolicyStatement};
-use neo4rs::Query;
 use std::collections::HashSet;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -87,19 +86,22 @@ impl GraphIngester {
 
         // Phase 1 — global nodes
         info!(phase = 1, "ingesting global nodes");
-        let mut phase1: Vec<Query> = Vec::new();
-        phase1.push(account::merge_account_query(
+        let account_rows = vec![account::account_row(
             acct_id,
             self.config.account_alias.as_deref(),
             data.ou_id.as_deref(),
             data.ou_name.as_deref(),
-        ));
+        )];
+        self.execute_rows(1, account::MERGE_ACCOUNT, account_rows)
+            .await?;
         // Collect all distinct service prefixes from policy statements
         let prefixes = collect_service_prefixes(data);
-        for prefix in &prefixes {
-            phase1.push(permission::merge_aws_service_query(prefix));
-        }
-        self.execute_batch(1, phase1).await?;
+        let service_rows: Vec<Row> = prefixes
+            .iter()
+            .map(|prefix| permission::aws_service_row(prefix))
+            .collect();
+        self.execute_rows(1, permission::MERGE_AWS_SERVICE, service_rows)
+            .await?;
         stats.accounts_merged = 1;
 
         // Phase 2 — snapshot node
@@ -147,18 +149,19 @@ impl GraphIngester {
                 iam_collector::CollectorWarning::PartialData(msg) => msg.clone(),
             })
             .collect();
-        let phase2 = vec![
-            account::merge_snapshot_query(
-                snap_id,
-                acct_id,
-                &collected_at,
-                is_partial,
-                partial_reasons,
-                self.config.org_collection_run_id.as_deref(),
-            ),
-            account::snapshot_of_account_query(snap_id, acct_id),
-        ];
-        self.execute_batch(2, phase2).await?;
+        let snapshot_rows = vec![account::snapshot_row(
+            snap_id,
+            acct_id,
+            &collected_at,
+            is_partial,
+            partial_reasons,
+            self.config.org_collection_run_id.as_deref(),
+        )];
+        self.execute_rows(2, account::MERGE_SNAPSHOT, snapshot_rows)
+            .await?;
+        let snapshot_of_account_rows = vec![account::snapshot_of_account_row(snap_id, acct_id)];
+        self.execute_rows(2, account::SNAPSHOT_OF_ACCOUNT, snapshot_of_account_rows)
+            .await?;
         stats.snapshots_created = 1;
 
         // Phase 3 — entity nodes
@@ -628,46 +631,6 @@ impl GraphIngester {
             "ingestion complete"
         );
         Ok(stats)
-    }
-
-    /// Execute a batch of legacy per-item queries, splitting into transactions of
-    /// `batch_size`. Used only for phases 1–2 (bounded, tiny volume).
-    async fn execute_batch(&self, phase: u8, queries: Vec<Query>) -> Result<(), GraphError> {
-        if queries.is_empty() {
-            return Ok(());
-        }
-        if self.config.dry_run {
-            warn!(
-                phase,
-                count = queries.len(),
-                "dry_run=true — skipping execution"
-            );
-            return Ok(());
-        }
-        let graph = self.client.inner();
-        for chunk in queries.chunks(self.config.batch_size) {
-            let started = Instant::now();
-            let mut txn = graph.start_txn().await?;
-            for q in chunk {
-                txn.run(q.clone())
-                    .await
-                    .map_err(|e| GraphError::Ingestion {
-                        phase,
-                        cause: e.to_string(),
-                    })?;
-            }
-            txn.commit().await.map_err(|e| GraphError::Ingestion {
-                phase,
-                cause: e.to_string(),
-            })?;
-            debug!(
-                phase,
-                batch_size = chunk.len(),
-                duration_ms = started.elapsed().as_millis(),
-                "batch committed"
-            );
-        }
-        Ok(())
     }
 
     /// Execute one `UNWIND $rows AS row ...` statement per chunk of `batch_size` rows.

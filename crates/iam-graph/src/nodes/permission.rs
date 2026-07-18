@@ -1,11 +1,12 @@
 use crate::nodes::uid::{excluded_permission_uid, permission_uid};
 use crate::nodes::Row;
 use iam_models::Condition;
-use neo4rs::{query, Query};
 
-const MERGE_AWS_SERVICE: &str = "
-    MERGE (svc:AwsService {prefix: $prefix})
-    ON CREATE SET svc.name = $name
+/// UNWIND-batched: MERGE an AwsService node per row.
+pub const MERGE_AWS_SERVICE: &str = "
+    UNWIND $rows AS row
+    MERGE (svc:AwsService {prefix: row.prefix})
+    ON CREATE SET svc.name = row.name
 ";
 
 /// UNWIND-batched: MERGE a Permission node per row.
@@ -41,12 +42,13 @@ pub const MERGE_EXCLUDED_PERMISSION: &str = "
         perm.condition = row.condition
 ";
 
-/// Build a query to MERGE an AwsService node.
-pub fn merge_aws_service_query(prefix: &str) -> Query {
+/// Build a row for the `MERGE_AWS_SERVICE` UNWIND statement.
+pub fn aws_service_row(prefix: &str) -> Row {
     let name = service_name_from_prefix(prefix);
-    query(MERGE_AWS_SERVICE)
-        .param("prefix", prefix)
-        .param("name", name)
+    Row::from([
+        ("prefix".to_string(), prefix.into()),
+        ("name".to_string(), name.into()),
+    ])
 }
 
 /// Build a row for the `MERGE_PERMISSION` UNWIND statement.
