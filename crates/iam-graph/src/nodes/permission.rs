@@ -1,4 +1,5 @@
 use crate::nodes::uid::{excluded_permission_uid, permission_uid};
+use crate::nodes::Row;
 use iam_models::Condition;
 use neo4rs::{query, Query};
 
@@ -7,31 +8,37 @@ const MERGE_AWS_SERVICE: &str = "
     ON CREATE SET svc.name = $name
 ";
 
-const MERGE_PERMISSION: &str = "
-    MERGE (perm:Permission {uid: $uid})
-    SET perm.action = $action,
-        perm.resource = $resource,
-        perm.effect = $effect,
-        perm.account_id = $account_id,
-        perm.snapshot_id = $snapshot_id,
-        perm.condition = $condition
+/// UNWIND-batched: MERGE a Permission node per row.
+pub const MERGE_PERMISSION: &str = "
+    UNWIND $rows AS row
+    MERGE (perm:Permission {uid: row.uid})
+    SET perm.action = row.action,
+        perm.resource = row.resource,
+        perm.effect = row.effect,
+        perm.account_id = row.account_id,
+        perm.snapshot_id = row.snapshot_id,
+        perm.condition = row.condition
 ";
 
-const PERMISSION_ON_SERVICE: &str = "
-    MATCH (perm:Permission {uid: $uid})
-    MATCH (svc:AwsService {prefix: $prefix})
+/// UNWIND-batched: link a Permission to its AwsService per row.
+pub const PERMISSION_ON_SERVICE: &str = "
+    UNWIND $rows AS row
+    MATCH (perm:Permission {uid: row.uid})
+    MATCH (svc:AwsService {prefix: row.prefix})
     MERGE (perm)-[:ON_SERVICE]->(svc)
 ";
 
-const MERGE_EXCLUDED_PERMISSION: &str = "
-    MERGE (perm:Permission {uid: $uid})
+/// UNWIND-batched: MERGE an allow-all-except Permission node per row.
+pub const MERGE_EXCLUDED_PERMISSION: &str = "
+    UNWIND $rows AS row
+    MERGE (perm:Permission {uid: row.uid})
     SET perm.action = '*',
-        perm.resource = $resource,
-        perm.effect = $effect,
-        perm.account_id = $account_id,
-        perm.snapshot_id = $snapshot_id,
-        perm.excluded_actions = $excluded_actions,
-        perm.condition = $condition
+        perm.resource = row.resource,
+        perm.effect = row.effect,
+        perm.account_id = row.account_id,
+        perm.snapshot_id = row.snapshot_id,
+        perm.excluded_actions = row.excluded_actions,
+        perm.condition = row.condition
 ";
 
 /// Build a query to MERGE an AwsService node.
@@ -42,67 +49,71 @@ pub fn merge_aws_service_query(prefix: &str) -> Query {
         .param("name", name)
 }
 
-/// Build a query to MERGE a Permission node.
+/// Build a row for the `MERGE_PERMISSION` UNWIND statement.
 ///
 /// `condition` (if present and non-empty) is stored as a JSON string on `perm.condition`
 /// so query-time evaluators (see `iam_models::condition`) can read it back and flag
 /// gated grants instead of treating them as unconditional.
-pub fn merge_permission_query(
+pub fn permission_row(
     snapshot_id: &str,
     account_id: &str,
     effect: &str,
     action: &str,
     resource: &str,
     condition: Option<&Condition>,
-) -> Query {
+) -> Row {
     let uid = permission_uid(snapshot_id, effect, action, resource, condition);
-    query(MERGE_PERMISSION)
-        .param("uid", uid)
-        .param("action", action)
-        .param("resource", resource)
-        .param("effect", effect)
-        .param("account_id", account_id)
-        .param("snapshot_id", snapshot_id)
-        .param("condition", condition_json(condition))
+    Row::from([
+        ("uid".to_string(), uid.into()),
+        ("action".to_string(), action.into()),
+        ("resource".to_string(), resource.into()),
+        ("effect".to_string(), effect.into()),
+        ("account_id".to_string(), account_id.into()),
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        ("condition".to_string(), condition_json(condition).into()),
+    ])
 }
 
-/// Build a query to MERGE an allow-all-except Permission node (from a `NotAction` statement).
+/// Build a row for the `MERGE_EXCLUDED_PERMISSION` UNWIND statement (from a
+/// `NotAction` statement).
 ///
 /// The node stores `action = '*'` with an `excluded_actions` list. `who_can` matches it for
 /// any queried action that is NOT in `excluded_actions`. No `ON_SERVICE` edge — the `*`
 /// action belongs to no single service prefix.
-pub fn merge_excluded_permission_query(
+pub fn excluded_permission_row(
     snapshot_id: &str,
     account_id: &str,
     effect: &str,
     resource: &str,
     excluded: &[String],
     condition: Option<&Condition>,
-) -> Query {
+) -> Row {
     let uid = excluded_permission_uid(snapshot_id, effect, resource, excluded, condition);
-    query(MERGE_EXCLUDED_PERMISSION)
-        .param("uid", uid)
-        .param("resource", resource)
-        .param("effect", effect)
-        .param("account_id", account_id)
-        .param("snapshot_id", snapshot_id)
-        .param("excluded_actions", excluded.to_vec())
-        .param("condition", condition_json(condition))
+    Row::from([
+        ("uid".to_string(), uid.into()),
+        ("resource".to_string(), resource.into()),
+        ("effect".to_string(), effect.into()),
+        ("account_id".to_string(), account_id.into()),
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        ("excluded_actions".to_string(), excluded.to_vec().into()),
+        ("condition".to_string(), condition_json(condition).into()),
+    ])
 }
 
-/// Build a query to link a Permission to its AwsService.
-pub fn permission_on_service_query(
+/// Build a row for the `PERMISSION_ON_SERVICE` UNWIND statement.
+pub fn permission_on_service_row(
     snapshot_id: &str,
     effect: &str,
     action: &str,
     resource: &str,
     prefix: &str,
     condition: Option<&Condition>,
-) -> Query {
+) -> Row {
     let uid = permission_uid(snapshot_id, effect, action, resource, condition);
-    query(PERMISSION_ON_SERVICE)
-        .param("uid", uid)
-        .param("prefix", prefix)
+    Row::from([
+        ("uid".to_string(), uid.into()),
+        ("prefix".to_string(), prefix.into()),
+    ])
 }
 
 /// Serialize a `Condition` block to a JSON string for storage, or `None` if absent/empty.
