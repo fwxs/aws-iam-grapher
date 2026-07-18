@@ -52,6 +52,15 @@ struct MatchedExcludes {
     matched_names: std::collections::HashSet<String>,
 }
 
+/// Mutable accumulators threaded through the recursive [`OrgCollector::collect_accounts_under`]
+/// walk. Bundled into one struct so the walk stays under clippy's argument-count lint instead of
+/// carrying three separate `&mut` accumulators as positional parameters.
+struct WalkState<'a> {
+    out: &'a mut Vec<OrgAccount>,
+    matched_excludes: &'a mut MatchedExcludes,
+    matched_overrides: &'a mut std::collections::HashSet<String>,
+}
+
 /// Result of one AWS Organizations collection run: one `CollectedData` per account that
 /// was successfully collected, all tagged with a shared `run_id`.
 #[derive(Debug, Clone)]
@@ -197,6 +206,11 @@ impl OrgCollector {
     /// Resolves the credentials of a named local AWS profile eagerly (no network call for
     /// static-credential profiles), so an unresolvable `--ou-profile-override` profile fails
     /// fast as a validation error rather than surfacing later as an opaque per-account failure.
+    ///
+    /// Resolved once, up front, and reused for every account under that override for the rest
+    /// of the run: fine for the intended static long-lived-credential use case, but a
+    /// short-lived SSO/STS-backed override profile can expire mid-run on a large org. Revisit
+    /// (e.g. re-resolve per account) if that use case is needed.
     async fn resolve_override_profile_credentials(
         profile: &str,
     ) -> Result<Credentials, CollectorError> {
@@ -225,11 +239,12 @@ impl OrgCollector {
             self.enumerate_accounts().await?;
         info!(accounts = accounts.len(), "enumerated org accounts");
 
-        if let Some(key) = unmatched_override_keys.first() {
+        if !unmatched_override_keys.is_empty() {
+            let keys = unmatched_override_keys.join("`, `");
             return Err(CollectorError::InvalidOuProfileOverride(format!(
-                "--ou-profile-override key `{key}` did not match any organizational unit's id \
-                 or display name in this organization — check spelling and that it is reachable \
-                 from an enumerated root"
+                "--ou-profile-override key(s) `{keys}` did not match any organizational unit's \
+                 id or display name in this organization — check spelling and that they are \
+                 reachable from an enumerated root"
             )));
         }
 
@@ -243,6 +258,17 @@ impl OrgCollector {
 
         let mut collected = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
+
+        let mut seen_override_keys = std::collections::HashSet::new();
+        for (key, _) in &self.ou_profile_overrides {
+            if !seen_override_keys.insert(key) {
+                warn!(key = %key, "--ou-profile-override key given more than once; only the first profile for it is used");
+                warnings.push(CollectorWarning::PartialData(format!(
+                    "--ou-profile-override key `{key}` was given more than once — only its \
+                     first `=<aws_profile>` value is used, the rest are ignored"
+                )));
+            }
+        }
 
         for ou_id in &unmatched_excludes.ids {
             warn!(ou_id = %ou_id, "--exclude-ou-id did not match any OU encountered during enumeration");
@@ -357,21 +383,26 @@ impl OrgCollector {
         let mut matched_excludes = MatchedExcludes::default();
         let mut matched_overrides: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
-        while let Some(page) = root_paginator.next().await {
-            let page = page.map_err(map_sdk_error)?;
-            for root in page.roots() {
-                let root_id = root.id().unwrap_or_default().to_string();
-                self.collect_accounts_under(
-                    root_id.clone(),
-                    vec![root_id],
-                    None,
-                    None,
-                    &mut accounts,
-                    &mut matched_excludes,
-                    &mut matched_overrides,
-                )
-                .await?;
+        {
+            let mut state = WalkState {
+                out: &mut accounts,
+                matched_excludes: &mut matched_excludes,
+                matched_overrides: &mut matched_overrides,
+            };
+            let mut root_paginator = self.orgs_client.list_roots().into_paginator().send();
+            while let Some(page) = root_paginator.next().await {
+                let page = page.map_err(map_sdk_error)?;
+                for root in page.roots() {
+                    let root_id = root.id().unwrap_or_default().to_string();
+                    self.collect_accounts_under(
+                        root_id.clone(),
+                        vec![root_id],
+                        None,
+                        None,
+                        &mut state,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -413,17 +444,17 @@ impl OrgCollector {
     /// under the org root — it is stamped onto every [`OrgAccount`] found at this level.
     /// `current_override` is the profile inherited from the nearest matching ancestor OU (or
     /// `None`); a nested OU with its own match replaces it for its own subtree.
-    #[allow(clippy::too_many_arguments)]
-    fn collect_accounts_under<'a>(
+    fn collect_accounts_under<'a, 'b>(
         &'a self,
         parent_id: String,
         ou_path: Vec<String>,
         current_ou: Option<(String, String)>,
         current_override: Option<String>,
-        out: &'a mut Vec<OrgAccount>,
-        matched_excludes: &'a mut MatchedExcludes,
-        matched_overrides: &'a mut std::collections::HashSet<String>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'a>> {
+        state: &'b mut WalkState<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), CollectorError>> + 'b>>
+    where
+        'a: 'b,
+    {
         Box::pin(async move {
             debug!(parent_id = %parent_id, "fetching ListAccountsForParent");
             let mut acct_paginator = self
@@ -435,7 +466,7 @@ impl OrgCollector {
             while let Some(page) = acct_paginator.next().await {
                 let page = page.map_err(map_sdk_error)?;
                 for a in page.accounts() {
-                    out.push(OrgAccount {
+                    state.out.push(OrgAccount {
                         id: a.id().unwrap_or_default().to_string(),
                         name: a.name().unwrap_or_default().to_string(),
                         ou_path: ou_path.clone(),
@@ -459,7 +490,7 @@ impl OrgCollector {
                     let ou_id = ou.id().unwrap_or_default().to_string();
                     let ou_name = ou.name().unwrap_or_default().to_string();
                     if self.exclude_ou_ids.contains(&ou_id) {
-                        matched_excludes.matched_ids.insert(ou_id);
+                        state.matched_excludes.matched_ids.insert(ou_id);
                         continue;
                     }
                     if let Some(name) = self
@@ -467,7 +498,7 @@ impl OrgCollector {
                         .iter()
                         .find(|name| name.as_str() == ou_name)
                     {
-                        matched_excludes.matched_names.insert(name.clone());
+                        state.matched_excludes.matched_names.insert(name.clone());
                         continue;
                     }
 
@@ -476,7 +507,7 @@ impl OrgCollector {
                         .iter()
                         .find(|(key, _)| key == &ou_id || key == &ou_name)
                         .map(|(key, profile)| {
-                            matched_overrides.insert(key.clone());
+                            state.matched_overrides.insert(key.clone());
                             profile.clone()
                         })
                         .or_else(|| current_override.clone());
@@ -488,9 +519,7 @@ impl OrgCollector {
                         child_path,
                         Some((ou_id, ou_name)),
                         child_override,
-                        out,
-                        matched_excludes,
-                        matched_overrides,
+                        state,
                     )
                     .await?;
                 }
