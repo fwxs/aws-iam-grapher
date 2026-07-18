@@ -159,7 +159,7 @@ async fn resolve_all_account_ids(client: &GraphClient) -> anyhow::Result<Vec<Str
         .await
         .context("failed to list accounts")?;
     if accounts.is_empty() {
-        return Err(GraphError::NoSnapshots.into());
+        return Err(GraphError::no_snapshots().into());
     }
     Ok(accounts)
 }
@@ -416,13 +416,10 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         ref cmd => match args.account_id.as_deref() {
             Some(account_id) => {
                 let selector = match args.snapshot_id.clone() {
-                    Some(snapshot_id) => ScopeSelector::Snapshot {
-                        snapshot_id,
-                        expected_account: Some(account_id.to_owned()),
-                    },
-                    None => ScopeSelector::Account {
-                        account_id: account_id.to_owned(),
-                    },
+                    Some(snapshot_id) => {
+                        ScopeSelector::snapshot(snapshot_id, Some(account_id.to_owned()))
+                    }
+                    None => ScopeSelector::account(account_id),
                 };
                 let mut contexts = resolve_contexts(client.inner(), selector).await?;
                 let ctx = contexts.remove(0);
@@ -570,12 +567,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                                 accounts.len()
                             );
                         }
-                        ScopeSelector::Snapshot {
-                            snapshot_id,
-                            expected_account: None,
-                        }
+                        ScopeSelector::snapshot(snapshot_id, None)
                     }
-                    None => ScopeSelector::AllAccounts,
+                    None => ScopeSelector::all_accounts(),
                 };
                 let contexts = resolve_contexts(client.inner(), selector).await?;
 
@@ -791,10 +785,10 @@ async fn resolve_diff_account_id(
 ) -> anyhow::Result<String> {
     let account_a = snapshot_account_id(client.inner(), snapshot_a)
         .await?
-        .ok_or_else(|| GraphError::SnapshotNotFound(snapshot_a.to_owned()))?;
+        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
     let account_b = snapshot_account_id(client.inner(), snapshot_b)
         .await?
-        .ok_or_else(|| GraphError::SnapshotNotFound(snapshot_b.to_owned()))?;
+        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
 
     if account_a != account_b {
         anyhow::bail!(
