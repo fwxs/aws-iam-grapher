@@ -433,7 +433,11 @@ impl OrgCollector {
         account: &OrgAccount,
     ) -> Result<Credentials, CollectorError> {
         let role_arn = format!("arn:aws:iam::{}:role/{}", account.id, self.assume_role_name);
-        info!(role_arn = %role_arn, region = %self.region, "assuming jump role");
+        let via_profile = account
+            .profile_override
+            .as_deref()
+            .unwrap_or("jump-from-profile");
+        info!(role_arn = %role_arn, region = %self.region, via_profile = %via_profile, "assuming role");
         let assumed = sts_client
             .assume_role()
             .role_arn(&role_arn)
