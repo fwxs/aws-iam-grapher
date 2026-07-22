@@ -23,9 +23,11 @@ pub struct OrgAccount {
     /// Immediate parent OU display name, or `None` if the account sits directly under the
     /// org root.
     pub ou_name: Option<String>,
-    /// Named local AWS profile to collect this account with instead of assume-role, resolved
-    /// from `--ou-profile-override` against this account's OU ancestry (most specific/innermost
-    /// matching OU wins). `None` means the default assume-role path applies.
+    /// Named local AWS profile to use as the source identity for `sts:AssumeRole` into this
+    /// account, resolved from `--ou-profile-override` against this account's OU ancestry (most
+    /// specific/innermost matching OU wins). Same role as `--jump-from-profile` but scoped to
+    /// this OU subtree instead of the whole run. `None` means `--jump-from-profile` (or the
+    /// default credential chain) applies instead.
     pub profile_override: Option<String>,
 }
 
@@ -111,6 +113,21 @@ impl IamClientFactory for RealIamClientFactory {
     }
 }
 
+/// Builds the STS client used to assume `assume_role_name` on behalf of an
+/// `--ou-profile-override` profile. Abstracted behind a trait, like [`IamClientFactory`], so
+/// tests can inject a mock client per profile instead of hitting real AWS endpoints.
+trait StsClientFactory: Send + Sync {
+    fn build(&self, profile: &str, config: &aws_config::SdkConfig) -> aws_sdk_sts::Client;
+}
+
+struct RealStsClientFactory;
+
+impl StsClientFactory for RealStsClientFactory {
+    fn build(&self, _profile: &str, config: &aws_config::SdkConfig) -> aws_sdk_sts::Client {
+        aws_sdk_sts::Client::new(config)
+    }
+}
+
 /// Resolves independent SDK configs for org discovery and jump-role assumption.
 ///
 /// These must never share a credential chain: `management_profile` is allowed to resolve to an
@@ -176,10 +193,13 @@ pub struct OrgCollector {
     /// behavior (collect everything, minus excludes).
     include_ou_names: Vec<String>,
     /// `(ou_id_or_name, aws_profile)` pairs from `--ou-profile-override`, matched against both
-    /// OU id and OU display name — same dual-match as `exclude_ou_ids`/`exclude_ou_names`.
+    /// OU id and OU display name — same dual-match as `exclude_ou_ids`/`exclude_ou_names`. Each
+    /// profile is used as the source identity for `sts:AssumeRole` into accounts under its OU,
+    /// exactly like `--jump-from-profile` but scoped to that subtree instead of the whole run.
     ou_profile_overrides: Vec<(String, String)>,
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
+    sts_client_factory: Box<dyn StsClientFactory>,
 }
 
 impl OrgCollector {
@@ -233,20 +253,26 @@ impl OrgCollector {
             ou_profile_overrides,
             region,
             client_factory: Box::new(RealIamClientFactory),
+            sts_client_factory: Box::new(RealStsClientFactory),
         })
     }
 
-    /// Resolves the credentials of a named local AWS profile eagerly (no network call for
-    /// static-credential profiles), so an unresolvable `--ou-profile-override` profile fails
-    /// fast as a validation error rather than surfacing later as an opaque per-account failure.
+    /// Resolves a named local AWS profile into an `SdkConfig`, eagerly validating that its
+    /// credentials resolve (no network call for static-credential profiles) so an unresolvable
+    /// `--ou-profile-override` profile fails fast as a validation error rather than surfacing
+    /// later as an opaque per-account failure. The config's region is forced to `region` — same
+    /// reasoning as `--jump-from-profile` in [`resolve_configs`]: its only purpose is calling
+    /// `sts:AssumeRole`, and override profiles are often just static credentials with no region
+    /// of their own.
     ///
-    /// Resolved once, up front, and reused for every account under that override for the rest
-    /// of the run: fine for the intended static long-lived-credential use case, but a
-    /// short-lived SSO/STS-backed override profile can expire mid-run on a large org. Revisit
-    /// (e.g. re-resolve per account) if that use case is needed.
-    async fn resolve_override_profile_credentials(
+    /// The returned config is used to build an STS client that assumes `assume_role_name` fresh
+    /// for every account under that override, same as the default `--jump-from-profile` path —
+    /// unlike the previous bypass-assume-role behavior, a short-lived SSO/STS-backed override
+    /// profile is free to refresh between accounts instead of being resolved once and reused.
+    async fn resolve_override_profile_config(
         profile: &str,
-    ) -> Result<Credentials, CollectorError> {
+        region: &Region,
+    ) -> Result<aws_config::SdkConfig, CollectorError> {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .profile_name(profile)
             .load()
@@ -260,7 +286,8 @@ impl OrgCollector {
             CollectorError::InvalidOuProfileOverride(format!(
                 "profile `{profile}` credentials could not be resolved: {e}"
             ))
-        })
+        })?;
+        Ok(config.into_builder().region(region.clone()).build())
     }
 
     /// Run the org-wide collection: enumerate accounts, assume into each, collect.
@@ -281,11 +308,12 @@ impl OrgCollector {
             )));
         }
 
-        let mut override_credentials: HashMap<String, Credentials> = HashMap::new();
+        let mut override_sts_clients: HashMap<String, aws_sdk_sts::Client> = HashMap::new();
         for (_, profile) in &self.ou_profile_overrides {
-            if !override_credentials.contains_key(profile) {
-                let creds = Self::resolve_override_profile_credentials(profile).await?;
-                override_credentials.insert(profile.clone(), creds);
+            if !override_sts_clients.contains_key(profile) {
+                let config = Self::resolve_override_profile_config(profile, &self.region).await?;
+                let client = self.sts_client_factory.build(profile, &config);
+                override_sts_clients.insert(profile.clone(), client);
             }
         }
 
@@ -343,7 +371,7 @@ impl OrgCollector {
                 progress = format!("{}/{}", index + 1, accounts.len()),
                 "collecting account"
             );
-            match self.collect_account(account, &override_credentials).await {
+            match self.collect_account(account, &override_sts_clients).await {
                 Ok(mut data) => {
                     data.ou_id = account.ou_id.clone();
                     data.ou_name = account.ou_name.clone();
@@ -366,20 +394,21 @@ impl OrgCollector {
         })
     }
 
-    /// Collects one account: via its `--ou-profile-override` credentials directly if
-    /// `account.profile_override` is set (bypassing assume-role entirely), otherwise via the
-    /// default `sts:AssumeRole` jump-role path.
+    /// Collects one account: assumes `assume_role_name` into it via `sts:AssumeRole`, sourced
+    /// from the `--ou-profile-override` profile's STS client if `account.profile_override` is
+    /// set, otherwise from the default `--jump-from-profile` STS client.
     async fn collect_account(
         &self,
         account: &OrgAccount,
-        override_credentials: &HashMap<String, Credentials>,
+        override_sts_clients: &HashMap<String, aws_sdk_sts::Client>,
     ) -> Result<CollectedData, CollectorError> {
         let credentials = if let Some(profile) = &account.profile_override {
-            override_credentials.get(profile).cloned().ok_or_else(|| {
+            let sts_client = override_sts_clients.get(profile).ok_or_else(|| {
                 CollectorError::InvalidOuProfileOverride(format!(
-                    "internal error: no resolved credentials cached for profile `{profile}`"
+                    "internal error: no resolved STS client cached for profile `{profile}`"
                 ))
-            })?
+            })?;
+            self.assume_role_via(sts_client, account).await?
         } else {
             self.assume_jump_role(account).await?
         };
@@ -392,10 +421,20 @@ impl OrgCollector {
     }
 
     async fn assume_jump_role(&self, account: &OrgAccount) -> Result<Credentials, CollectorError> {
+        self.assume_role_via(&self.sts_client, account).await
+    }
+
+    /// Assumes `assume_role_name` into `account` using `sts_client` as the source identity —
+    /// either the run's default `--jump-from-profile` client, or an `--ou-profile-override`
+    /// profile's client scoped to that account's OU subtree.
+    async fn assume_role_via(
+        &self,
+        sts_client: &aws_sdk_sts::Client,
+        account: &OrgAccount,
+    ) -> Result<Credentials, CollectorError> {
         let role_arn = format!("arn:aws:iam::{}:role/{}", account.id, self.assume_role_name);
         info!(role_arn = %role_arn, region = %self.region, "assuming jump role");
-        let assumed = self
-            .sts_client
+        let assumed = sts_client
             .assume_role()
             .role_arn(&role_arn)
             .role_session_name("aws-iam-grapher-org-collect")
@@ -672,6 +711,21 @@ mod tests {
         }
     }
 
+    struct TestStsClientFactory {
+        clients: Mutex<HashMap<String, aws_sdk_sts::Client>>,
+    }
+
+    impl StsClientFactory for TestStsClientFactory {
+        fn build(&self, profile: &str, _config: &aws_config::SdkConfig) -> aws_sdk_sts::Client {
+            self.clients
+                .lock()
+                .expect("lock not poisoned")
+                .get(profile)
+                .cloned()
+                .expect("test client registered for profile")
+        }
+    }
+
     fn empty_auth_details_client() -> aws_sdk_iam::Client {
         let rule = mock!(aws_sdk_iam::Client::get_account_authorization_details)
             .then_output(|| aws_sdk_iam::operation::get_account_authorization_details::GetAccountAuthorizationDetailsOutput::builder().build());
@@ -741,6 +795,7 @@ mod tests {
             ou_profile_overrides: vec![],
             region: Region::new("us-east-1"),
             client_factory,
+            sts_client_factory: Box::new(RealStsClientFactory),
         }
     }
 
@@ -752,6 +807,26 @@ mod tests {
         ou_profile_overrides: Vec<(String, String)>,
         client_factory: Box<dyn IamClientFactory>,
     ) -> OrgCollector {
+        org_collector_with_overrides_and_sts_factory(
+            orgs_client,
+            sts_client,
+            exclude_ou_ids,
+            exclude_ou_names,
+            ou_profile_overrides,
+            client_factory,
+            Box::new(RealStsClientFactory),
+        )
+    }
+
+    fn org_collector_with_overrides_and_sts_factory(
+        orgs_client: aws_sdk_organizations::Client,
+        sts_client: aws_sdk_sts::Client,
+        exclude_ou_ids: Vec<String>,
+        exclude_ou_names: Vec<String>,
+        ou_profile_overrides: Vec<(String, String)>,
+        client_factory: Box<dyn IamClientFactory>,
+        sts_client_factory: Box<dyn StsClientFactory>,
+    ) -> OrgCollector {
         OrgCollector {
             orgs_client,
             sts_client,
@@ -762,6 +837,7 @@ mod tests {
             ou_profile_overrides,
             region: Region::new("us-east-1"),
             client_factory,
+            sts_client_factory,
         }
     }
 
@@ -1930,10 +2006,10 @@ mod tests {
 
     #[tokio::test]
     async fn collect_mixed_org_assume_role_and_profile_override_share_run_id() {
-        // Arrange: root -> ou-sso (default assume-role account) ; root -> ou-legacy (account
-        // collected via a static-credential profile override). Both must land in one
-        // OrgCollectionResult sharing run_id, satisfying the issue's mixed-auth acceptance
-        // criterion.
+        // Arrange: root -> ou-sso (assumes via the default --jump-from-profile STS client) ;
+        // root -> ou-legacy (assumes via the "legacy" --ou-profile-override STS client instead).
+        // Both accounts must still go through sts:AssumeRole — just sourced from different
+        // profiles — and land in one OrgCollectionResult sharing run_id.
         let _guard = AWS_ENV_LOCK.lock().await;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1988,21 +2064,32 @@ mod tests {
             ]
         );
 
-        // Only the ou-sso account may ever call sts:AssumeRole — a mock rule scoped to its
-        // role ARN means a regression that routes the override account through assume-role too
-        // panics on an unmatched request instead of silently passing.
-        let assume_rule = mock!(aws_sdk_sts::Client::assume_role)
+        // The default jump-from client may only ever assume into the ou-sso account; the
+        // "legacy" override-profile client may only ever assume into the ou-legacy account. A
+        // regression that routes either account through the wrong client panics on an unmatched
+        // request instead of silently passing.
+        let jump_assume_rule = mock!(aws_sdk_sts::Client::assume_role)
             .match_requests(|req| {
                 req.role_arn() == Some("arn:aws:iam::111111111111:role/OrgJumpRole")
             })
-            .then_output(|| assume_role_output("AKIATEST"));
-        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+            .then_output(|| assume_role_output("AKIAJUMPFROM"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&jump_assume_rule]);
+
+        let legacy_assume_rule = mock!(aws_sdk_sts::Client::assume_role)
+            .match_requests(|req| {
+                req.role_arn() == Some("arn:aws:iam::222222222222:role/OrgJumpRole")
+            })
+            .then_output(|| assume_role_output("AKIALEGACY"));
+        let legacy_sts_client =
+            mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&legacy_assume_rule]);
+        let mut sts_clients = HashMap::new();
+        sts_clients.insert("legacy".to_string(), legacy_sts_client);
 
         let mut clients = HashMap::new();
         clients.insert("111111111111".to_string(), empty_auth_details_client());
         clients.insert("222222222222".to_string(), empty_auth_details_client());
 
-        let collector = org_collector_with_overrides(
+        let collector = org_collector_with_overrides_and_sts_factory(
             orgs_client,
             sts_client,
             vec![],
@@ -2010,6 +2097,9 @@ mod tests {
             vec![("Legacy".to_string(), "legacy".to_string())],
             Box::new(TestIamClientFactory {
                 clients: Mutex::new(clients),
+            }),
+            Box::new(TestStsClientFactory {
+                clients: Mutex::new(sts_clients),
             }),
         );
 
