@@ -186,6 +186,84 @@ aws-iam-grapher collect --mode hybrid --account-alias production
 
 ---
 
+## Organization-wide Collection (`collect org`)
+
+`collect org` enumerates every account in an AWS Organization and collects IAM data from each
+one, tagging every account with the same org collection run id and its Organizational Unit
+ancestry. Two separate identities are involved:
+
+- `--management-profile` — used only to call the Organizations APIs (enumerating OUs and
+  accounts) from the management account. Never used for role assumption.
+- `--jump-from-profile` — the source identity for `sts:AssumeRole` into `--assume-role-name`
+  in every member account. Defaults to the standard AWS credential chain (`AWS_PROFILE` / the
+  `default` profile) if omitted.
+
+These are kept separate on purpose: if `--management-profile` itself resolves to an assumed role
+(an SSO profile, or one with `role_arn`/`source_profile` chaining), reusing its credentials to
+call `AssumeRole` again would be a double-hop assumption that most jump-role trust policies
+reject.
+
+```bash
+export NEO4J_PASSWORD=your-password
+aws-iam-grapher collect org \
+    --management-profile org-management \
+    --jump-from-profile default \
+    --assume-role-name OrganizationAccountAccessRole \
+    --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+### Scoping which accounts are collected
+
+- `--exclude-ou-id <id>` / `--exclude-ou-name <name>` (repeatable) — prune an OU, and all its
+  descendants, out of collection.
+- `--include-ou-name <name>` (repeatable) — scope collection to only the given OU(s) and their
+  descendants; every other account is skipped. `--exclude-ou-id`/`--exclude-ou-name` still prune
+  even a matching include. An id/name that never matches any OU encountered while walking the
+  tree is reported as a warning, not silently ignored.
+
+```bash
+aws-iam-grapher collect org \
+    --management-profile org-management \
+    --assume-role-name OrganizationAccountAccessRole \
+    --exclude-ou-id ou-root1-sandbox \
+    --include-ou-name Production \
+    --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+### Mixed-authentication organizations (`--ou-profile-override`)
+
+Some accounts can't assume the jump role from `--jump-from-profile` at all — for example, a
+quarantined OU that requires its own SSO profile or a separate set of long-lived static
+credentials. `--ou-profile-override <ou_id_or_name>=<aws_profile>` (repeatable) makes accounts
+under a matching OU, and all its descendant OUs, assume `--assume-role-name` from that named
+local profile instead of `--jump-from-profile`.
+
+**This is not a way to bypass assume-role** — the override profile is only ever used to call
+`sts:AssumeRole`, exactly like `--jump-from-profile` is, just scoped to that OU subtree instead
+of the whole run. Every account, whichever profile it assumes from, still calls `sts:AssumeRole`
+into the same role name and lands in the same collection run. The override profile itself only
+needs permission to assume `--assume-role-name` — it does not need
+`iam:GetAccountAuthorizationDetails`, since it's never used to call IAM APIs directly.
+
+```bash
+aws-iam-grapher collect org \
+    --management-profile org-management \
+    --jump-from-profile default \
+    --assume-role-name OrganizationAccountAccessRole \
+    --ou-profile-override Quarantine=legacy-static-creds \
+    --ou-profile-override ThirdParty=vendor-sso \
+    --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
+id and its display name, and when nested overridden OUs disagree, the innermost (nearest
+ancestor) override wins. An override key that never matches any OU encountered while walking the
+tree is a **fatal** validation error, as is an override profile whose credentials can't be
+resolved — both fail collection before any account is touched. See
+[`docs/limitations.md`](docs/limitations.md) for further detail.
+
+---
+
 ## Logging
 
 `collect` and `collect org` log each AWS API call they make (region resolution, pagination

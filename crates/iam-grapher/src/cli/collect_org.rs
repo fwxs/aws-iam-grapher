@@ -41,11 +41,13 @@ pub struct OrgArgs {
     #[arg(long = "include-ou-name")]
     pub include_ou_names: Vec<String>,
 
-    /// Collect accounts under this OU (by id or display name, matched against both — and its
-    /// descendants) via a named local AWS profile directly, bypassing assume-role for that
-    /// subtree entirely. Repeatable; form is `<ou_id_or_name>=<aws_profile>`. Nested overrides
-    /// take precedence over an ancestor's. Every account collected this way still joins the
-    /// same org collection run id.
+    /// For accounts under this OU (by id or display name, matched against both — and its
+    /// descendants), use this named local AWS profile as the source identity for
+    /// `sts:AssumeRole` into `--assume-role-name`, instead of `--jump-from-profile`. Same role
+    /// as `--jump-from-profile`, just scoped to this OU subtree — assume-role still happens for
+    /// every account either way. Repeatable; form is `<ou_id_or_name>=<aws_profile>`. Nested
+    /// overrides take precedence over an ancestor's. Every account collected this way still
+    /// joins the same org collection run id.
     #[arg(long = "ou-profile-override")]
     pub ou_profile_overrides: Vec<String>,
 

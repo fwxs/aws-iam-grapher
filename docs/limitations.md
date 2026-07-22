@@ -316,13 +316,13 @@ walking the tree is reported as a warning, not silently ignored.
 
 ### Mixed-authentication orgs (`--ou-profile-override`)
 
-Some organizations are not authentication-homogeneous: most accounts are reachable via the
-`--management-profile` → `sts:AssumeRole` jump-role path, but a subset — often quarantined into
-their own OU for exactly this reason — can only be authenticated to via a separate local AWS
-profile (e.g. long-lived static credentials, or its own SSO profile). `--ou-profile-override
-<ou_id_or_name>=<aws_profile>` (repeatable) collects accounts under a matching OU, and all its
-descendant OUs, directly with the named local profile's credentials instead of assuming the jump
-role — while still filing every account, from both paths, into the same
+Some organizations are not authentication-homogeneous: most accounts assume the jump role from
+`--jump-from-profile`, but a subset — often quarantined into their own OU for exactly this reason
+— must assume it from a *different* source identity (e.g. a separate set of long-lived static
+credentials, or its own SSO profile) instead. `--ou-profile-override <ou_id_or_name>=<aws_profile>`
+(repeatable) makes accounts under a matching OU, and all its descendant OUs, assume
+`--assume-role-name` from the named local profile instead of `--jump-from-profile` — every account,
+from both paths, still calls `sts:AssumeRole` into the same role name and is filed into the same
 `org_collection_run_id`:
 
 ```bash
@@ -334,6 +334,12 @@ aws-iam-grapher collect org \
   --ou-profile-override ThirdParty=vendor-keys \
   --neo4j-pass "$NEO4J_PASSWORD"
 ```
+
+This is not a way to bypass assume-role entirely — the named profile is only ever used to call
+`sts:AssumeRole`, exactly like `--jump-from-profile` is, just scoped to that OU subtree instead of
+the whole run. It does **not** collect the profile's own account directly, and the profile itself
+does not need `iam:GetAccountAuthorizationDetails` — only permission to assume
+`--assume-role-name` in each account under the matching OU.
 
 Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
 id and its display name. When nested overridden OUs disagree, the innermost (nearest ancestor)
