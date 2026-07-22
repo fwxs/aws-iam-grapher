@@ -348,3 +348,37 @@ any OU encountered while walking the tree is a **fatal** validation error — co
 before any account is touched, rather than proceeding as if the override had no effect. Likewise,
 an override's local profile must resolve real credentials before collection starts; an unresolvable
 profile also fails fast with a validation error.
+
+### Role-heterogeneous orgs (`--ou-role-override`)
+
+Some orgs don't use the same cross-account role name everywhere — a legacy or acquired subtree
+exposes it under a different name than `--assume-role-name`. `--ou-role-override
+<ou_id_or_name>=<role_name>` (repeatable) assumes `<role_name>` instead of `--assume-role-name` in
+every account under a matching OU and its descendants; everything else (source identity, region,
+run id) is unchanged. It is independent of `--ou-profile-override` — one changes the target role
+name, the other the source identity — and both may apply to the same OU and compose.
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Matching, inheritance, and the fatal-unmatched-key behavior are the same as
+`--ou-profile-override` above, with three deviations:
+
+- **`--exclude-ou-*` short-circuits before role-override resolution.** A key that matches only an
+  OU that was itself excluded is reported as a *shadowed-by-exclude* warning, not the fatal
+  unmatched-key error — the exclusion is assumed deliberate.
+- **When one OU is matched by both an id-keyed and a name-keyed entry** with different role
+  names, the id-keyed value wins.
+- **Duplicate identical keys use last-value-wins** (the more common CLI convention), not the
+  first-value-wins used by `--ou-profile-override` — a deliberate divergence, noted here since the
+  two flags otherwise behave symmetrically.
+
+The role name is validated at parse time (non-empty, no ARN/path fragments or whitespace) so a
+malformed value is rejected before any AWS call rather than surfacing as an opaque per-account
+`AssumeRole` failure deep in the walk.

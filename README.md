@@ -184,6 +184,38 @@ export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect --mode hybrid --account-alias production
 ```
 
+### Scenario D — Org-wide collection (`collect org`)
+
+Enumerates every account under an AWS Organization, assumes a jump role into each, and files
+them all under one `org_collection_run_id`:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+`--exclude-ou-id`/`--exclude-ou-name` and `--include-ou-name` scope which OUs are collected;
+`--ou-profile-override <ou_id_or_name>=<aws_profile>` collects a subtree via a named local
+profile instead of assume-role. If a subtree exposes the cross-account role under a *different
+name* than `--assume-role-name`, use `--ou-role-override <ou_id_or_name>=<role_name>` (repeatable)
+to assume that role instead, for accounts under that OU and its descendants:
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+All of these flags are repeatable, match against both OU id and display name, and are documented
+in full — matching/precedence rules, inheritance, validation, and edge cases — in
+[docs/limitations.md](docs/limitations.md).
+
 ---
 
 ## Organization-wide Collection (`collect org`)

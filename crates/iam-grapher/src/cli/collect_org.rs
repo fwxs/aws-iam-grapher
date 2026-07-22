@@ -51,6 +51,16 @@ pub struct OrgArgs {
     #[arg(long = "ou-profile-override")]
     pub ou_profile_overrides: Vec<String>,
 
+    /// Assume this IAM role name (instead of --assume-role-name) in every account under this OU
+    /// (by id or display name, matched against both — and its descendants). Repeatable; form is
+    /// `<ou_id_or_name>=<role_name>`. Nested overrides take precedence over an ancestor's. When
+    /// the same OU is matched by both an id-keyed and a name-keyed entry, the id-keyed one wins.
+    /// When the same key is given twice, the last value wins. Independent of
+    /// --ou-profile-override (that changes the source identity, this changes the target role
+    /// name); both may apply to the same OU and compose.
+    #[arg(long = "ou-role-override")]
+    pub ou_role_overrides: Vec<String>,
+
     /// AWS region(s) to use for org discovery and jump-role assumption. Repeatable; the first
     /// entry wins and overrides whatever region --management-profile / --jump-from-profile
     /// resolve. If omitted, falls back to the resolved profile region, then us-east-1.
@@ -63,6 +73,7 @@ pub struct OrgArgs {
 
 pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
     let ou_profile_overrides = parse_ou_profile_overrides(&args.ou_profile_overrides)?;
+    let ou_role_overrides = parse_ou_role_overrides(&args.ou_role_overrides)?;
 
     let collector = OrgCollector::from_profile(
         args.management_profile.clone(),
@@ -73,6 +84,7 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         args.exclude_ou_names.clone(),
         args.include_ou_names.clone(),
         ou_profile_overrides,
+        ou_role_overrides,
     )
     .await
     .context("failed to build org collector")?;
@@ -182,6 +194,33 @@ fn parse_ou_profile_overrides(entries: &[String]) -> anyhow::Result<Vec<(String,
                 anyhow::anyhow!("--ou-profile-override must be in `ou=profile` form, got `{entry}`")
             })?;
             Ok((ou.to_string(), profile.to_string()))
+        })
+        .collect()
+}
+
+/// Parses repeatable `--ou-role-override <ou_id_or_name>=<role_name>` entries into
+/// `(ou_id_or_name, role_name)` pairs. Unlike `parse_ou_profile_overrides`, the role name is
+/// validated here (not just the `key=value` shape): an empty or malformed value would otherwise
+/// only fail deep inside the per-account `AssumeRole` call. OU-existence validation still
+/// happens later, inside `OrgCollector::collect()`.
+fn parse_ou_role_overrides(entries: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (ou, role) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--ou-role-override must be in `ou=role_name` form, got `{entry}`")
+            })?;
+            if role.is_empty() {
+                anyhow::bail!("--ou-role-override role name must not be empty, got `{entry}`");
+            }
+            let valid_char = |c: char| c.is_ascii_alphanumeric() || "+=,.@_-/".contains(c);
+            if !role.chars().all(valid_char) {
+                anyhow::bail!(
+                    "--ou-role-override role name `{role}` is not a valid IAM role name \
+                     (allowed characters: letters, digits, and `+=,.@_-/`; no ARNs or whitespace)"
+                );
+            }
+            Ok((ou.to_string(), role.to_string()))
         })
         .collect()
 }
