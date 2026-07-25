@@ -33,8 +33,14 @@ impl LiveCollector {
     /// `regions` is the CLI `--region` flag: when non-empty, its first entry overrides
     /// whatever region the profile/environment resolves; otherwise falls back to that
     /// resolved region, then to `us-east-1`. See [`crate::resolve_region`].
-    pub async fn from_env(regions: &[String]) -> Result<Self, CollectorError> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    ///
+    /// `profile` is the CLI `--profile` flag. See [`crate::credentials::resolve_config`] for
+    /// the full credential-source precedence.
+    pub async fn from_env(
+        regions: &[String],
+        profile: Option<&str>,
+    ) -> Result<Self, CollectorError> {
+        let config = crate::credentials::resolve_config(profile).await?;
         let region = crate::resolve_region(regions, config.region());
         info!(%region, "resolved AWS region for live collection");
         let config = config.into_builder().region(region).build();

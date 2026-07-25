@@ -27,8 +27,11 @@ impl HybridCollector {
         }
     }
 
-    pub async fn from_env(regions: &[String]) -> Result<Self, CollectorError> {
-        let live = LiveCollector::from_env(regions).await?;
+    pub async fn from_env(
+        regions: &[String],
+        profile: Option<&str>,
+    ) -> Result<Self, CollectorError> {
+        let live = LiveCollector::from_env(regions, profile).await?;
         Ok(Self { live })
     }
 }
