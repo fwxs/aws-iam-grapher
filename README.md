@@ -294,6 +294,24 @@ tree is a **fatal** validation error, as is an override profile whose credential
 resolved — both fail collection before any account is touched. See
 [`docs/limitations.md`](docs/limitations.md) for further detail.
 
+### Collection concurrency (`--concurrency`)
+
+`collect org` collects member accounts with bounded concurrency instead of one at a time.
+`--concurrency <n>` (default **4**) caps how many accounts are collected in parallel; values
+outside `[1, 16]` are clamped rather than rejected. The default is kept conservative because
+the limiting factor is AWS-side per-account IAM throttling and the jump-role STS trust setup,
+not local CPU. Output (`OrgCollectionResult.accounts`) is always sorted by account id, so it's
+deterministic regardless of which accounts finish first.
+
+```bash
+aws-iam-grapher collect org \
+    --management-profile org-management \
+    --jump-from-profile default \
+    --assume-role-name OrganizationAccountAccessRole \
+    --concurrency 8 \
+    --neo4j-pass "$NEO4J_PASSWORD"
+```
+
 ---
 
 ## Logging

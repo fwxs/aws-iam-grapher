@@ -382,3 +382,15 @@ Matching, inheritance, and the fatal-unmatched-key behavior are the same as
 The role name is validated at parse time (non-empty, no ARN/path fragments or whitespace) so a
 malformed value is rejected before any AWS call rather than surfacing as an opaque per-account
 `AssumeRole` failure deep in the walk.
+
+### Bounded-concurrency account collection (`--concurrency`)
+
+Member accounts are collected with bounded concurrency (`--concurrency`, default 4, clamped to
+`[1, 16]`) instead of strictly one at a time — wall clock for an N-account org is `≈ N/concurrency`
+rather than `Σ(per-account time)`. The default is conservative deliberately: the limiting factor
+is AWS-side per-account IAM throttling (mitigated by the SDK's built-in adaptive retry) and the
+jump-role STS trust setup, not local CPU. A single account's collection failure is still recorded
+as a `CollectorWarning::PartialData` and does not abort the run, identical to the pre-concurrency
+behavior. Because accounts complete out of order under concurrency, `OrgCollectionResult.accounts`
+is explicitly sorted by account id before being returned, so downstream output and ingestion order
+stay deterministic regardless of `--concurrency` or network timing.
