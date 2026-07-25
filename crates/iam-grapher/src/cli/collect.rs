@@ -83,6 +83,14 @@ pub struct CollectArgs {
     /// falls back to the profile/environment's configured region, then us-east-1.
     #[arg(long = "region")]
     pub regions: Vec<String>,
+
+    /// Named local AWS profile to use for credentials. Honored by `live` and `hybrid` modes;
+    /// ignored in `offline` mode, same as `--region`. Precedence: this flag, if given, wins
+    /// outright; otherwise `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the environment are
+    /// used if both are set; otherwise the standard AWS credential chain (`AWS_PROFILE` / the
+    /// `[default]` profile / a container or IMDS role) applies unchanged.
+    #[arg(long)]
+    pub profile: Option<String>,
 }
 
 /// Validate argument combinations before making any network calls.
@@ -93,6 +101,9 @@ pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
              Generate the file with:\n\n    \
              aws iam get-account-authorization-details --output json > account-auth-details.json"
         );
+    }
+    if args.profile.as_deref() == Some("") {
+        anyhow::bail!("--profile must not be empty");
     }
     Ok(())
 }
@@ -185,12 +196,13 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     match args.mode {
         CollectMode::Live => {
             info!("building live collector");
-            let collector = LiveCollector::from_env(&args.regions).await?;
+            let collector = LiveCollector::from_env(&args.regions, args.profile.as_deref()).await?;
             collector.collect().await
         }
         CollectMode::Hybrid => {
             info!("building hybrid collector");
-            let collector = HybridCollector::from_env(&args.regions).await?;
+            let collector =
+                HybridCollector::from_env(&args.regions, args.profile.as_deref()).await?;
             collector.collect().await
         }
         CollectMode::Offline => {
