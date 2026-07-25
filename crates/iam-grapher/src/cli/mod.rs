@@ -104,8 +104,53 @@ mod tests {
             account_id: None,
             account_alias: None,
             regions: Vec::new(),
+            profile: None,
         };
         assert!(collect::validate(&args).is_err());
+    }
+
+    #[test]
+    fn collect_profile_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--profile",
+            "work",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(top.account.profile, Some("work".to_string()));
+    }
+
+    #[test]
+    fn collect_profile_absent_is_none() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--neo4j-pass", "test"])
+            .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(top.account.profile, None);
+    }
+
+    #[test]
+    fn collect_empty_profile_rejected_at_validate() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--profile",
+            "",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse succeeds; emptiness is checked by validate()");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert!(collect::validate(&top.account).is_err());
     }
 
     #[test]
