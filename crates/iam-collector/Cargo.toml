@@ -32,4 +32,4 @@ pretty_assertions = { workspace = true }
 reqwest           = { workspace = true }
 tempfile          = "3.27.0"
 testcontainers    = "^0.27.3"
-tokio             = { workspace = true, features = ["test-util"] }
+tokio             = { workspace = true }
