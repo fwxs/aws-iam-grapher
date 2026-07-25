@@ -158,12 +158,8 @@ aws-iam-grapher collect \
     --account-alias production
 ```
 
-`--profile` selects a named local AWS profile for credentials, honored by `live` and `hybrid`
-modes (`hybrid` is the default) and ignored in `offline` mode, same as `--region`. Resolution
-order: `--profile`, if given, wins outright; otherwise `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
-in the environment are used if both are set; otherwise the standard AWS credential chain
-(`AWS_PROFILE` / the `[default]` profile / a container or IMDS role) applies unchanged. An
-unresolvable profile or credential set fails fast, before any IAM call, naming the problem.
+`--profile` selects a named local AWS profile for credentials; see `aws-iam-grapher collect
+--help` for the full precedence order and offline-mode behavior.
 
 ### Scenario B — Avoid CloudTrail noise (offline)
 
