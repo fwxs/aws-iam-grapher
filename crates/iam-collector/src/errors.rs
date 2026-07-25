@@ -24,6 +24,9 @@ pub enum CollectorError {
 
     #[error("invalid --ou-role-override: {0}")]
     InvalidOuRoleOverride(String),
+
+    #[error("invalid --profile: {0}")]
+    InvalidProfile(String),
 }
 
 /// Non-fatal warnings produced during collection.

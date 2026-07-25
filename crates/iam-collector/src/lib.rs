@@ -1,3 +1,4 @@
+mod credentials;
 mod errors;
 mod expand;
 mod hybrid;
@@ -6,6 +7,8 @@ mod offline;
 mod org;
 mod raw;
 mod region;
+#[cfg(test)]
+mod test_support;
 mod traits;
 mod util;
 
