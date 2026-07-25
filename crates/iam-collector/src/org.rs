@@ -323,22 +323,17 @@ impl OrgCollector {
         profile: &str,
         region: &Region,
     ) -> Result<aws_config::SdkConfig, CollectorError> {
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .profile_name(profile)
-            .load()
-            .await;
+        let loader = crate::credentials::bind_profile(
+            aws_config::defaults(aws_config::BehaviorVersion::latest()),
+            profile,
+        );
+        let config = loader.load().await;
         crate::credentials::eager_resolve(&config)
             .await
-            .map_err(|failure| {
-                let detail = match failure {
-                    crate::credentials::CredentialResolutionFailure::NotFound => format!(
-                        "profile `{profile}` was not found in the local AWS config/credentials files"
-                    ),
-                    crate::credentials::CredentialResolutionFailure::ResolveFailed(e) => {
-                        format!("profile `{profile}` credentials could not be resolved: {e}")
-                    }
-                };
-                CollectorError::InvalidOuProfileOverride(detail)
+            .map_err(|e| {
+                CollectorError::InvalidOuProfileOverride(format!(
+                    "profile `{profile}` credentials could not be resolved: {e}"
+                ))
             })?;
         Ok(config.into_builder().region(region.clone()).build())
     }
