@@ -89,7 +89,7 @@ pub struct CollectArgs {
     /// outright; otherwise `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the environment are
     /// used if both are set; otherwise the standard AWS credential chain (`AWS_PROFILE` / the
     /// `[default]` profile / a container or IMDS role) applies unchanged.
-    #[arg(long)]
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     pub profile: Option<String>,
 }
 
@@ -101,9 +101,6 @@ pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
              Generate the file with:\n\n    \
              aws iam get-account-authorization-details --output json > account-auth-details.json"
         );
-    }
-    if args.profile.as_deref() == Some("") {
-        anyhow::bail!("--profile must not be empty");
     }
     Ok(())
 }
