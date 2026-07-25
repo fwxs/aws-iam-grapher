@@ -8,7 +8,6 @@ use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -371,7 +370,7 @@ impl OrgCollector {
             }
         }
 
-        let mut collected: Vec<(String, CollectedData)> = Vec::with_capacity(accounts.len());
+        let mut collected: Vec<CollectedData> = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
 
         let mut seen_override_keys = std::collections::HashSet::new();
@@ -443,48 +442,47 @@ impl OrgCollector {
         }
 
         let total = accounts.len();
-        let completed = AtomicUsize::new(0);
-        let results: Vec<(String, Result<CollectedData, CollectorError>)> = stream::iter(&accounts)
-            .map(|account| {
-                let completed = &completed;
-                let override_sts_clients = &override_sts_clients;
-                async move {
-                    let result = self.collect_account(account, override_sts_clients).await;
-                    let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    info!(
-                        account_id = %account.id,
-                        account_name = %account.name,
-                        progress = format!("{n}/{total}"),
-                        "collected account"
-                    );
-                    (account.id.clone(), result)
-                }
-            })
-            .buffer_unordered(self.concurrency)
-            .collect()
-            .await;
+        let mut results: Vec<(&OrgAccount, Result<CollectedData, CollectorError>)> =
+            stream::iter(&accounts)
+                .map(|account| {
+                    let override_sts_clients = &override_sts_clients;
+                    async move {
+                        let result = self.collect_account(account, override_sts_clients).await;
+                        info!(
+                            account_id = %account.id,
+                            account_name = %account.name,
+                            total,
+                            "collected account"
+                        );
+                        (account, result)
+                    }
+                })
+                .buffer_unordered(self.concurrency)
+                .collect()
+                .await;
 
-        for (account_id, result) in results {
+        // Accounts finish out of order under concurrency. Sorting here rather than sorting the
+        // successes afterwards also fixes `warnings` order, which reaches the graph as
+        // `Snapshot.partial_reasons` — otherwise two identical runs over a partially failing org
+        // record those reasons in different orders.
+        results.sort_unstable_by(|(left, _), (right, _)| left.id.cmp(&right.id));
+
+        for (account, result) in results {
             match result {
                 Ok(mut data) => {
-                    let account = accounts
-                        .iter()
-                        .find(|a| a.id == account_id)
-                        .expect("account_id came from accounts");
                     data.ou_id = account.ou_id.clone();
                     data.ou_name = account.ou_name.clone();
-                    collected.push((account_id, data));
+                    collected.push(data);
                 }
                 Err(e) => {
-                    warn!(account_id = %account_id, error = %e, "skipping account in org collection");
+                    warn!(account_id = %account.id, error = %e, "skipping account in org collection");
                     warnings.push(CollectorWarning::PartialData(format!(
-                        "account {account_id}: {e}"
+                        "account {}: {e}",
+                        account.id
                     )));
                 }
             }
         }
-        collected.sort_by(|a, b| a.0.cmp(&b.0));
-        let collected: Vec<CollectedData> = collected.into_iter().map(|(_, data)| data).collect();
 
         Ok(OrgCollectionResult {
             run_id,
