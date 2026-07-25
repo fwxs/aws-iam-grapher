@@ -232,9 +232,20 @@ pub struct OrgCollector {
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
     sts_client_factory: Box<dyn StsClientFactory>,
-    /// Max accounts collected concurrently via `buffer_unordered`. Set from the CLI's
-    /// `--concurrency` flag, already clamped to `[1, 16]` by the caller.
+    /// Max accounts collected concurrently via `buffer_unordered`. Always within `[1, 16]`:
+    /// [`clamp_concurrency`] enforces that at construction, because `buffer_unordered(0)` never
+    /// polls its inner futures and would hang [`OrgCollector::collect`] forever.
     concurrency: usize,
+}
+
+/// Forces a requested concurrency into the `[1, 16]` range the collector supports.
+///
+/// The lower bound is a correctness guard, not a preference: `buffer_unordered(0)` never admits
+/// a future into its queue, so the stream returns `Poll::Pending` forever and collection hangs
+/// with no error and no log line. The CLI rejects out-of-range values outright; this keeps the
+/// same invariant for other callers of this library crate.
+fn clamp_concurrency(requested: usize) -> usize {
+    requested.clamp(1, 16)
 }
 
 impl OrgCollector {
@@ -292,7 +303,7 @@ impl OrgCollector {
             region,
             client_factory: Box::new(RealIamClientFactory),
             sts_client_factory: Box::new(RealStsClientFactory),
-            concurrency,
+            concurrency: clamp_concurrency(concurrency),
         })
     }
 
@@ -2137,6 +2148,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clamp_concurrency_rejects_zero_and_caps_at_sixteen() {
+        // Arrange/Act/Assert: 0 is the dangerous input — buffer_unordered(0) never polls, so an
+        // unclamped 0 hangs collect() forever with no error and no log line.
+        assert_eq!(clamp_concurrency(0), 1);
+        assert_eq!(clamp_concurrency(1), 1);
+        assert_eq!(clamp_concurrency(4), 4);
+        assert_eq!(clamp_concurrency(16), 16);
+        assert_eq!(clamp_concurrency(100), 16);
     }
 
     #[tokio::test]

@@ -298,7 +298,8 @@ resolved — both fail collection before any account is touched. See
 
 `collect org` collects member accounts with bounded concurrency instead of one at a time.
 `--concurrency <n>` (default **4**) caps how many accounts are collected in parallel; values
-outside `[1, 16]` are clamped rather than rejected. The default is kept conservative because
+outside `[1, 16]` are rejected with an error rather than silently adjusted. The default is kept
+conservative because
 the limiting factor is AWS-side per-account IAM throttling and the jump-role STS trust setup,
 not local CPU. Output (`OrgCollectionResult.accounts`) is always sorted by account id, so it's
 deterministic regardless of which accounts finish first.

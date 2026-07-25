@@ -67,10 +67,14 @@ pub struct OrgArgs {
     #[arg(long = "region")]
     pub regions: Vec<String>,
 
-    /// Max accounts collected concurrently. Clamped to [1, 16] — the constraint is AWS
+    /// Max accounts collected concurrently. Must be in [1, 16] — the constraint is AWS
     /// per-account throttling and the jump-role STS trust setup, not local CPU, so keep this
-    /// conservative.
-    #[arg(long, default_value = "4")]
+    /// conservative. Out-of-range values are rejected rather than silently adjusted.
+    #[arg(
+        long,
+        default_value = "4",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=16),
+    )]
     pub concurrency: usize,
 
     #[command(flatten)]
@@ -91,7 +95,7 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         args.include_ou_names.clone(),
         ou_profile_overrides,
         ou_role_overrides,
-        args.concurrency.clamp(1, 16),
+        args.concurrency,
     )
     .await
     .context("failed to build org collector")?;
