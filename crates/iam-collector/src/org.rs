@@ -926,6 +926,38 @@ mod tests {
         }
     }
 
+    /// Like [`empty_auth_details_client`] but returns one role, so a `CollectedData` can be
+    /// traced back to the account it came from via the role's ARN.
+    fn auth_details_client_with_role(role_arn: &str) -> aws_sdk_iam::Client {
+        let role = aws_sdk_iam::types::RoleDetail::builder()
+            .arn(role_arn)
+            .role_name("marker-role")
+            .role_id("AROAEXAMPLE")
+            .path("/")
+            .build();
+        let rule = mock!(aws_sdk_iam::Client::get_account_authorization_details).then_output(
+            move || {
+                aws_sdk_iam::operation::get_account_authorization_details::GetAccountAuthorizationDetailsOutput::builder()
+                    .role_detail_list(role.clone())
+                    .build()
+            },
+        );
+        let list_profiles_rule =
+            mock!(aws_sdk_iam::Client::list_instance_profiles).then_output(|| {
+                aws_sdk_iam::operation::list_instance_profiles::ListInstanceProfilesOutput::builder(
+                )
+                .set_instance_profiles(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListInstanceProfilesOutput")
+            });
+        mock_client!(
+            aws_sdk_iam,
+            RuleMode::Sequential,
+            &[&rule, &list_profiles_rule]
+        )
+    }
+
     fn empty_auth_details_client() -> aws_sdk_iam::Client {
         let rule = mock!(aws_sdk_iam::Client::get_account_authorization_details)
             .then_output(|| aws_sdk_iam::operation::get_account_authorization_details::GetAccountAuthorizationDetailsOutput::builder().build());
@@ -997,6 +1029,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory: Box::new(RealStsClientFactory),
+            concurrency: 4,
         }
     }
 
@@ -1040,6 +1073,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory,
+            concurrency: 4,
         }
     }
 
@@ -1063,6 +1097,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory: Box::new(RealStsClientFactory),
+            concurrency: 4,
         }
     }
 
@@ -2030,6 +2065,152 @@ mod tests {
         assert_eq!(result.warnings.len(), 1);
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("222222222222"))
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_with_concurrency_sorts_results_by_account_id() {
+        // Arrange: accounts enumerated out of ascending order — collection concurrency means
+        // completion order can't be trusted, so output must be sorted by account id regardless.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| {
+                accounts_output(vec![
+                    ("333333333333", "c"),
+                    ("111111111111", "a"),
+                    ("222222222222", "b"),
+                ])
+            });
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+
+        let assume_rule =
+            mock!(aws_sdk_sts::Client::assume_role).then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert(
+            "111111111111".to_string(),
+            auth_details_client_with_role("arn:aws:iam::111111111111:role/marker-role"),
+        );
+        clients.insert(
+            "222222222222".to_string(),
+            auth_details_client_with_role("arn:aws:iam::222222222222:role/marker-role"),
+        );
+        clients.insert(
+            "333333333333".to_string(),
+            auth_details_client_with_role("arn:aws:iam::333333333333:role/marker-role"),
+        );
+
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec![],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+        assert_eq!(collector.concurrency, 4);
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 3);
+        let arns: Vec<&str> = result
+            .accounts
+            .iter()
+            .map(|d| d.roles[0].arn.as_str())
+            .collect();
+        assert_eq!(
+            arns,
+            vec![
+                "arn:aws:iam::111111111111:role/marker-role",
+                "arn:aws:iam::222222222222:role/marker-role",
+                "arn:aws:iam::333333333333:role/marker-role",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_with_concurrency_one_matches_default_concurrency_output() {
+        // Arrange: identical setup to collect_fans_out_one_collected_data_per_account_sharing_run_id,
+        // just forcing concurrency down to 1 — content must be unaffected by the concurrency bound.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| accounts_output(vec![("111111111111", "a"), ("222222222222", "b")]));
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+
+        let assume_rule =
+            mock!(aws_sdk_sts::Client::assume_role).then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert("111111111111".to_string(), empty_auth_details_client());
+        clients.insert("222222222222".to_string(), empty_auth_details_client());
+
+        let mut collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec![],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+        collector.concurrency = 1;
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert: same content as the concurrency-4 fan-out test.
+        assert_eq!(result.accounts.len(), 2);
+        assert!(result.warnings.is_empty());
+        assert!(!result.run_id.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffer_unordered_respects_concurrency_bound_on_wall_clock() {
+        // Proves the primitive `collect()` is built on — stream::iter(...).buffer_unordered(n)
+        // — actually bounds in-flight work, independent of AWS mocking. 8 units of work, each
+        // taking 100ms, at concurrency 2 must take ceil(8/2) * 100ms = 400ms, not 800ms serial
+        // or ~100ms fully parallel.
+        let start = tokio::time::Instant::now();
+        let delay = std::time::Duration::from_millis(100);
+        let results: Vec<u32> = stream::iter(0..8u32)
+            .map(|i| async move {
+                tokio::time::sleep(delay).await;
+                i
+            })
+            .buffer_unordered(2)
+            .collect()
+            .await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(results.len(), 8);
+        assert!(
+            elapsed >= delay * 4,
+            "expected at least {:?} for 8 items at concurrency 2, got {elapsed:?}",
+            delay * 4
+        );
+        assert!(
+            elapsed < delay * 8,
+            "expected well under {:?} (serial) for concurrency 2, got {elapsed:?}",
+            delay * 8
         );
     }
 
