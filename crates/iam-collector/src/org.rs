@@ -4,6 +4,7 @@ use crate::traits::CollectedData;
 use crate::traits::IamDataSource;
 use crate::util::map_sdk_error;
 use aws_sdk_iam::config::{Credentials, ProvideCredentials, Region};
+use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -231,6 +232,20 @@ pub struct OrgCollector {
     region: Region,
     client_factory: Box<dyn IamClientFactory>,
     sts_client_factory: Box<dyn StsClientFactory>,
+    /// Max accounts collected concurrently via `buffer_unordered`. Always within `[1, 16]`:
+    /// [`clamp_concurrency`] enforces that at construction, because `buffer_unordered(0)` never
+    /// polls its inner futures and would hang [`OrgCollector::collect`] forever.
+    concurrency: usize,
+}
+
+/// Forces a requested concurrency into the `[1, 16]` range the collector supports.
+///
+/// The lower bound is a correctness guard, not a preference: `buffer_unordered(0)` never admits
+/// a future into its queue, so the stream returns `Poll::Pending` forever and collection hangs
+/// with no error and no log line. The CLI rejects out-of-range values outright; this keeps the
+/// same invariant for other callers of this library crate.
+fn clamp_concurrency(requested: usize) -> usize {
+    requested.clamp(1, 16)
 }
 
 impl OrgCollector {
@@ -262,6 +277,7 @@ impl OrgCollector {
         include_ou_names: Vec<String>,
         ou_profile_overrides: Vec<(String, String)>,
         ou_role_overrides: Vec<(String, String)>,
+        concurrency: usize,
     ) -> Result<Self, CollectorError> {
         let (discovery_config, jump_from_config) = resolve_configs(
             management_profile.into(),
@@ -287,6 +303,7 @@ impl OrgCollector {
             region,
             client_factory: Box::new(RealIamClientFactory),
             sts_client_factory: Box::new(RealStsClientFactory),
+            concurrency: clamp_concurrency(concurrency),
         })
     }
 
@@ -364,7 +381,7 @@ impl OrgCollector {
             }
         }
 
-        let mut collected = Vec::with_capacity(accounts.len());
+        let mut collected: Vec<CollectedData> = Vec::with_capacity(accounts.len());
         let mut warnings = Vec::new();
 
         let mut seen_override_keys = std::collections::HashSet::new();
@@ -435,14 +452,34 @@ impl OrgCollector {
             )));
         }
 
-        for (index, account) in accounts.iter().enumerate() {
-            info!(
-                account_id = %account.id,
-                account_name = %account.name,
-                progress = format!("{}/{}", index + 1, accounts.len()),
-                "collecting account"
-            );
-            match self.collect_account(account, &override_sts_clients).await {
+        let total = accounts.len();
+        let mut results: Vec<(&OrgAccount, Result<CollectedData, CollectorError>)> =
+            stream::iter(&accounts)
+                .map(|account| {
+                    let override_sts_clients = &override_sts_clients;
+                    async move {
+                        let result = self.collect_account(account, override_sts_clients).await;
+                        info!(
+                            account_id = %account.id,
+                            account_name = %account.name,
+                            total,
+                            "collected account"
+                        );
+                        (account, result)
+                    }
+                })
+                .buffer_unordered(self.concurrency)
+                .collect()
+                .await;
+
+        // Accounts finish out of order under concurrency. Sorting here rather than sorting the
+        // successes afterwards also fixes `warnings` order, which reaches the graph as
+        // `Snapshot.partial_reasons` — otherwise two identical runs over a partially failing org
+        // record those reasons in different orders.
+        results.sort_unstable_by(|(left, _), (right, _)| left.id.cmp(&right.id));
+
+        for (account, result) in results {
+            match result {
                 Ok(mut data) => {
                     data.ou_id = account.ou_id.clone();
                     data.ou_name = account.ou_name.clone();
@@ -898,6 +935,38 @@ mod tests {
         }
     }
 
+    /// Like [`empty_auth_details_client`] but returns one role, so a `CollectedData` can be
+    /// traced back to the account it came from via the role's ARN.
+    fn auth_details_client_with_role(role_arn: &str) -> aws_sdk_iam::Client {
+        let role = aws_sdk_iam::types::RoleDetail::builder()
+            .arn(role_arn)
+            .role_name("marker-role")
+            .role_id("AROAEXAMPLE")
+            .path("/")
+            .build();
+        let rule = mock!(aws_sdk_iam::Client::get_account_authorization_details).then_output(
+            move || {
+                aws_sdk_iam::operation::get_account_authorization_details::GetAccountAuthorizationDetailsOutput::builder()
+                    .role_detail_list(role.clone())
+                    .build()
+            },
+        );
+        let list_profiles_rule =
+            mock!(aws_sdk_iam::Client::list_instance_profiles).then_output(|| {
+                aws_sdk_iam::operation::list_instance_profiles::ListInstanceProfilesOutput::builder(
+                )
+                .set_instance_profiles(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListInstanceProfilesOutput")
+            });
+        mock_client!(
+            aws_sdk_iam,
+            RuleMode::Sequential,
+            &[&rule, &list_profiles_rule]
+        )
+    }
+
     fn empty_auth_details_client() -> aws_sdk_iam::Client {
         let rule = mock!(aws_sdk_iam::Client::get_account_authorization_details)
             .then_output(|| aws_sdk_iam::operation::get_account_authorization_details::GetAccountAuthorizationDetailsOutput::builder().build());
@@ -969,6 +1038,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory: Box::new(RealStsClientFactory),
+            concurrency: 4,
         }
     }
 
@@ -1012,6 +1082,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory,
+            concurrency: 4,
         }
     }
 
@@ -1035,6 +1106,7 @@ mod tests {
             region: Region::new("us-east-1"),
             client_factory,
             sts_client_factory: Box::new(RealStsClientFactory),
+            concurrency: 4,
         }
     }
 
@@ -2003,6 +2075,88 @@ mod tests {
         assert!(
             matches!(&result.warnings[0], CollectorWarning::PartialData(msg) if msg.contains("222222222222"))
         );
+    }
+
+    #[tokio::test]
+    async fn collect_with_concurrency_sorts_results_by_account_id() {
+        // Arrange: accounts enumerated out of ascending order — collection concurrency means
+        // completion order can't be trusted, so output must be sorted by account id regardless.
+        let list_roots_rule =
+            mock!(aws_sdk_organizations::Client::list_roots).then_output(root_output);
+        let root_ous_rule =
+            mock!(aws_sdk_organizations::Client::list_organizational_units_for_parent)
+                .then_output(|| ou_output(vec![]));
+        let root_accounts_rule = mock!(aws_sdk_organizations::Client::list_accounts_for_parent)
+            .then_output(|| {
+                accounts_output(vec![
+                    ("333333333333", "c"),
+                    ("111111111111", "a"),
+                    ("222222222222", "b"),
+                ])
+            });
+        let orgs_client = mock_client!(
+            aws_sdk_organizations,
+            RuleMode::MatchAny,
+            &[&list_roots_rule, &root_ous_rule, &root_accounts_rule]
+        );
+
+        let assume_rule =
+            mock!(aws_sdk_sts::Client::assume_role).then_output(|| assume_role_output("AKIATEST"));
+        let sts_client = mock_client!(aws_sdk_sts, RuleMode::MatchAny, &[&assume_rule]);
+
+        let mut clients = HashMap::new();
+        clients.insert(
+            "111111111111".to_string(),
+            auth_details_client_with_role("arn:aws:iam::111111111111:role/marker-role"),
+        );
+        clients.insert(
+            "222222222222".to_string(),
+            auth_details_client_with_role("arn:aws:iam::222222222222:role/marker-role"),
+        );
+        clients.insert(
+            "333333333333".to_string(),
+            auth_details_client_with_role("arn:aws:iam::333333333333:role/marker-role"),
+        );
+
+        let collector = org_collector_with(
+            orgs_client,
+            sts_client,
+            vec![],
+            Box::new(TestIamClientFactory {
+                clients: Mutex::new(clients),
+            }),
+        );
+        assert_eq!(collector.concurrency, 4);
+
+        // Act
+        let result = collector.collect().await.expect("org collection succeeds");
+
+        // Assert
+        assert_eq!(result.accounts.len(), 3);
+        let arns: Vec<&str> = result
+            .accounts
+            .iter()
+            .map(|d| d.roles[0].arn.as_str())
+            .collect();
+        assert_eq!(
+            arns,
+            vec![
+                "arn:aws:iam::111111111111:role/marker-role",
+                "arn:aws:iam::222222222222:role/marker-role",
+                "arn:aws:iam::333333333333:role/marker-role",
+            ]
+        );
+    }
+
+    #[test]
+    fn clamp_concurrency_rejects_zero_and_caps_at_sixteen() {
+        // Arrange/Act/Assert: 0 is the dangerous input — buffer_unordered(0) never polls, so an
+        // unclamped 0 hangs collect() forever with no error and no log line.
+        assert_eq!(clamp_concurrency(0), 1);
+        assert_eq!(clamp_concurrency(1), 1);
+        assert_eq!(clamp_concurrency(4), 4);
+        assert_eq!(clamp_concurrency(16), 16);
+        assert_eq!(clamp_concurrency(100), 16);
     }
 
     #[tokio::test]

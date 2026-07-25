@@ -7,9 +7,12 @@ edition = "2021"
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 reqwest      = { workspace = true }
-tokio        = { workspace = true }
+# `fs` is used directly by the disk cache; without it this crate only builds as part of the
+# workspace, where another member happens to enable the feature.
+tokio        = { workspace = true, features = ["fs"] }
 thiserror    = { workspace = true }
 clap         = { workspace = true }
+uuid         = { version = "^1.23.3", features = ["v4"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

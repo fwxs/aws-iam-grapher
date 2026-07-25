@@ -76,13 +76,19 @@ impl ActionCache {
 
     /// Atomically persists the cache to disk.
     ///
-    /// Writes to a `.tmp` file then renames so a crash during write leaves the
-    /// previous cache file intact.  Call once at the end of a collection run.
+    /// Writes to a uniquely named `.tmp` file then renames so a crash during write leaves the
+    /// previous cache file intact.  The tmp name carries a fresh UUID because `collect org`
+    /// flushes concurrently from several accounts at once — a shared tmp path would let those
+    /// writes interleave and publish corrupt JSON.  Concurrent flushes still race on the
+    /// rename, so the last one wins and the others' additions are lost; that only costs cache
+    /// misses on the next run.  Call once at the end of a collection run.
     pub async fn flush(&self) -> Result<(), ExpanderError> {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let json = serde_json::to_string_pretty(&self.raw)?;
         tokio::fs::write(&tmp, &json).await?;
         tokio::fs::rename(&tmp, &self.path).await?;
@@ -127,4 +133,62 @@ fn default_cache_path() -> Result<PathBuf, ExpanderError> {
         .join(".cache")
         .join("aws-iam-expansion")
         .join("actions.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_with(path: PathBuf, service: &str, action_count: usize) -> ActionCache {
+        let actions: Vec<String> = (0..action_count)
+            .map(|index| format!("{service}Action{index:06}"))
+            .collect();
+        let raw = RawCache {
+            actions: HashMap::from([(service.to_string(), actions)]),
+        };
+        let tries = build_tries(&raw.actions);
+        ActionCache {
+            path,
+            raw,
+            tries,
+            fetched_all: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_concurrent_writers_leaves_parseable_cache_file() {
+        // Arrange: three caches sharing one path, as `collect org` produces when several
+        // accounts finish expansion at once. The payloads are large enough that a shared tmp
+        // path would interleave mid-write rather than landing in one atomic block.
+        let directory = std::env::temp_dir().join(format!("iam-expander-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("actions.json");
+        let caches = [
+            cache_with(path.clone(), "alpha", 20_000),
+            cache_with(path.clone(), "beta", 20_000),
+            cache_with(path.clone(), "gamma", 20_000),
+        ];
+
+        // Act
+        let (first, second, third) =
+            tokio::join!(caches[0].flush(), caches[1].flush(), caches[2].flush());
+
+        // Assert: every flush succeeded and the published file is intact JSON holding exactly
+        // one writer's payload — never a mix of two.
+        assert!(first.is_ok() && second.is_ok() && third.is_ok());
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .expect("cache file exists after flush");
+        let parsed: RawCache = serde_json::from_str(&text).expect("published cache is valid JSON");
+        assert_eq!(parsed.actions.len(), 1);
+
+        let leftovers = std::fs::read_dir(&directory)
+            .expect("cache directory exists")
+            .count();
+        assert_eq!(
+            leftovers, 1,
+            "tmp files should be renamed away, not left behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }

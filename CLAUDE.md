@@ -43,12 +43,14 @@ iam-grapher  (binary, uses all four)
 
 **iam-expander** — Expands wildcard IAM action strings (`s3:*`, `iam:*Group`) to concrete action lists via awsiamactions.io. Results are cached in `~/.cache/iam-expander/`. Falls back gracefully on network errors. Supports trailing wildcards via a trie and interior/suffix wildcards via glob matching (`glob_match`).
 
-**iam-collector** — Three collection modes:
+**iam-collector** — Three single-account collection modes:
 - `LiveCollector` — calls AWS SDK `GetAccountAuthorizationDetails` and `ListInstanceProfiles`
 - `OfflineCollector` / `OfflineCollectorBuilder` — parses JSON exports from those same CLI commands
 - `HybridCollector` — tries live, prompts for a file on 403
 
 All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before returning so wildcard expansion is mode-symmetric. Returns `CollectedData` which carries `account_id: Option<String>` derived from entity ARNs (skipping ARNs where the account segment is the literal `"aws"`, which are AWS-managed policies).
+
+`src/org.rs` drives org-wide collection (`collect org`): walks the AWS Organizations OU tree from a management-account profile, assumes `--assume-role-name` into each member account (from `--jump-from-profile` by default, or a per-OU `--ou-profile-override`/`--ou-role-override`), and runs a `LiveCollector` per account. All accounts in a run share one `org_collection_run_id` and carry their OU ancestry. Two identities are kept deliberately separate: the management profile only calls Organizations APIs, never assumes roles; the jump-from profile (or override) only calls `sts:AssumeRole`, never IAM APIs directly — reusing an already-assumed management identity for a second hop is rejected by most jump-role trust policies. Override matching (OU id or display name, innermost-wins on nested overrides, fatal on an unmatched override key) is detailed in `docs/limitations.md`.
 
 **iam-graph** — Two concerns:
 
@@ -66,7 +68,9 @@ All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before re
 - `diff_permissions(snap_a, snap_b)` — permission delta between snapshots
 - `list_snapshots(account_id)` — returns `SnapshotRecord` including `is_partial` and `partial_reasons`
 
-**iam-grapher** — CLI binary. Two subcommands: `collect` and `query`. Account ID resolution order for `collect`: explicit `--account-id` flag → derived from entity ARNs → fatal error (never silently uses a fallback).
+**iam-grapher** — CLI binary. Subcommands: `collect` (single account), `collect org` (org-wide, see `iam-collector::org` above), and `query`. Account ID resolution order for `collect`: explicit `--account-id` flag → derived from entity ARNs → fatal error (never silently uses a fallback). Both `collect` and `collect org` accept `--output-file <path>` to also write their summary as JSON. AWS API calls are logged via `tracing` at info/debug (`RUST_LOG=iam_collector=debug` for per-page pagination detail).
+
+`query` resolves `--account-id` automatically when omitted: if the graph has exactly one account it's used, otherwise the query runs once per distinct account found (each scoped to its own `(account_id, snapshot_id)`, results never merged). `--snapshot-id` cannot be combined with this multi-account fan-out — pass `--account-id` to target one account when disambiguation is needed. `list-accounts` is the cross-account discovery command and never takes `--account-id`.
 
 ## Neo4j Graph Model
 
