@@ -1,97 +1,74 @@
 use crate::errors::CollectorError;
+use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_sdk_iam::config::ProvideCredentials;
 use tracing::info;
 
-/// Where resolved AWS credentials for a single-account collection run came from — logged
-/// (never with key material) so a wrong-account run is diagnosable after the fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CredentialSource {
-    Profile,
-    Environment,
-    DefaultChain,
-}
-
-impl CredentialSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            CredentialSource::Profile => "profile",
-            CredentialSource::Environment => "environment",
-            CredentialSource::DefaultChain => "default-chain",
-        }
-    }
-}
-
-/// Outcome of eagerly resolving a config's credentials, distinguishing "no provider
-/// configured" (e.g. an unknown `--profile`) from "provider configured but resolution failed"
-/// (e.g. an expired SSO session) so callers can compose a targeted message.
-pub(crate) enum CredentialResolutionFailure {
-    NotFound,
-    ResolveFailed(String),
+/// Binds `loader` to `name` both for region/config resolution (`.profile_name`) and for
+/// credential resolution (an explicit [`ProfileFileCredentialsProvider`] scoped to that
+/// profile). Binding only `.profile_name` is not enough: it tells the profile *provider*
+/// which section to read, but does not reorder `aws-config`'s fixed default chain (env vars
+/// → profile file → web identity → ECS → IMDS) — without the explicit provider, a named
+/// profile would silently lose to `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the
+/// environment, or fall through to a container/IMDS role if the profile doesn't exist.
+pub(crate) fn bind_profile(
+    loader: aws_config::ConfigLoader,
+    name: &str,
+) -> aws_config::ConfigLoader {
+    loader.profile_name(name).credentials_provider(
+        ProfileFileCredentialsProvider::builder()
+            .profile_name(name)
+            .build(),
+    )
 }
 
 /// Eagerly resolves `config`'s credentials once. Shared by single-account ([`resolve_config`])
 /// and org (`OrgCollector::resolve_override_profile_config`) credential validation so both fail
 /// fast, before any IAM/STS call, instead of surfacing an opaque SDK error mid-collection.
-pub(crate) async fn eager_resolve(
-    config: &aws_config::SdkConfig,
-) -> Result<(), CredentialResolutionFailure> {
-    let provider = config
-        .credentials_provider()
-        .ok_or(CredentialResolutionFailure::NotFound)?;
+pub(crate) async fn eager_resolve(config: &aws_config::SdkConfig) -> Result<(), String> {
+    let provider = config.credentials_provider().expect(
+        "SdkConfig from aws_config::defaults(..) or bind_profile(..) always sets a credentials provider",
+    );
     provider
         .provide_credentials()
         .await
-        .map_err(|e| CredentialResolutionFailure::ResolveFailed(e.to_string()))?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Builds the `SdkConfig` for single-account (`live`/`hybrid`) collection and eagerly
 /// validates its credentials.
 ///
-/// Precedence: `profile`, if given, wins outright. Otherwise, if `AWS_ACCESS_KEY_ID` and
-/// `AWS_SECRET_ACCESS_KEY` are both set, the environment is used (the default chain's own first
-/// rung — this just makes that fact explicit and logged). Otherwise the standard AWS credential
-/// chain (`AWS_PROFILE` / the `[default]` profile / a container or IMDS role) applies unchanged.
+/// Precedence: `profile`, if given, wins outright via [`bind_profile`]. Otherwise the standard
+/// AWS credential chain applies unchanged (env vars / `AWS_PROFILE` / the `[default]` profile /
+/// a container or IMDS role).
 pub(crate) async fn resolve_config(
     profile: Option<&str>,
 ) -> Result<aws_config::SdkConfig, CollectorError> {
     let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-    let source = if let Some(name) = profile {
-        loader = loader.profile_name(name);
-        CredentialSource::Profile
-    } else if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
-        && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
-    {
-        CredentialSource::Environment
-    } else {
-        CredentialSource::DefaultChain
-    };
+    if let Some(name) = profile {
+        loader = bind_profile(loader, name);
+    }
 
     let config = loader.load().await;
-    eager_resolve(&config).await.map_err(|failure| {
-        let detail = match failure {
-            CredentialResolutionFailure::NotFound => match profile {
-                Some(name) => format!(
-                    "profile `{name}` was not found in the local AWS config/credentials files"
-                ),
-                None => "no AWS credential provider could be resolved".to_string(),
-            },
-            CredentialResolutionFailure::ResolveFailed(e) => match profile {
-                Some(name) => format!("profile `{name}` credentials could not be resolved: {e}"),
-                None => format!("AWS credentials could not be resolved: {e}"),
-            },
-        };
-        CollectorError::InvalidProfile(detail)
+    eager_resolve(&config).await.map_err(|e| match profile {
+        Some(name) => CollectorError::InvalidProfile(format!(
+            "profile `{name}` credentials could not be resolved: {e}"
+        )),
+        None => CollectorError::CredentialsUnavailable(format!(
+            "AWS credentials could not be resolved: {e}"
+        )),
     })?;
 
+    let source = if profile.is_some() {
+        "profile"
+    } else {
+        "default-chain"
+    };
     match profile {
         Some(name) => {
-            info!(credential_source = source.as_str(), profile = %name, "resolved AWS credentials")
+            info!(credential_source = source, profile = %name, "resolved AWS credentials")
         }
-        None => info!(
-            credential_source = source.as_str(),
-            "resolved AWS credentials"
-        ),
+        None => info!(credential_source = source, "resolved AWS credentials"),
     }
 
     Ok(config)
@@ -100,12 +77,13 @@ pub(crate) async fn resolve_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::AWS_ENV_LOCK;
+    use crate::test_support::{EnvGuard, AWS_ENV_LOCK};
     use std::io::Write;
 
     #[tokio::test]
     async fn resolve_config_profile_given_uses_named_profile() {
         let _guard = AWS_ENV_LOCK.lock().await;
+        let _env = EnvGuard;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let creds_path = dir.path().join("credentials");
@@ -118,17 +96,9 @@ mod tests {
         .expect("write credentials file");
 
         std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
-        std::env::remove_var("AWS_CONFIG_FILE");
         std::env::set_var("AWS_PROFILE", "default");
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        std::env::remove_var("AWS_SESSION_TOKEN");
 
         let config = resolve_config(Some("work")).await.expect("resolve config");
-
-        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
-        std::env::remove_var("AWS_PROFILE");
-
         let creds = config
             .credentials_provider()
             .expect("has credentials provider")
@@ -142,68 +112,45 @@ mod tests {
         );
     }
 
+    /// Regression test: `.profile_name()` alone does not reorder `aws-config`'s fixed default
+    /// chain (env vars are tried before the profile file), so `--profile` would silently lose
+    /// to exported `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` without the explicit
+    /// `ProfileFileCredentialsProvider` binding in [`bind_profile`].
     #[tokio::test]
-    async fn resolve_config_env_vars_given_are_used_when_no_profile() {
+    async fn resolve_config_profile_wins_over_env_vars() {
         let _guard = AWS_ENV_LOCK.lock().await;
-
-        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
-        std::env::remove_var("AWS_CONFIG_FILE");
-        std::env::remove_var("AWS_PROFILE");
-        std::env::set_var("AWS_ACCESS_KEY_ID", "ENV_KEY");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "env-secret");
-        std::env::remove_var("AWS_SESSION_TOKEN");
-
-        let config = resolve_config(None).await.expect("resolve config");
-        // The environment provider re-reads its vars on every call rather than caching the
-        // first resolution, so they must still be set for this second lookup too.
-        let creds = config
-            .credentials_provider()
-            .expect("has credentials provider")
-            .provide_credentials()
-            .await
-            .expect("resolve credentials");
-
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-
-        assert_eq!(creds.access_key_id(), "ENV_KEY");
-    }
-
-    #[tokio::test]
-    async fn resolve_config_neither_given_falls_back_to_default_chain() {
-        let _guard = AWS_ENV_LOCK.lock().await;
+        let _env = EnvGuard;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let creds_path = dir.path().join("credentials");
         std::fs::write(
             &creds_path,
-            "[default]\naws_access_key_id = DEFAULT_KEY\naws_secret_access_key = default-secret\n",
+            "[work]\naws_access_key_id = WORK_KEY\naws_secret_access_key = work-secret\n",
         )
         .expect("write credentials file");
 
         std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
-        std::env::remove_var("AWS_CONFIG_FILE");
-        std::env::remove_var("AWS_PROFILE");
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        std::env::remove_var("AWS_SESSION_TOKEN");
+        std::env::set_var("AWS_ACCESS_KEY_ID", "ENV_KEY");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "env-secret");
 
-        let config = resolve_config(None).await.expect("resolve config");
-
-        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
-
+        let config = resolve_config(Some("work")).await.expect("resolve config");
         let creds = config
             .credentials_provider()
             .expect("has credentials provider")
             .provide_credentials()
             .await
             .expect("resolve credentials");
-        assert_eq!(creds.access_key_id(), "DEFAULT_KEY");
+        assert_eq!(
+            creds.access_key_id(),
+            "WORK_KEY",
+            "--profile must win over AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY in the environment"
+        );
     }
 
     #[tokio::test]
     async fn resolve_config_invalid_profile_fails_fast_naming_profile() {
         let _guard = AWS_ENV_LOCK.lock().await;
+        let _env = EnvGuard;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let creds_path = dir.path().join("credentials");
@@ -214,17 +161,10 @@ mod tests {
         .expect("write credentials file");
 
         std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
-        std::env::remove_var("AWS_CONFIG_FILE");
-        std::env::remove_var("AWS_PROFILE");
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        std::env::remove_var("AWS_SESSION_TOKEN");
 
         let err = resolve_config(Some("does-not-exist"))
             .await
             .expect_err("unknown profile must fail eagerly");
-
-        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
 
         match err {
             CollectorError::InvalidProfile(msg) => assert!(

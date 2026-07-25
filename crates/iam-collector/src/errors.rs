@@ -27,6 +27,9 @@ pub enum CollectorError {
 
     #[error("invalid --profile: {0}")]
     InvalidProfile(String),
+
+    #[error("AWS credentials unavailable: {0}")]
+    CredentialsUnavailable(String),
 }
 
 /// Non-fatal warnings produced during collection.
