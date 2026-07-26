@@ -3,7 +3,7 @@ use crate::live::LiveCollector;
 use crate::traits::CollectedData;
 use crate::traits::IamDataSource;
 use crate::util::map_sdk_error;
-use aws_sdk_iam::config::{Credentials, ProvideCredentials, Region};
+use aws_sdk_iam::config::{Credentials, Region};
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::future::Future;
@@ -323,20 +323,18 @@ impl OrgCollector {
         profile: &str,
         region: &Region,
     ) -> Result<aws_config::SdkConfig, CollectorError> {
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .profile_name(profile)
-            .load()
-            .await;
-        let provider = config.credentials_provider().ok_or_else(|| {
-            CollectorError::InvalidOuProfileOverride(format!(
-                "profile `{profile}` was not found in the local AWS config/credentials files"
-            ))
-        })?;
-        provider.provide_credentials().await.map_err(|e| {
-            CollectorError::InvalidOuProfileOverride(format!(
-                "profile `{profile}` credentials could not be resolved: {e}"
-            ))
-        })?;
+        let loader = crate::credentials::bind_profile(
+            aws_config::defaults(aws_config::BehaviorVersion::latest()),
+            profile,
+        );
+        let config = loader.load().await;
+        crate::credentials::eager_resolve(&config)
+            .await
+            .map_err(|e| {
+                CollectorError::InvalidOuProfileOverride(format!(
+                    "profile `{profile}` credentials could not be resolved: {e}"
+                ))
+            })?;
         Ok(config.into_builder().region(region.clone()).build())
     }
 
@@ -1171,11 +1169,7 @@ mod tests {
             .build()
     }
 
-    /// Serializes tests that mutate process-wide AWS credential env vars. `cargo test` runs
-    /// unit tests within one binary concurrently by default, and no other test in this file
-    /// (or this crate) touches these vars, but a mutex keeps the guarantee explicit rather
-    /// than implicit. Async-aware because the critical section spans `.await` points.
-    static AWS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use crate::test_support::AWS_ENV_LOCK;
 
     /// Regression test for the double-hop `AssumeRole` bug: `resolve_configs` (used by
     /// `from_profile`) must resolve org discovery credentials from `management_profile` and
