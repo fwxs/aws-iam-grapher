@@ -92,6 +92,50 @@ pub async fn snapshot_account_id(
     }
 }
 
+const SNAPSHOT_BY_ID_QUERY: &str = include_str!("../../queries/snapshot_by_id.cypher");
+
+/// Look up the full snapshot record for an explicit snapshot id, or `None` if it doesn't
+/// exist. Unlike `snapshot_account_id`, this returns `is_partial`/`partial_reasons` too, so
+/// scope resolution needs exactly one query to both derive the account and know partiality.
+pub async fn snapshot_record(
+    graph: &Graph,
+    snapshot_id: &str,
+) -> Result<Option<SnapshotRecord>, GraphError> {
+    let mut stream = graph
+        .execute(neo4rs::query(SNAPSHOT_BY_ID_QUERY).param("snapshot_id", snapshot_id))
+        .await?;
+
+    if let Some(row) = stream.next().await? {
+        let id: String = row
+            .get("id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let account_id: String = row
+            .get("account_id")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let collected_at: String = row
+            .get("collected_at")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let is_partial: bool = row
+            .get("is_partial")
+            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
+        let org_collection_run_id: Option<String> = row
+            .get::<String>("org_collection_run_id")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Ok(Some(SnapshotRecord {
+            id,
+            account_id,
+            collected_at,
+            is_partial,
+            partial_reasons,
+            org_collection_run_id,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 const LATEST_ORG_RUN_QUERY: &str = "
     MATCH (s:Snapshot)
     WHERE s.org_collection_run_id IS NOT NULL AND s.org_collection_run_id <> ''
