@@ -1,7 +1,7 @@
 use crate::errors::GraphError;
 use crate::queries::context::{OrgQueryContext, QueryContext};
 use crate::queries::snapshots::{
-    latest_org_run_id, list_account_ids, list_snapshots, snapshot_account_id,
+    latest_org_run_id, list_account_ids, list_snapshots, snapshot_record, SnapshotRecord,
 };
 use neo4rs::Graph;
 
@@ -43,41 +43,52 @@ impl ScopeSelector {
     }
 }
 
-/// Resolve a selector into one or more concrete [`QueryContext`]s.
-pub async fn resolve_contexts(
+/// A resolved query scope: the `QueryContext` to filter on, plus the full snapshot record
+/// it was pinned to (carries `is_partial`/`partial_reasons` so callers never need a second
+/// `list_snapshots` round trip just to render a partial-snapshot warning).
+#[derive(Debug, Clone)]
+pub struct ResolvedScope {
+    pub context: QueryContext,
+    pub snapshot: SnapshotRecord,
+}
+
+/// Resolve a selector into one or more concrete [`ResolvedScope`]s.
+pub async fn resolve_scopes(
     graph: &Graph,
     selector: ScopeSelector,
-) -> Result<Vec<QueryContext>, GraphError> {
+) -> Result<Vec<ResolvedScope>, GraphError> {
     match selector {
         ScopeSelector::Snapshot {
             snapshot_id,
             expected_account,
         } => {
-            let actual = snapshot_account_id(graph, &snapshot_id)
+            let snapshot = snapshot_record(graph, &snapshot_id)
                 .await?
                 .ok_or_else(|| GraphError::SnapshotNotFound(snapshot_id.clone()))?;
 
             if let Some(expected) = expected_account {
-                if expected != actual {
+                if expected != snapshot.account_id {
                     return Err(GraphError::AccountMismatch {
                         snapshot_id,
                         expected,
-                        actual,
+                        actual: snapshot.account_id,
                     });
                 }
             }
 
-            Ok(vec![QueryContext::new(snapshot_id, actual)])
+            let context = QueryContext::new(snapshot.id.clone(), snapshot.account_id.clone());
+            Ok(vec![ResolvedScope { context, snapshot }])
         }
 
         ScopeSelector::Account { account_id } => {
-            let latest = list_snapshots(graph, &account_id)
+            let snapshot = list_snapshots(graph, &account_id)
                 .await?
                 .into_iter()
                 .next()
                 .ok_or_else(|| GraphError::NoSnapshotsForAccount(account_id.clone()))?;
 
-            Ok(vec![QueryContext::new(latest.id, account_id)])
+            let context = QueryContext::new(snapshot.id.clone(), account_id);
+            Ok(vec![ResolvedScope { context, snapshot }])
         }
 
         ScopeSelector::AllAccounts => {
@@ -86,19 +97,20 @@ pub async fn resolve_contexts(
                 return Err(GraphError::NoSnapshots);
             }
 
-            let mut contexts = Vec::with_capacity(accounts.len());
+            let mut scopes = Vec::with_capacity(accounts.len());
             for account_id in accounts {
                 // list_account_ids only returns accounts with >=1 snapshot, so this
                 // is unreachable today; kept as a defensive guard against that
                 // invariant changing rather than an unwrap.
-                let latest = list_snapshots(graph, &account_id)
+                let snapshot = list_snapshots(graph, &account_id)
                     .await?
                     .into_iter()
                     .next()
                     .ok_or_else(|| GraphError::NoSnapshotsForAccount(account_id.clone()))?;
-                contexts.push(QueryContext::new(latest.id, account_id));
+                let context = QueryContext::new(snapshot.id.clone(), account_id);
+                scopes.push(ResolvedScope { context, snapshot });
             }
-            Ok(contexts)
+            Ok(scopes)
         }
     }
 }

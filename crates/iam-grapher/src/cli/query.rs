@@ -4,9 +4,9 @@ use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
-    privilege_escalation_paths, resolve_contexts, resolve_org_context, snapshot_account_id,
-    who_can, EntityRef, EscalationPath, GraphClient, GraphError, PermissionRow, ScopeSelector,
-    DEFAULT_MAX_HOPS,
+    privilege_escalation_paths, resolve_org_context, resolve_scopes, snapshot_account_id, who_can,
+    EntityRef, EscalationPath, GraphClient, GraphError, PermissionRow, ResolvedScope,
+    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -164,22 +164,20 @@ async fn resolve_all_account_ids(client: &GraphClient) -> anyhow::Result<Vec<Str
     Ok(accounts)
 }
 
-/// Print a partial-snapshot warning if the given snapshot is marked partial.
-async fn warn_if_partial(client: &GraphClient, account_id: &str, snapshot_id: &str) {
-    if let Ok(snaps) = list_snapshots(client.inner(), account_id).await {
-        if let Some(snap) = snaps.iter().find(|s| s.id == snapshot_id) {
-            if snap.is_partial {
-                let detail = if snap.partial_reasons.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", snap.partial_reasons.join(", "))
-                };
-                eprintln!(
-                    "[!] snapshot is PARTIAL{} — results may understate access",
-                    detail
-                );
-            }
-        }
+/// Print a partial-snapshot warning if the given (already-resolved) snapshot is marked
+/// partial. Takes the record straight from `ResolvedScope` — no DB access here, since
+/// `resolve_scopes` already fetched `is_partial`/`partial_reasons` while resolving the scope.
+fn print_partial_warning(snapshot: &SnapshotRecord) {
+    if snapshot.is_partial {
+        let detail = if snapshot.partial_reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", snapshot.partial_reasons.join(", "))
+        };
+        eprintln!(
+            "[!] snapshot is PARTIAL{} — results may understate access",
+            detail
+        );
     }
 }
 
@@ -421,10 +419,13 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                     None => ScopeSelector::account(account_id),
                 };
-                let mut contexts = resolve_contexts(client.inner(), selector).await?;
-                let ctx = contexts.remove(0);
+                let mut scopes = resolve_scopes(client.inner(), selector).await?;
+                let ResolvedScope {
+                    context: ctx,
+                    snapshot,
+                } = scopes.remove(0);
                 let snapshot_id = ctx.snapshot_id.clone();
-                warn_if_partial(&client, account_id, &snapshot_id).await;
+                print_partial_warning(&snapshot);
 
                 match cmd {
                     QueryCommand::WhoCan {
@@ -571,7 +572,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                     None => ScopeSelector::all_accounts(),
                 };
-                let contexts = resolve_contexts(client.inner(), selector).await?;
+                let scopes = resolve_scopes(client.inner(), selector).await?;
 
                 match cmd {
                     QueryCommand::WhoCan {
@@ -582,9 +583,10 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                         principal_tags,
                     } => {
                         let condition_ctx = parse_condition_context(region, *mfa, principal_tags)?;
-                        let mut groups = Vec::with_capacity(contexts.len());
-                        for ctx in &contexts {
-                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                        let mut groups = Vec::with_capacity(scopes.len());
+                        for scope in &scopes {
+                            print_partial_warning(&scope.snapshot);
+                            let ctx = &scope.context;
                             let results = who_can(
                                 client.inner(),
                                 ctx,
@@ -627,9 +629,10 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
 
                     QueryCommand::EntityPerms { arn } => {
-                        let mut groups = Vec::with_capacity(contexts.len());
-                        for ctx in &contexts {
-                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                        let mut groups = Vec::with_capacity(scopes.len());
+                        for scope in &scopes {
+                            print_partial_warning(&scope.snapshot);
+                            let ctx = &scope.context;
                             let uid = format!("{}|{}", ctx.snapshot_id, arn);
                             let perms = entity_permissions(client.inner(), ctx, &uid)
                                 .await
@@ -667,9 +670,10 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
 
                     QueryCommand::InstanceProfilesWith { action } => {
-                        let mut groups = Vec::with_capacity(contexts.len());
-                        for ctx in &contexts {
-                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                        let mut groups = Vec::with_capacity(scopes.len());
+                        for scope in &scopes {
+                            print_partial_warning(&scope.snapshot);
+                            let ctx = &scope.context;
                             let results =
                                 instance_profiles_with_action(client.inner(), ctx, action)
                                     .await
@@ -708,9 +712,10 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
                     QueryCommand::PrivilegeEscalation { max_hops } => {
                         let max_hops = *max_hops;
-                        let mut groups = Vec::with_capacity(contexts.len());
-                        for ctx in &contexts {
-                            warn_if_partial(&client, &ctx.account_id, &ctx.snapshot_id).await;
+                        let mut groups = Vec::with_capacity(scopes.len());
+                        for scope in &scopes {
+                            print_partial_warning(&scope.snapshot);
+                            let ctx = &scope.context;
                             let paths = privilege_escalation_paths(client.inner(), ctx, max_hops)
                                 .await
                                 .context("privilege-escalation query failed")?;
