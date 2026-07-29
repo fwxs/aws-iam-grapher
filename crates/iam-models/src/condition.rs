@@ -112,25 +112,62 @@ fn string_matches(op: &str, pattern: &str, actual: &str) -> bool {
     }
 }
 
-// ponytail: minimal `*`/`?` glob matcher, mirrors iam-expander's glob_match. Not shared
-// across the crate boundary because iam-models has zero dependencies by design.
+// Minimal `*`/`?` glob matcher. Structurally mirrors `iam_expander::glob_match`'s iterative
+// two-pointer algorithm — not shared across the crate boundary because iam-models has zero
+// dependencies by design (iam-expander and iam-models are dependency-graph siblings). Unlike
+// the expander's version, this is deliberately case-sensitive: condition values matched here
+// are region names, ARN segments, and tag values, which are case-sensitive in real AWS.
+//
+// Iterative rather than recursive: naive recursive backtracking on patterns like `"a*a*a*...b"`
+// is exponential, and these patterns come directly from collected IAM policy documents (a
+// `StringLike` condition value), so an adversarial or accidental pattern here would stall a
+// `who_can` query. See the equivalent fix and its rationale in `iam_expander::glob_match`.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_match_inner(&p, &t)
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // Last '*' seen: (pattern position just after it, text position to resume matching from).
+    let mut star: Option<(usize, usize)> = None;
+
+    loop {
+        let p_char = char_at(pattern, pi);
+        let t_char = char_at(text, ti);
+
+        match (p_char, t_char) {
+            (Some(('*', p_next)), _) => {
+                star = Some((p_next, ti));
+                pi = p_next;
+            }
+            (Some((pc, p_next)), Some((tc, t_next))) if pc == '?' || pc == tc => {
+                pi = p_next;
+                ti = t_next;
+            }
+            _ => {
+                if p_char.is_none() && t_char.is_none() {
+                    return true;
+                }
+                let Some((star_pi, star_ti)) = star else {
+                    return false;
+                };
+                let Some((_, t_next)) = char_at(text, star_ti) else {
+                    return false;
+                };
+                star = Some((star_pi, t_next));
+                pi = star_pi;
+                ti = t_next;
+            }
+        }
+    }
 }
 
-fn glob_match_inner(p: &[char], t: &[char]) -> bool {
-    match (p.first(), t.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some('*'), _) => {
-            glob_match_inner(&p[1..], t) || (!t.is_empty() && glob_match_inner(p, &t[1..]))
-        }
-        (Some('?'), Some(_)) => glob_match_inner(&p[1..], &t[1..]),
-        (Some(pc), Some(tc)) if pc == tc => glob_match_inner(&p[1..], &t[1..]),
-        _ => false,
-    }
+/// Decodes the leading char at byte offset `idx` in `s`, returning it along with the byte
+/// offset of the char that follows. `None` when `idx` is at or past the end of `s`.
+fn char_at(s: &str, idx: usize) -> Option<(char, usize)> {
+    debug_assert!(
+        s.is_char_boundary(idx),
+        "char_at called at non-char-boundary index {idx} in {s:?}"
+    );
+    let c = s[idx..].chars().next()?;
+    Some((c, idx + c.len_utf8()))
 }
 
 #[cfg(test)]
@@ -401,6 +438,89 @@ mod tests {
             ConditionOutcome::Conditional {
                 unevaluated_keys: vec!["s3:prefix".to_string()]
             }
+        );
+    }
+
+    // ── glob_match: iterative rewrite (issue #79 follow-up) ──────────────────
+
+    /// The old naive recursive/backtracking matcher, kept only as a reference implementation
+    /// to prove the new iterative matcher is bit-identical to it. Case-sensitive, matching
+    /// the original (this module never lowercased).
+    fn glob_match_reference(pattern: &str, text: &str) -> bool {
+        fn inner(p: &[char], t: &[char]) -> bool {
+            match (p.first(), t.first()) {
+                (None, None) => true,
+                (None, Some(_)) => false,
+                (Some('*'), _) => inner(&p[1..], t) || (!t.is_empty() && inner(p, &t[1..])),
+                (Some('?'), Some(_)) => inner(&p[1..], &t[1..]),
+                (Some(pc), Some(tc)) if pc == tc => inner(&p[1..], &t[1..]),
+                _ => false,
+            }
+        }
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        inner(&p, &t)
+    }
+
+    /// Generates every string of length `0..=max_len` over `alphabet`.
+    fn generate_corpus(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut cur = vec![String::new()];
+        for _ in 0..max_len {
+            cur = cur
+                .iter()
+                .flat_map(|s| alphabet.iter().map(move |c| format!("{s}{c}")))
+                .collect();
+            all.extend(cur.iter().cloned());
+        }
+        all
+    }
+
+    #[test]
+    fn glob_match_matches_reference_exhaustively() {
+        let patterns = generate_corpus(&['a', 'B', '*', '?'], 4);
+        let texts = generate_corpus(&['a', 'A', 'é'], 3);
+        let mut checked = 0usize;
+        for pattern in &patterns {
+            for text in &texts {
+                assert_eq!(
+                    glob_match(pattern, text),
+                    glob_match_reference(pattern, text),
+                    "mismatch for pattern={pattern:?} text={text:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000, "sanity check on corpus size: {checked}");
+    }
+
+    #[test]
+    fn glob_match_is_case_sensitive() {
+        // Unlike iam-expander's action matcher, this one must NOT fold case.
+        assert!(glob_match("us-*", "us-west-2"));
+        assert!(!glob_match("US-*", "us-west-2"));
+        assert!(!glob_match("us-*", "US-WEST-2"));
+    }
+
+    #[test]
+    fn glob_match_pathological_backtracking_pattern_stays_fast() {
+        // This exact pattern shape reaches glob_match through a collected policy's
+        // `"StringLike": {"aws:RequestedRegion": "a*a*a*...b"}` condition value — the naive
+        // recursive matcher this replaces took ~5s at n=14 on this shape (see PR #126 review).
+        let pattern = "a*".repeat(50) + "b";
+        let text = "a".repeat(200);
+
+        let start = std::time::Instant::now();
+        let result = glob_match(&pattern, &text);
+        let elapsed = start.elapsed();
+
+        assert!(
+            !result,
+            "pattern requires a trailing 'b' the text doesn't have"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "glob_match took {elapsed:?} on a pathological pattern; expected microseconds"
         );
     }
 }
