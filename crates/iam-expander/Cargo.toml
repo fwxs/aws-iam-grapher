@@ -4,6 +4,7 @@ version = "0.4.0"
 edition = "2021"
 
 [dependencies]
+chrono       = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 reqwest      = { workspace = true }
@@ -11,6 +12,7 @@ reqwest      = { workspace = true }
 # workspace, where another member happens to enable the feature.
 tokio        = { workspace = true, features = ["fs"] }
 thiserror    = { workspace = true }
+tracing      = { workspace = true }
 clap         = { workspace = true }
 uuid         = { version = "^1.23.3", features = ["v4"] }
 
