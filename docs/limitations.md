@@ -163,7 +163,7 @@ by `--resource`; their `resource` is only surfaced in the output for callers to 
 themselves. When `--resource` is omitted, behavior is unchanged from before and every result now
 also carries the matched grant's `resource`.
 
-Caveat: `iam_expander::glob_match` lowercases both sides before comparing (it was written for
+Caveat: `iam_expander::glob_match` compares characters case-insensitively (it was written for
 case-insensitive IAM action matching). ARN resource segments (bucket names, object keys) are
 case-sensitive in real AWS, so a queried resource that differs from the grant only by case will
 incorrectly be treated as a match. This is a known limitation of reusing the action-glob matcher
