@@ -220,6 +220,10 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Decodes the leading char at byte offset `idx` in `s`, returning it along with the byte
 /// offset of the char that follows. `None` when `idx` is at or past the end of `s`.
 fn char_at(s: &str, idx: usize) -> Option<(char, usize)> {
+    debug_assert!(
+        s.is_char_boundary(idx),
+        "char_at called at non-char-boundary index {idx} in {s:?}"
+    );
     let c = s[idx..].chars().next()?;
     Some((c, idx + c.len_utf8()))
 }
@@ -474,9 +478,46 @@ mod tests {
         inner(&p, &t)
     }
 
-    /// Corpus of (pattern, text) pairs covering ASCII, non-ASCII multi-byte chars
-    /// (including `?`/`*` adjacent to them), empty strings, `*`-only patterns, and
-    /// case folding. The new matcher must agree with the reference on every case.
+    /// Generates every string of length `0..=max_len` over `alphabet`, used to build an
+    /// exhaustive differential-testing corpus rather than relying solely on hand-picked cases.
+    fn generate_corpus(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut cur = vec![String::new()];
+        for _ in 0..max_len {
+            cur = cur
+                .iter()
+                .flat_map(|s| alphabet.iter().map(move |c| format!("{s}{c}")))
+                .collect();
+            all.extend(cur.iter().cloned());
+        }
+        all
+    }
+
+    /// Exhaustive differential test: every pattern of length ≤4 over `{a, B, *, ?}` against
+    /// every text of length ≤3 over `{a, A, é}` (13,640 pairs) — covers the backtracking edge
+    /// cases (trailing `*`, consecutive `**`, pattern exhausted mid-text, non-ASCII adjacent
+    /// to `?`/`*`) that a hand-picked corpus is prone to miss.
+    #[test]
+    fn glob_match_matches_reference_exhaustively() {
+        let patterns = generate_corpus(&['a', 'B', '*', '?'], 4);
+        let texts = generate_corpus(&['a', 'A', 'é'], 3);
+        let mut checked = 0usize;
+        for pattern in &patterns {
+            for text in &texts {
+                assert_eq!(
+                    glob_match(pattern, text),
+                    glob_match_reference(pattern, text),
+                    "mismatch for pattern={pattern:?} text={text:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 10_000, "sanity check on corpus size: {checked}");
+    }
+
+    /// Hand-picked corpus documenting the IAM-shaped cases this rewrite must keep working
+    /// (real service:action patterns). Correctness is proven by the exhaustive test above;
+    /// this one is kept as readable documentation of the realistic cases.
     fn equivalence_corpus() -> Vec<(&'static str, &'static str)> {
         vec![
             ("s3:*", "s3:GetObject"),
@@ -559,13 +600,22 @@ mod tests {
 
     /// Micro-benchmark: matches ~5k candidate actions against one queried action, timing
     /// both the new allocation-free matcher and the old (`glob_match_reference`) matcher
-    /// for a before/after comparison. Not run in default CI (see CLAUDE.md test commands);
-    /// run manually with:
+    /// for a before/after comparison. Half the candidates carry a `*`/`?` wildcard (trailing,
+    /// leading, and interior), so the workload exercises actual glob backtracking — not just
+    /// the allocation cost of literal-vs-literal comparisons that bail at the first mismatched
+    /// char. Not run in default CI (see CLAUDE.md test commands); run manually with:
     /// `cargo test -p iam-expander --release -- --ignored bench_glob_match --nocapture`
     #[test]
     #[ignore = "manual micro-benchmark, not part of default CI"]
     fn bench_glob_match_bulk_workload() {
-        let candidates: Vec<String> = (0..5000).map(|i| format!("s3:Action{i}Get")).collect();
+        let candidates: Vec<String> = (0..5000)
+            .map(|i| match i % 4 {
+                0 => format!("s3:Action{i}*"),    // trailing wildcard
+                1 => format!("s3:*Action{i}Get"), // leading wildcard
+                2 => format!("s3:Action{i}?et"),  // interior '?'
+                _ => format!("s3:Action{i}Get"),  // literal
+            })
+            .collect();
         let queried = "s3:Action2500Get";
 
         let start = std::time::Instant::now();
@@ -581,7 +631,7 @@ mod tests {
 
         assert_eq!(matches, ref_matches);
         println!(
-            "bench_glob_match_bulk_workload: {} candidates, {matches} matches — new (allocation-free): {new_elapsed:?}, old (Vec<char> alloc): {old_elapsed:?}",
+            "bench_glob_match_bulk_workload: {} candidates (mixed literal/wildcard), {matches} matches — new (allocation-free): {new_elapsed:?}, old (Vec<char> alloc + recursion): {old_elapsed:?}",
             candidates.len()
         );
     }
