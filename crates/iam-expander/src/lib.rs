@@ -171,23 +171,57 @@ async fn expand_one_action(
 ///
 /// `pattern` is the (possibly wildcarded) action string, e.g. a Deny statement's action;
 /// `text` is the concrete action being tested against it.
+///
+/// Allocation-free: walks both strings by decoded `char` (not raw byte, so a multi-byte
+/// `?` match consumes a whole codepoint, not a partial one) and compares case-insensitively
+/// per-char via `char::eq_ignore_ascii_case`, which — like the `str::to_ascii_lowercase` this
+/// replaced — only folds ASCII, leaving other codepoints unchanged. Uses the standard
+/// iterative two-pointer wildcard algorithm rather than naive recursive backtracking, which
+/// is exponential on adversarial patterns like `"a*a*a*...b"`.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
-    let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
-    glob_match_inner(&p, &t)
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // Last '*' seen: (pattern position just after it, text position to resume matching from).
+    let mut star: Option<(usize, usize)> = None;
+
+    loop {
+        let p_char = char_at(pattern, pi);
+        let t_char = char_at(text, ti);
+
+        match (p_char, t_char) {
+            (Some(('*', p_next)), _) => {
+                star = Some((p_next, ti));
+                pi = p_next;
+            }
+            (Some((pc, p_next)), Some((tc, t_next)))
+                if pc == '?' || pc.eq_ignore_ascii_case(&tc) =>
+            {
+                pi = p_next;
+                ti = t_next;
+            }
+            _ => {
+                if p_char.is_none() && t_char.is_none() {
+                    return true;
+                }
+                let Some((star_pi, star_ti)) = star else {
+                    return false;
+                };
+                let Some((_, t_next)) = char_at(text, star_ti) else {
+                    return false;
+                };
+                star = Some((star_pi, t_next));
+                pi = star_pi;
+                ti = t_next;
+            }
+        }
+    }
 }
 
-fn glob_match_inner(p: &[char], t: &[char]) -> bool {
-    match (p.first(), t.first()) {
-        (None, None) => true,
-        (Some('*'), _) => {
-            // * matches zero characters or consumes one text character
-            glob_match_inner(&p[1..], t) || (!t.is_empty() && glob_match_inner(p, &t[1..]))
-        }
-        (Some('?'), Some(_)) => glob_match_inner(&p[1..], &t[1..]),
-        (Some(pc), Some(tc)) if pc == tc => glob_match_inner(&p[1..], &t[1..]),
-        _ => false,
-    }
+/// Decodes the leading char at byte offset `idx` in `s`, returning it along with the byte
+/// offset of the char that follows. `None` when `idx` is at or past the end of `s`.
+fn char_at(s: &str, idx: usize) -> Option<(char, usize)> {
+    let c = s[idx..].chars().next()?;
+    Some((c, idx + c.len_utf8()))
 }
 
 #[cfg(test)]
@@ -419,5 +453,136 @@ mod tests {
         let actions = value["Statement"][0]["Action"].as_array().unwrap();
         // "s3:Get*" → 2 actions; "s3:PutObject" stays as-is → total 3
         assert_eq!(actions.len(), 3);
+    }
+
+    // ── glob_match: allocation-free rewrite (issue #79) ──────────────────────
+
+    /// The old naive recursive/backtracking matcher, kept here only as a reference
+    /// implementation to prove the new iterative matcher is bit-identical to it.
+    fn glob_match_reference(pattern: &str, text: &str) -> bool {
+        fn inner(p: &[char], t: &[char]) -> bool {
+            match (p.first(), t.first()) {
+                (None, None) => true,
+                (Some('*'), _) => inner(&p[1..], t) || (!t.is_empty() && inner(p, &t[1..])),
+                (Some('?'), Some(_)) => inner(&p[1..], &t[1..]),
+                (Some(pc), Some(tc)) if pc == tc => inner(&p[1..], &t[1..]),
+                _ => false,
+            }
+        }
+        let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
+        let t: Vec<char> = text.to_ascii_lowercase().chars().collect();
+        inner(&p, &t)
+    }
+
+    /// Corpus of (pattern, text) pairs covering ASCII, non-ASCII multi-byte chars
+    /// (including `?`/`*` adjacent to them), empty strings, `*`-only patterns, and
+    /// case folding. The new matcher must agree with the reference on every case.
+    fn equivalence_corpus() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("s3:*", "s3:GetObject"),
+            ("s3:Get*", "s3:GetObject"),
+            ("s3:Get*", "s3:PutObject"),
+            ("iam:*Group", "iam:CreateGroup"),
+            ("iam:*Group", "iam:ListGroups"),
+            ("s3:?etObject", "s3:GetObject"),
+            ("s3:?etObject", "s3:PutObject"),
+            ("*", ""),
+            ("*", "anything"),
+            ("", ""),
+            ("", "x"),
+            ("x", ""),
+            ("SVC:ACTION", "svc:action"),
+            ("s3:Café*", "s3:CaféObject"),
+            ("s3:Caf?", "s3:Café"),
+            ("s3:???", "s3:日本語"),
+            ("s3:?", "s3:日"),
+            ("*.txt", "héllo.txt"),
+            ("**", "anything"),
+            ("a*b*c", "aXbYc"),
+            ("a*b*c", "aXbYd"),
+        ]
+    }
+
+    #[test]
+    fn glob_match_matches_reference_implementation_on_corpus() {
+        for (pattern, text) in equivalence_corpus() {
+            assert_eq!(
+                glob_match(pattern, text),
+                glob_match_reference(pattern, text),
+                "mismatch for pattern={pattern:?} text={text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn glob_match_question_mark_consumes_whole_multibyte_char() {
+        // '?' must match one whole Unicode scalar value, not one UTF-8 byte.
+        assert!(glob_match("s3:Caf?", "s3:Café"));
+        assert!(glob_match("s3:???", "s3:日本語"));
+        assert!(!glob_match("s3:??", "s3:日本語")); // wrong char count
+    }
+
+    #[test]
+    fn glob_match_star_only_matches_everything_including_empty() {
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("**", "anything"));
+    }
+
+    #[test]
+    fn glob_match_empty_pattern_only_matches_empty_text() {
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "x"));
+    }
+
+    #[test]
+    fn glob_match_pathological_backtracking_pattern_stays_fast() {
+        // The old naive recursive matcher was exponential on this shape of pattern
+        // (measured ~1.5s at n=15); the iterative two-pointer matcher must stay well
+        // under a second even at a much larger n.
+        let pattern = "a*".repeat(50) + "b"; // no trailing 'b' in text -> forces backtracking
+        let text = "a".repeat(200);
+
+        let start = std::time::Instant::now();
+        let result = glob_match(&pattern, &text);
+        let elapsed = start.elapsed();
+
+        assert!(
+            !result,
+            "pattern requires a trailing 'b' the text doesn't have"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "glob_match took {elapsed:?} on a pathological pattern; expected microseconds"
+        );
+    }
+
+    /// Micro-benchmark: matches ~5k candidate actions against one queried action, timing
+    /// both the new allocation-free matcher and the old (`glob_match_reference`) matcher
+    /// for a before/after comparison. Not run in default CI (see CLAUDE.md test commands);
+    /// run manually with:
+    /// `cargo test -p iam-expander --release -- --ignored bench_glob_match --nocapture`
+    #[test]
+    #[ignore = "manual micro-benchmark, not part of default CI"]
+    fn bench_glob_match_bulk_workload() {
+        let candidates: Vec<String> = (0..5000).map(|i| format!("s3:Action{i}Get")).collect();
+        let queried = "s3:Action2500Get";
+
+        let start = std::time::Instant::now();
+        let matches = candidates.iter().filter(|c| glob_match(c, queried)).count();
+        let new_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let ref_matches = candidates
+            .iter()
+            .filter(|c| glob_match_reference(c, queried))
+            .count();
+        let old_elapsed = start.elapsed();
+
+        assert_eq!(matches, ref_matches);
+        println!(
+            "bench_glob_match_bulk_workload: {} candidates, {matches} matches — new (allocation-free): {new_elapsed:?}, old (Vec<char> alloc): {old_elapsed:?}",
+            candidates.len()
+        );
     }
 }
