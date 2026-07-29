@@ -1979,6 +1979,7 @@ dependencies = [
 name = "iam-expander"
 version = "0.4.0"
 dependencies = [
+ "chrono",
  "clap",
  "pretty_assertions",
  "reqwest",
@@ -1986,6 +1987,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
