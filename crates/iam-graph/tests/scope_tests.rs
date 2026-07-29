@@ -1,6 +1,6 @@
 mod helpers;
 
-use iam_graph::{resolve_contexts, resolve_org_context, GraphError, GraphIngester, ScopeSelector};
+use iam_graph::{resolve_org_context, resolve_scopes, GraphError, GraphIngester, ScopeSelector};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -28,16 +28,18 @@ async fn account_selector_picks_newest_snapshot() {
         .await
         .expect("ingest newer must succeed");
 
-    let contexts = resolve_contexts(
+    let scopes = resolve_scopes(
         ingester_newer.client().inner(),
         ScopeSelector::account(account_id),
     )
     .await
-    .expect("resolve_contexts must succeed");
+    .expect("resolve_scopes must succeed");
 
-    assert_eq!(contexts.len(), 1);
-    assert_eq!(contexts[0].snapshot_id, snap_newer);
-    assert_ne!(contexts[0].snapshot_id, snap_older);
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].context.snapshot_id, snap_newer);
+    assert_ne!(scopes[0].context.snapshot_id, snap_older);
+    assert_eq!(scopes[0].snapshot.id, snap_newer);
+    assert_eq!(scopes[0].snapshot.account_id, account_id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -64,21 +66,23 @@ async fn all_accounts_selector_returns_one_context_per_account_pinned_to_latest(
         .await
         .expect("ingest B must succeed");
 
-    let contexts = resolve_contexts(ingester_b.client().inner(), ScopeSelector::all_accounts())
+    let scopes = resolve_scopes(ingester_b.client().inner(), ScopeSelector::all_accounts())
         .await
-        .expect("resolve_contexts must succeed");
+        .expect("resolve_scopes must succeed");
 
-    let ctx_a = contexts
+    let scope_a = scopes
         .iter()
-        .find(|c| c.account_id == account_a)
+        .find(|s| s.context.account_id == account_a)
         .expect("account A must be present");
-    assert_eq!(ctx_a.snapshot_id, snap_a);
+    assert_eq!(scope_a.context.snapshot_id, snap_a);
+    assert_eq!(scope_a.snapshot.id, snap_a);
 
-    let ctx_b = contexts
+    let scope_b = scopes
         .iter()
-        .find(|c| c.account_id == account_b)
+        .find(|s| s.context.account_id == account_b)
         .expect("account B must be present");
-    assert_eq!(ctx_b.snapshot_id, snap_b);
+    assert_eq!(scope_b.context.snapshot_id, snap_b);
+    assert_eq!(scope_b.snapshot.id, snap_b);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -94,16 +98,50 @@ async fn snapshot_selector_derives_account_and_accepts_matching_expected_account
         .await
         .expect("ingest must succeed");
 
-    let contexts = resolve_contexts(
+    let scopes = resolve_scopes(
         ingester.client().inner(),
         ScopeSelector::snapshot(snapshot_id.clone(), Some(account_id.to_string())),
     )
     .await
-    .expect("resolve_contexts must succeed");
+    .expect("resolve_scopes must succeed");
 
-    assert_eq!(contexts.len(), 1);
-    assert_eq!(contexts[0].snapshot_id, snapshot_id);
-    assert_eq!(contexts[0].account_id, account_id);
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].context.snapshot_id, snapshot_id);
+    assert_eq!(scopes[0].context.account_id, account_id);
+    assert_eq!(scopes[0].snapshot.id, snapshot_id);
+    assert_eq!(scopes[0].snapshot.account_id, account_id);
+    assert!(!scopes[0].snapshot.is_partial);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn snapshot_selector_returns_partial_metadata_in_the_same_call() {
+    let client = helpers::shared_client().await;
+    let account_id = "920000000007";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::data_with_missing_profiles_warning(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    // Regression guard for issue #78: resolving an explicit --snapshot-id must return
+    // is_partial/partial_reasons directly from the single resolution query, so the CLI
+    // never needs a second list_snapshots round trip to render the partial warning.
+    let scopes = resolve_scopes(
+        ingester.client().inner(),
+        ScopeSelector::snapshot(snapshot_id.clone(), None),
+    )
+    .await
+    .expect("resolve_scopes must succeed");
+
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].snapshot.is_partial);
+    assert_eq!(
+        scopes[0].snapshot.partial_reasons,
+        vec!["instance profiles missing".to_string()]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -119,7 +157,7 @@ async fn snapshot_selector_errors_on_account_mismatch() {
         .await
         .expect("ingest must succeed");
 
-    let result = resolve_contexts(
+    let result = resolve_scopes(
         ingester.client().inner(),
         ScopeSelector::snapshot(snapshot_id.clone(), Some("999999999999".to_string())),
     )
@@ -144,7 +182,7 @@ async fn snapshot_selector_errors_on_account_mismatch() {
 async fn snapshot_selector_errors_on_unknown_snapshot() {
     let client = helpers::shared_client().await;
 
-    let result = resolve_contexts(
+    let result = resolve_scopes(
         client.inner(),
         ScopeSelector::snapshot("not-a-real-snapshot-id", None),
     )
@@ -161,7 +199,7 @@ async fn snapshot_selector_errors_on_unknown_snapshot() {
 async fn account_selector_errors_when_account_has_no_snapshots() {
     let client = helpers::shared_client().await;
 
-    let result = resolve_contexts(client.inner(), ScopeSelector::account("no-such-account")).await;
+    let result = resolve_scopes(client.inner(), ScopeSelector::account("no-such-account")).await;
 
     match result {
         Err(GraphError::NoSnapshotsForAccount(id)) => assert_eq!(id, "no-such-account"),

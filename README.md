@@ -154,8 +154,12 @@ DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
 export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect \
     --mode live \
+    --profile production \
     --account-alias production
 ```
+
+`--profile` selects a named local AWS profile for credentials; see `aws-iam-grapher collect
+--help` for the full precedence order and offline-mode behavior.
 
 ### Scenario B — Avoid CloudTrail noise (offline)
 
