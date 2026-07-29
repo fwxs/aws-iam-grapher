@@ -7,9 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{client, trie::Trie, ExpanderError};
 
-/// Env var overriding [`DEFAULT_CACHE_TTL_DAYS`]. Invalid values (non-numeric or non-positive)
-/// fall back to the default with a logged warning.
+/// Env var overriding [`DEFAULT_CACHE_TTL_DAYS`]. Invalid values (non-numeric, non-positive, or
+/// outside [`MAX_CACHE_TTL_DAYS`]) fall back to the default with a logged warning.
 const CACHE_TTL_ENV_VAR: &str = "AWS_IAM_EXPANDER_CACHE_TTL_DAYS";
+
+/// Upper bound accepted for the TTL override (~100 years). Exists so an absurd env value (e.g.
+/// `i64::MAX`) takes the invalid-value fallback path instead of overflowing
+/// `chrono::Duration::days`, which panics past ~1.06e11 days.
+const MAX_CACHE_TTL_DAYS: i64 = 36_500;
 
 /// How long a full-catalog fetch is trusted before an unknown-service lookup triggers a
 /// refetch, even though the disk cache is otherwise complete. AWS adds actions to services
@@ -171,7 +176,11 @@ fn is_fresh(raw: &RawCache, ttl_days: i64) -> bool {
     let Some(fetched_at) = raw.fetched_at else {
         return false;
     };
-    Utc::now().signed_duration_since(fetched_at) < chrono::Duration::days(ttl_days)
+    let age = Utc::now().signed_duration_since(fetched_at);
+    // A future `fetched_at` (clock skew, restored snapshot, hand-edited cache file) yields a
+    // negative age, which must not read as fresh — that would pin the cache "fresh" forever,
+    // silently under-reporting newly added actions until the wall clock catches up.
+    !age.num_seconds().is_negative() && age < chrono::Duration::days(ttl_days)
 }
 
 /// Resolves the cache TTL in days from [`CACHE_TTL_ENV_VAR`], falling back to
@@ -186,10 +195,12 @@ fn parse_ttl_days(raw: Option<String>) -> i64 {
     match raw {
         None => DEFAULT_CACHE_TTL_DAYS,
         Some(value) => match value.parse::<i64>() {
-            Ok(days) if days > 0 => days,
+            Ok(days) if (1..=MAX_CACHE_TTL_DAYS).contains(&days) => days,
             _ => {
                 tracing::warn!(
-                    "invalid {CACHE_TTL_ENV_VAR} value {value:?}; using default of {DEFAULT_CACHE_TTL_DAYS} days"
+                    value = %value,
+                    default_days = DEFAULT_CACHE_TTL_DAYS,
+                    "invalid {CACHE_TTL_ENV_VAR} value; using default"
                 );
                 DEFAULT_CACHE_TTL_DAYS
             }
@@ -345,7 +356,11 @@ mod tests {
     async fn fresh_cache_skips_network_on_unknown_service_miss() {
         // A cache that already believes it holds the full catalog must never call the
         // fetcher on an unknown-service miss — the panic in the closure proves it wasn't.
-        let mut cache = cache_with(PathBuf::from("/tmp/unused"), "s3", 1);
+        // Neither test in this pair calls `flush()`, so the path is never written to; it's
+        // still a fresh temp path (not a shared hardcoded one) so nothing later that adds a
+        // `flush()` call here starts writing into a shared location.
+        let path = std::env::temp_dir().join(format!("iam-expander-{}.json", uuid::Uuid::new_v4()));
+        let mut cache = cache_with(path, "s3", 1);
         cache.fetched_all = true;
 
         let result = cache
@@ -359,7 +374,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_cache_refetches_exactly_once_per_run() {
-        let mut cache = cache_with(PathBuf::from("/tmp/unused"), "s3", 1);
+        let path = std::env::temp_dir().join(format!("iam-expander-{}.json", uuid::Uuid::new_v4()));
+        let mut cache = cache_with(path, "s3", 1);
         assert!(!cache.fetched_all);
         let call_count = std::sync::atomic::AtomicUsize::new(0);
 
@@ -385,5 +401,85 @@ mod tests {
             .await;
         assert!(matches!(second, Err(ExpanderError::UnknownService(_))));
         assert_eq!(call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_stamps_fetched_at_and_survives_flush_and_reload() {
+        // This is the write-side counterpart to the freshness tests above: a fetch must
+        // actually persist `fetched_at` through `flush()`, or the next `load()` never sees the
+        // cache as fresh and the original re-fetch-every-run bug is back — with every read-side
+        // test above still green.
+        let directory = std::env::temp_dir().join(format!("iam-expander-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("actions.json");
+        let mut cache = ActionCache {
+            path: path.clone(),
+            raw: RawCache {
+                actions: HashMap::new(),
+                fetched_at: None,
+            },
+            tries: HashMap::new(),
+            fetched_all: false,
+        };
+
+        cache
+            .get_or_fetch_with("s3", || async {
+                Ok(HashMap::from([(
+                    "s3".to_string(),
+                    vec!["GetObject".to_string()],
+                )]))
+            })
+            .await
+            .expect("service just fetched must be found");
+
+        cache.flush().await.expect("flush must succeed");
+
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .expect("cache file exists after flush");
+        let parsed: RawCache = serde_json::from_str(&text).expect("published cache is valid JSON");
+        assert!(
+            parsed.fetched_at.is_some(),
+            "fetched_at must survive the flush round trip"
+        );
+        assert!(
+            is_fresh(&parsed, DEFAULT_CACHE_TTL_DAYS),
+            "a cache just fetched and flushed must be seen as fresh on the next load"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    // ── fixes for review feedback on the fetched_at freshness check ──────────────────────────
+
+    #[test]
+    fn parse_ttl_days_clamps_absurdly_large_value_instead_of_overflowing() {
+        // i64::MAX days would panic inside `chrono::Duration::days` if it reached `is_fresh`
+        // unclamped; it must take the invalid-value fallback path instead.
+        assert_eq!(
+            parse_ttl_days(Some(i64::MAX.to_string())),
+            DEFAULT_CACHE_TTL_DAYS
+        );
+    }
+
+    #[test]
+    fn parse_ttl_days_accepts_max_boundary() {
+        assert_eq!(
+            parse_ttl_days(Some(MAX_CACHE_TTL_DAYS.to_string())),
+            MAX_CACHE_TTL_DAYS
+        );
+    }
+
+    #[test]
+    fn is_fresh_does_not_panic_on_clamped_max_ttl() {
+        let raw = raw_with(Some(Utc::now()), true);
+        assert!(is_fresh(&raw, MAX_CACHE_TTL_DAYS));
+    }
+
+    #[test]
+    fn is_fresh_false_when_fetched_at_is_in_the_future() {
+        // Clock skew, a restored VM snapshot, or a hand-edited cache file can put `fetched_at`
+        // ahead of `Utc::now()`. That must read as stale, not as fresh-forever.
+        let raw = raw_with(Some(Utc::now() + chrono::Duration::days(1)), true);
+        assert!(!is_fresh(&raw, 30));
     }
 }
