@@ -35,6 +35,10 @@ pub struct ActionCache {
     // Whether the full catalog is known to already be on disk and fresh. Computed once in
     // `load()` from `raw.fetched_at`, and flipped to `true` after any in-run full fetch.
     fetched_all: bool,
+    // Set only when the catalog was actually (re)fetched from the network this run. `flush()`
+    // no-ops when this is `false`, so a pure-read run (every service already cached and fresh)
+    // never rewrites the catalog file.
+    dirty: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -63,6 +67,7 @@ impl ActionCache {
             raw,
             tries,
             fetched_all,
+            dirty: false,
         })
     }
 
@@ -96,6 +101,7 @@ impl ActionCache {
             }
             let all = fetch_all().await?;
             self.fetched_all = true;
+            self.dirty = true;
             self.raw.fetched_at = Some(Utc::now());
             for (svc, actions) in all {
                 let mut trie = Trie::new();
@@ -121,7 +127,14 @@ impl ActionCache {
     /// writes interleave and publish corrupt JSON.  Concurrent flushes still race on the
     /// rename, so the last one wins and the others' additions are lost; that only costs cache
     /// misses on the next run.  Call once at the end of a collection run.
-    pub async fn flush(&self) -> Result<(), ExpanderError> {
+    ///
+    /// No-ops (logged at debug) when the catalog was never fetched/mutated this run — a
+    /// pure-read run must not rewrite the file on disk.
+    pub async fn flush(&mut self) -> Result<(), ExpanderError> {
+        if !self.dirty {
+            tracing::debug!("cache unchanged; skipping flush");
+            return Ok(());
+        }
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -131,6 +144,7 @@ impl ActionCache {
         let json = serde_json::to_string_pretty(&self.raw)?;
         tokio::fs::write(&tmp, &json).await?;
         tokio::fs::rename(&tmp, &self.path).await?;
+        self.dirty = false;
         Ok(())
     }
 
@@ -147,6 +161,7 @@ impl ActionCache {
             },
             tries,
             fetched_all: false,
+            dirty: false,
         }
     }
 }
@@ -239,6 +254,7 @@ mod tests {
             raw,
             tries,
             fetched_all: false,
+            dirty: true,
         }
     }
 
@@ -249,15 +265,13 @@ mod tests {
         // path would interleave mid-write rather than landing in one atomic block.
         let directory = std::env::temp_dir().join(format!("iam-expander-{}", uuid::Uuid::new_v4()));
         let path = directory.join("actions.json");
-        let caches = [
-            cache_with(path.clone(), "alpha", 20_000),
-            cache_with(path.clone(), "beta", 20_000),
-            cache_with(path.clone(), "gamma", 20_000),
-        ];
+        let mut cache_a = cache_with(path.clone(), "alpha", 20_000);
+        let mut cache_b = cache_with(path.clone(), "beta", 20_000);
+        let mut cache_c = cache_with(path.clone(), "gamma", 20_000);
 
         // Act
         let (first, second, third) =
-            tokio::join!(caches[0].flush(), caches[1].flush(), caches[2].flush());
+            tokio::join!(cache_a.flush(), cache_b.flush(), cache_c.flush());
 
         // Assert: every flush succeeded and the published file is intact JSON holding exactly
         // one writer's payload — never a mix of two.
@@ -419,6 +433,7 @@ mod tests {
             },
             tries: HashMap::new(),
             fetched_all: false,
+            dirty: false,
         };
 
         cache
@@ -444,6 +459,131 @@ mod tests {
         assert!(
             is_fresh(&parsed, DEFAULT_CACHE_TTL_DAYS),
             "a cache just fetched and flushed must be seen as fresh on the next load"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    // ── dirty flag: flush() must no-op on a pure-read run, and persist exactly once on a
+    // fetching run (issue #87) ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flush_pure_read_run_leaves_cache_file_untouched() {
+        // Arrange: a cache file already on disk with the only service the run will look up.
+        let directory = std::env::temp_dir().join(format!("iam-expander-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("actions.json");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("create test dir");
+        let seed = RawCache {
+            actions: HashMap::from([("s3".to_string(), vec!["GetObject".to_string()])]),
+            fetched_at: Some(Utc::now()),
+        };
+        let seed_json = serde_json::to_string_pretty(&seed).expect("serialize seed cache");
+        tokio::fs::write(&path, &seed_json)
+            .await
+            .expect("write seed cache");
+        let original_content = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read seed cache back");
+        let original_mtime = tokio::fs::metadata(&path)
+            .await
+            .expect("stat seed cache")
+            .modified()
+            .expect("seed cache has an mtime");
+
+        // Act: a read-only run — load, look up an already-cached service, then flush.
+        let mut cache = ActionCache::load().await.expect("cache should load");
+        cache
+            .get_or_fetch_with("s3", || async {
+                panic!("fetch must not run — s3 is already cached and fresh")
+            })
+            .await
+            .expect("s3 trie must already be present");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cache.flush().await.expect("flush must succeed as a no-op");
+
+        // Assert: the file on disk was never touched.
+        let final_content = tokio::fs::read_to_string(&path)
+            .await
+            .expect("cache file still readable");
+        let final_mtime = tokio::fs::metadata(&path)
+            .await
+            .expect("stat cache after flush")
+            .modified()
+            .expect("cache still has an mtime");
+        assert_eq!(
+            original_content, final_content,
+            "pure-read flush must not rewrite the cache file"
+        );
+        assert_eq!(
+            original_mtime, final_mtime,
+            "pure-read flush must not touch the cache file"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[tokio::test]
+    async fn flush_after_fetch_persists_exactly_once() {
+        // Arrange: an empty cache with no file on disk yet.
+        let directory = std::env::temp_dir().join(format!("iam-expander-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("actions.json");
+        let mut cache = ActionCache {
+            path: path.clone(),
+            raw: RawCache {
+                actions: HashMap::new(),
+                fetched_at: None,
+            },
+            tries: HashMap::new(),
+            fetched_all: false,
+            dirty: false,
+        };
+
+        // Act: one fetch, then flush twice — the first flush must persist, the second
+        // (nothing changed since) must be a no-op.
+        cache
+            .get_or_fetch_with("s3", || async {
+                Ok(HashMap::from([(
+                    "s3".to_string(),
+                    vec!["GetObject".to_string()],
+                )]))
+            })
+            .await
+            .expect("service just fetched must be found");
+
+        cache.flush().await.expect("first flush should persist");
+        let content_after_first = tokio::fs::read_to_string(&path)
+            .await
+            .expect("cache file exists after first flush");
+        let mtime_after_first = tokio::fs::metadata(&path)
+            .await
+            .expect("stat cache after first flush")
+            .modified()
+            .expect("cache has an mtime after first flush");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cache
+            .flush()
+            .await
+            .expect("second flush should no-op, not error");
+
+        // Assert: the second flush wrote nothing further.
+        let content_after_second = tokio::fs::read_to_string(&path)
+            .await
+            .expect("cache file still readable after second flush");
+        let mtime_after_second = tokio::fs::metadata(&path)
+            .await
+            .expect("stat cache after second flush")
+            .modified()
+            .expect("cache has an mtime after second flush");
+        assert_eq!(
+            content_after_first, content_after_second,
+            "second flush must not rewrite content"
+        );
+        assert_eq!(
+            mtime_after_first, mtime_after_second,
+            "second flush must not touch the file — cache was clean"
         );
 
         let _ = std::fs::remove_dir_all(&directory);
