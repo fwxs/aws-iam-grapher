@@ -492,14 +492,28 @@ mod tests {
             .modified()
             .expect("seed cache has an mtime");
 
-        // Act: a read-only run — load, look up an already-cached service, then flush.
-        let mut cache = ActionCache::load().await.expect("cache should load");
+        // Act: a read-only run — build the cache directly against the seeded temp `path`
+        // (mirroring `flush_after_fetch_persists_exactly_once`), not via `ActionCache::load()`,
+        // which would read the real default cache path instead of this test's temp file.
+        let tries = build_tries(&seed.actions);
+        let fetched_all = is_fresh(&seed, DEFAULT_CACHE_TTL_DAYS);
+        let mut cache = ActionCache {
+            path: path.clone(),
+            raw: seed,
+            tries,
+            fetched_all,
+            dirty: false,
+        };
         cache
             .get_or_fetch_with("s3", || async {
                 panic!("fetch must not run — s3 is already cached and fresh")
             })
             .await
             .expect("s3 trie must already be present");
+        assert!(
+            !cache.dirty,
+            "a pure-read lookup must never mark the cache dirty"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         cache.flush().await.expect("flush must succeed as a no-op");
 
