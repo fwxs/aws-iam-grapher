@@ -1,6 +1,6 @@
 /// Headers + rows for a table, decoupled from any specific query result type.
 pub struct RenderSpec {
-    pub headers: Vec<&'static str>,
+    pub headers: &'static [&'static str],
     pub rows: Vec<Vec<String>>,
 }
 

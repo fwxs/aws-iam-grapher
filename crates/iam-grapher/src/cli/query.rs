@@ -106,7 +106,7 @@ fn who_can_rows(results: &[EntityRef]) -> RenderSpec {
         })
         .collect();
     RenderSpec {
-        headers: vec!["TYPE", "ARN", "RESOURCE"],
+        headers: &["TYPE", "ARN", "RESOURCE"],
         rows,
     }
 }
@@ -129,7 +129,7 @@ fn entity_perm_rows(perms: &[PermissionRow]) -> RenderSpec {
         })
         .collect();
     RenderSpec {
-        headers: vec!["EFFECT", "ACTION", "RESOURCE", "STATUS"],
+        headers: &["EFFECT", "ACTION", "RESOURCE", "STATUS"],
         rows,
     }
 }
@@ -140,7 +140,7 @@ fn instance_profile_rows(results: &[EntityRef]) -> RenderSpec {
         .map(|e| vec![e.name.clone(), e.arn.clone()])
         .collect();
     RenderSpec {
-        headers: vec!["NAME", "ARN"],
+        headers: &["NAME", "ARN"],
         rows,
     }
 }
@@ -164,7 +164,7 @@ fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
         })
         .collect();
     RenderSpec {
-        headers: vec!["ENTITY", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+        headers: &["ENTITY", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
         rows,
     }
 }
@@ -182,8 +182,9 @@ async fn resolve_all_account_ids(client: &GraphClient) -> anyhow::Result<Vec<Str
 }
 
 /// Resolve the scope(s) a `WhoCan`/`EntityPerms`/`InstanceProfilesWith`/`PrivilegeEscalation`
-/// invocation should run over, from `--account-id`/`--snapshot-id`. Single-account when
-/// `--account-id` is given or only one account exists; multi-account fan-out otherwise.
+/// invocation should run over, from `--account-id`/`--snapshot-id`. The returned `Vec` has
+/// exactly one scope whenever `account_id` is `Some`; the caller (not scope count) decides
+/// single-vs-fan-out rendering — see `run_scoped`.
 async fn resolve_command_scopes(
     client: &GraphClient,
     account_id: Option<&str>,
@@ -238,30 +239,43 @@ enum ScopeCount<'a> {
     Multi(usize),
 }
 
-/// Run a query over one or more resolved scopes and render the result uniformly:
-/// single-account output is unwrapped (no `AccountGroup`, no account header), matching
-/// today's behavior exactly; multi-account output wraps each scope's result in an
-/// `AccountGroup` and prints a header per account.
+/// Output routing plus single-vs-fan-out mode for a `run_scoped` call, bundled so the
+/// driver stays under clippy's argument-count lint.
+struct ScopedOutput<'a> {
+    format: &'a OutputFormat,
+    file: Option<&'a Path>,
+    /// `--account-id`/explicit-single-snapshot mode (`true`), not `scopes.len() == 1` —
+    /// the `--account-id`-omitted path always wraps in `AccountGroup` and prints an
+    /// account header, even for a one-account graph. Mirrors base behavior.
+    single: bool,
+}
+
+/// Run a query over one or more resolved scopes and render the result uniformly.
 async fn run_scoped<T, F, Fut>(
-    output: &OutputFormat,
-    output_file: Option<&Path>,
+    out: ScopedOutput<'_>,
     scopes: Vec<ResolvedScope>,
-    mut query: F,
+    query: F,
     render: impl Fn(&T) -> RenderSpec,
     heading: impl Fn(ScopeCount) -> String,
     empty_msg: &str,
 ) -> anyhow::Result<()>
 where
     T: Serialize,
-    F: FnMut(QueryContext) -> Fut,
+    F: Fn(QueryContext) -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    if let [_] = scopes.as_slice() {
-        let ResolvedScope { context, snapshot } = scopes.into_iter().next().unwrap();
+    if out.single {
+        let [ResolvedScope { context, snapshot }] = <[ResolvedScope; 1]>::try_from(scopes)
+            .map_err(|scopes| {
+                anyhow::anyhow!(
+                    "single-account mode resolved {} scopes, expected exactly 1",
+                    scopes.len()
+                )
+            })?;
         print_partial_warning(&snapshot);
         let result = query(context.clone()).await?;
 
-        if !emit_json(&result, output, output_file)? {
+        if !emit_json(&result, out.format, out.file)? {
             return Ok(());
         }
 
@@ -272,7 +286,7 @@ where
             println!("{empty_msg}");
             return Ok(());
         }
-        print!("{}", table::format_table(&spec.headers, &spec.rows));
+        print!("{}", table::format_table(spec.headers, &spec.rows));
         return Ok(());
     }
 
@@ -287,7 +301,7 @@ where
         });
     }
 
-    if !emit_json(&groups, output, output_file)? {
+    if !emit_json(&groups, out.format, out.file)? {
         return Ok(());
     }
 
@@ -299,7 +313,7 @@ where
             println!("{empty_msg}\n");
             continue;
         }
-        println!("{}", table::format_table(&spec.headers, &spec.rows));
+        println!("{}", table::format_table(spec.headers, &spec.rows));
     }
     Ok(())
 }
@@ -549,8 +563,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             )
             .await?;
             run_scoped(
-                &args.output,
-                args.output_file.as_deref(),
+                ScopedOutput {
+                    format: &args.output,
+                    file: args.output_file.as_deref(),
+                    single: args.account_id.is_some(),
+                },
                 scopes,
                 |ctx| {
                     let condition_ctx = condition_ctx.clone();
@@ -593,8 +610,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             )
             .await?;
             run_scoped(
-                &args.output,
-                args.output_file.as_deref(),
+                ScopedOutput {
+                    format: &args.output,
+                    file: args.output_file.as_deref(),
+                    single: args.account_id.is_some(),
+                },
                 scopes,
                 |ctx| {
                     let arn = arn.clone();
@@ -626,8 +646,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             )
             .await?;
             run_scoped(
-                &args.output,
-                args.output_file.as_deref(),
+                ScopedOutput {
+                    format: &args.output,
+                    file: args.output_file.as_deref(),
+                    single: args.account_id.is_some(),
+                },
                 scopes,
                 |ctx| {
                     let action = action.clone();
@@ -662,8 +685,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             )
             .await?;
             run_scoped(
-                &args.output,
-                args.output_file.as_deref(),
+                ScopedOutput {
+                    format: &args.output,
+                    file: args.output_file.as_deref(),
+                    single: args.account_id.is_some(),
+                },
                 scopes,
                 |ctx| {
                     let client = &client;
@@ -739,4 +765,118 @@ async fn resolve_diff_account_id(
 
 fn short_id(id: &str) -> &str {
     &id[..8.min(id.len())]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn scope(account_id: &str, snapshot_id: &str) -> ResolvedScope {
+        ResolvedScope {
+            context: QueryContext::new(snapshot_id, account_id),
+            snapshot: SnapshotRecord {
+                id: snapshot_id.to_string(),
+                account_id: account_id.to_string(),
+                collected_at: String::new(),
+                is_partial: false,
+                partial_reasons: Vec::new(),
+                org_collection_run_id: None,
+            },
+        }
+    }
+
+    // Signature must be `&String`, not `&str`: it's used as `render: impl Fn(&T)` with
+    // `T = String` (the query closures below return `anyhow::Result<String>`).
+    #[allow(clippy::ptr_arg)]
+    fn render_str(s: &String) -> RenderSpec {
+        RenderSpec {
+            headers: &["X"],
+            rows: vec![vec![s.clone()]],
+        }
+    }
+
+    #[tokio::test]
+    async fn run_scoped_multi_mode_wraps_result_even_for_one_scope() {
+        let scopes = vec![scope("111111111111", "snap-a")];
+        let calls = RefCell::new(Vec::new());
+        let out = ScopedOutput {
+            format: &OutputFormat::Table,
+            file: None,
+            single: false,
+        };
+
+        run_scoped(
+            out,
+            scopes,
+            |ctx: QueryContext| async move { Ok(ctx.account_id) },
+            render_str,
+            |sc| {
+                calls.borrow_mut().push(match sc {
+                    ScopeCount::Single(_) => "single".to_string(),
+                    ScopeCount::Multi(n) => format!("multi:{n}"),
+                });
+                String::new()
+            },
+            "empty",
+        )
+        .await
+        .unwrap();
+
+        // --account-id omitted always fans out through AccountGroup, even when only
+        // one account resolved — matches base behavior; must not key off scopes.len().
+        assert_eq!(calls.into_inner(), ["multi:1"]);
+    }
+
+    #[tokio::test]
+    async fn run_scoped_single_mode_unwraps_the_lone_scope() {
+        let scopes = vec![scope("111111111111", "snap-a")];
+        let calls = RefCell::new(Vec::new());
+        let out = ScopedOutput {
+            format: &OutputFormat::Table,
+            file: None,
+            single: true,
+        };
+
+        run_scoped(
+            out,
+            scopes,
+            |ctx: QueryContext| async move { Ok(ctx.account_id) },
+            render_str,
+            |sc| {
+                calls.borrow_mut().push(match sc {
+                    ScopeCount::Single(id) => format!("single:{id}"),
+                    ScopeCount::Multi(n) => format!("multi:{n}"),
+                });
+                String::new()
+            },
+            "empty",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.into_inner(), ["single:snap-a"]);
+    }
+
+    #[tokio::test]
+    async fn run_scoped_single_mode_errors_on_unexpected_scope_count() {
+        let scopes = vec![scope("111111111111", "a"), scope("222222222222", "b")];
+        let out = ScopedOutput {
+            format: &OutputFormat::Table,
+            file: None,
+            single: true,
+        };
+
+        let result = run_scoped(
+            out,
+            scopes,
+            |ctx: QueryContext| async move { Ok(ctx.account_id) },
+            render_str,
+            |_sc| String::new(),
+            "empty",
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
 }
