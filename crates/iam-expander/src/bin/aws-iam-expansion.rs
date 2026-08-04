@@ -52,6 +52,9 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
+                    if let Err(flush_err) = cache.flush().await {
+                        eprintln!("error flushing cache: {flush_err}");
+                    }
                     std::process::exit(1);
                 }
             }
@@ -90,6 +93,9 @@ async fn main() {
                 Ok(expanded) => println!("{expanded}"),
                 Err(e) => {
                     eprintln!("error: {e}");
+                    if let Err(flush_err) = cache.flush().await {
+                        eprintln!("error flushing cache: {flush_err}");
+                    }
                     std::process::exit(1);
                 }
             }
