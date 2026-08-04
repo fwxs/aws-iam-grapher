@@ -1,3 +1,11 @@
+//! Expands wildcarded IAM action strings (`s3:*`, `iam:*Group`) to concrete action lists.
+//!
+//! Lifecycle: one [`ActionCache`] per run. Call [`ActionCache::load`] once, pass `&mut cache`
+//! to [`expand_actions_with_cache`] / [`expand_policy_document_with_cache`] for every lookup or
+//! document in the run, then call [`ActionCache::flush`] once at the end. There is no per-call
+//! convenience wrapper — the remote API only has a full-catalog endpoint, so loading and
+//! flushing per call would pay O(catalog) disk and CPU cost on every single lookup.
+
 mod cache;
 mod client;
 mod trie;
@@ -19,35 +27,23 @@ pub enum ExpanderError {
     UnknownService(String),
 }
 
-/// Expands all IAM actions for `service` that match `prefix`.
+/// Expands all IAM actions for `service` that match `prefix`, using a caller-provided cache.
 ///
 /// `prefix` filters action names (the part after the colon).
 /// `None` returns every action for the service.
 ///
-/// Example: `expand_actions("s3", Some("Get"))` → `["s3:GetObject", …]`
-pub async fn expand_actions(
+/// Example: `expand_actions_with_cache("s3", Some("Get"), &mut cache)` → `["s3:GetObject", …]`
+///
+/// Share a single [`ActionCache`] across a run: call [`ActionCache::load`] once, pass
+/// `&mut cache` to each lookup, then call [`ActionCache::flush`] once at the end.
+pub async fn expand_actions_with_cache(
     service: &str,
     prefix: Option<&str>,
+    cache: &mut ActionCache,
 ) -> Result<Vec<String>, ExpanderError> {
-    let mut cache = ActionCache::load().await?;
-    let result = expand_actions_with_cache(service, prefix, &mut cache).await?;
-    cache.flush().await?;
-    Ok(result)
-}
-
-/// Expands all wildcards in a JSON policy document.
-///
-/// Replaces patterns like `"s3:*"` or `"iam:Create*"` with their concrete
-/// action names.  Statements without wildcards are left unchanged.
-///
-/// Loads a fresh [`ActionCache`] on every call.  When expanding many documents
-/// in a single run, prefer [`expand_policy_document_with_cache`] to share one
-/// cache load across all calls.
-pub async fn expand_policy_document(policy_json: &str) -> Result<String, ExpanderError> {
-    let mut cache = ActionCache::load().await?;
-    let result = expand_policy_document_with_cache(policy_json, &mut cache).await?;
-    cache.flush().await?;
-    Ok(result)
+    let trie = cache.get_or_fetch(service).await?;
+    let search = format!("{}:{}", service, prefix.unwrap_or(""));
+    Ok(trie.starts_with(&search))
 }
 
 /// Expands all wildcards in a JSON policy document using a caller-provided cache.
@@ -65,16 +61,6 @@ pub async fn expand_policy_document_with_cache(
 }
 
 // ── internal helpers ──────────────────────────────────────────────────────────
-
-async fn expand_actions_with_cache(
-    service: &str,
-    prefix: Option<&str>,
-    cache: &mut ActionCache,
-) -> Result<Vec<String>, ExpanderError> {
-    let trie = cache.get_or_fetch(service).await?;
-    let search = format!("{}:{}", service, prefix.unwrap_or(""));
-    Ok(trie.starts_with(&search))
-}
 
 async fn expand_statements(
     policy: &mut Value,
