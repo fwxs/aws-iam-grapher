@@ -275,9 +275,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-organizations"
-version = "1.119.0"
+version = "1.119.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a6492c6be5f8f8f1f8245327cd156d061dc9ee8433b2653a3e76f0b47e29966"
+checksum = "4f4a0d05a20e2ec316c7eab765480ccc892891d9bb6f11cd4b648aca695616c3"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1377,7 +1377,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3180,7 +3180,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3273,7 +3273,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3792,7 +3792,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4499,7 +4499,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
