@@ -1,3 +1,9 @@
+/// Headers + rows for a table, decoupled from any specific query result type.
+pub struct RenderSpec {
+    pub headers: Vec<&'static str>,
+    pub rows: Vec<Vec<String>>,
+}
+
 /// Format rows as a left-aligned table with a header separator line.
 /// `headers` — column names; `rows` — each row is a slice of cells matching headers length.
 pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
