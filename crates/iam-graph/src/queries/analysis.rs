@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::queries::col;
 use crate::queries::context::QueryContext;
 use iam_models::condition::{self, ConditionContext, ConditionOutcome};
 use neo4rs::Graph;
@@ -70,9 +71,7 @@ async fn candidate_deny_actions(
 
     let mut actions = Vec::new();
     while let Some(row) = stream.next().await? {
-        let action: String = row
-            .get("action")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let action: String = col(&row, "action")?;
         actions.push(action);
     }
     Ok(actions)
@@ -96,9 +95,7 @@ async fn candidate_boundary_actions(
 
     let mut actions = Vec::new();
     while let Some(row) = stream.next().await? {
-        let action: String = row
-            .get("action")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let action: String = col(&row, "action")?;
         actions.push(action);
     }
     Ok(actions)
@@ -144,30 +141,14 @@ pub async fn who_can(
 
     let mut raw: Vec<EntityRef> = Vec::new();
     while let Some(row) = stream.next().await? {
-        let arn: String = row
-            .get("arn")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let name: String = row
-            .get("name")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let entity_type: String = row
-            .get("entity_type")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let is_full_admin: bool = row
-            .get("is_full_admin")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let perm_resource: String = row
-            .get("resource")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let grant_kind: String = row
-            .get("grant_kind")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let is_bounded: bool = row
-            .get("is_bounded")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let condition_json: Option<String> = row
-            .get("condition")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let arn: String = col(&row, "arn")?;
+        let name: String = col(&row, "name")?;
+        let entity_type: String = col(&row, "entity_type")?;
+        let is_full_admin: bool = col(&row, "is_full_admin")?;
+        let perm_resource: String = col(&row, "resource")?;
+        let grant_kind: String = col(&row, "grant_kind")?;
+        let is_bounded: bool = col(&row, "is_bounded")?;
+        let condition_json: Option<String> = col(&row, "condition")?;
 
         // Only wildcard (action='*') grants are resource-scoped intersection candidates;
         // exact-action grants always pass through.
@@ -291,12 +272,8 @@ pub async fn entity_permissions(
 
     let mut boundary_entries = Vec::new();
     while let Some(row) = boundary_stream.next().await? {
-        let action: String = row
-            .get("action")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let excluded_actions: Option<Vec<String>> = row
-            .get("excluded_actions")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let action: String = col(&row, "action")?;
+        let excluded_actions: Option<Vec<String>> = col(&row, "excluded_actions")?;
         boundary_entries.push(BoundaryEntry {
             action,
             excluded_actions,
@@ -314,15 +291,9 @@ pub async fn entity_permissions(
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let action: String = row
-            .get("action")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let effect: String = row
-            .get("effect")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let resource: String = row
-            .get("resource")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let action: String = col(&row, "action")?;
+        let effect: String = col(&row, "effect")?;
+        let resource: String = col(&row, "resource")?;
         let effective =
             effect != "Allow" || !is_bounded || boundary_allows(&boundary_entries, &action);
         results.push(PermissionRow {
@@ -373,15 +344,9 @@ pub async fn risky_instance_profiles(
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let arn: String = row
-            .get("arn")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let name: String = row
-            .get("name")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let risky_actions: Vec<String> = row
-            .get("risky_actions")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let arn: String = col(&row, "arn")?;
+        let name: String = col(&row, "name")?;
+        let risky_actions: Vec<String> = col(&row, "risky_actions")?;
         results.push(RiskyInstanceProfile {
             arn,
             name,
@@ -399,12 +364,8 @@ async fn collect_instance_profile_refs(
     let mut stream = graph.execute(query).await?;
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let arn: String = row
-            .get("arn")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let name: String = row
-            .get("name")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let arn: String = col(&row, "arn")?;
+        let name: String = col(&row, "name")?;
         results.push(EntityRef {
             arn,
             name,
