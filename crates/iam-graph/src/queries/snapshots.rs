@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::queries::{col, col_or_default};
 use neo4rs::Graph;
 
 /// A snapshot record stored in the graph.
@@ -25,21 +26,15 @@ pub async fn list_snapshots(
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let id: String = row
-            .get("id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let account_id: String = row
-            .get("account_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let collected_at: String = row
-            .get("collected_at")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let is_partial: bool = row
-            .get("is_partial")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
-        let org_collection_run_id: Option<String> = row
-            .get::<String>("org_collection_run_id")
+        let id: String = col(&row, "id")?;
+        let account_id: String = col(&row, "account_id")?;
+        let collected_at: String = col(&row, "collected_at")?;
+        let is_partial: bool = col(&row, "is_partial")?;
+        // Optional-by-design: snapshots ingested before `partial_reasons` existed have no such
+        // property. list_snapshots.cypher coalesces it to `[]`, so this is a documented
+        // fallback rather than a silently-swallowed malformed row.
+        let partial_reasons: Vec<String> = col_or_default(&row, "partial_reasons");
+        let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
             .ok()
             .filter(|s| !s.is_empty());
         results.push(SnapshotRecord {
@@ -63,9 +58,7 @@ pub async fn list_account_ids(graph: &Graph) -> Result<Vec<String>, GraphError> 
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let account_id: String = row
-            .get("account_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let account_id: String = col(&row, "account_id")?;
         results.push(account_id);
     }
     Ok(results)
@@ -83,9 +76,7 @@ pub async fn snapshot_account_id(
         .await?;
 
     if let Some(row) = stream.next().await? {
-        let account_id: String = row
-            .get("account_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let account_id: String = col(&row, "account_id")?;
         Ok(Some(account_id))
     } else {
         Ok(None)
@@ -106,21 +97,13 @@ pub async fn snapshot_record(
         .await?;
 
     if let Some(row) = stream.next().await? {
-        let id: String = row
-            .get("id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let account_id: String = row
-            .get("account_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let collected_at: String = row
-            .get("collected_at")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let is_partial: bool = row
-            .get("is_partial")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let partial_reasons: Vec<String> = row.get("partial_reasons").unwrap_or_default();
-        let org_collection_run_id: Option<String> = row
-            .get::<String>("org_collection_run_id")
+        let id: String = col(&row, "id")?;
+        let account_id: String = col(&row, "account_id")?;
+        let collected_at: String = col(&row, "collected_at")?;
+        let is_partial: bool = col(&row, "is_partial")?;
+        // Optional-by-design: see the matching comment in `list_snapshots`.
+        let partial_reasons: Vec<String> = col_or_default(&row, "partial_reasons");
+        let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
             .ok()
             .filter(|s| !s.is_empty());
         Ok(Some(SnapshotRecord {
@@ -149,9 +132,7 @@ pub async fn latest_org_run_id(graph: &Graph) -> Result<Option<String>, GraphErr
     let mut stream = graph.execute(neo4rs::query(LATEST_ORG_RUN_QUERY)).await?;
 
     if let Some(row) = stream.next().await? {
-        let id: String = row
-            .get("org_run_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let id: String = col(&row, "org_run_id")?;
         Ok(Some(id))
     } else {
         Ok(None)
@@ -171,9 +152,7 @@ pub async fn delete_snapshot(graph: &Graph, snapshot_id: &str) -> Result<u64, Gr
         .await?;
 
     let deleted = if let Some(row) = stream.next().await? {
-        let count: i64 = row
-            .get("deleted")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let count: i64 = col(&row, "deleted")?;
         count as u64
     } else {
         0
@@ -243,15 +222,9 @@ async fn fetch_permission_records(
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let action: String = row
-            .get("action")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let resource: String = row
-            .get("resource")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let effect: String = row
-            .get("effect")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let action: String = col(&row, "action")?;
+        let resource: String = col(&row, "resource")?;
+        let effect: String = col(&row, "effect")?;
         results.push(PermissionRecord {
             action,
             resource,
