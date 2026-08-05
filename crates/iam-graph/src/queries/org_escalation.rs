@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
 use neo4rs::Graph;
 use std::collections::HashMap;
@@ -60,30 +61,14 @@ pub async fn org_escalation_paths(
     let mut by_arn: HashMap<String, Candidate> = HashMap::new();
 
     while let Some(row) = stream.next().await? {
-        let arn: String = row
-            .get("arn")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let name: String = row
-            .get("name")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let entity_type: String = row
-            .get("entity_type")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let account_id: String = row
-            .get("account_id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let allowed_actions: Vec<String> = row
-            .get("allowed_actions")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let deny_actions: Vec<String> = row
-            .get("deny_actions")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let path: Vec<OrgHop> = row
-            .get("path")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let conditional: bool = row
-            .get("conditional")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
+        let arn: String = col(&row, "arn")?;
+        let name: String = col(&row, "name")?;
+        let entity_type: String = col(&row, "entity_type")?;
+        let account_id: String = col(&row, "account_id")?;
+        let allowed_actions: Vec<String> = col(&row, "allowed_actions")?;
+        let deny_actions: Vec<String> = col(&row, "deny_actions")?;
+        let path: Vec<OrgHop> = col(&row, "path")?;
+        let conditional: bool = col(&row, "conditional")?;
 
         match by_arn.get(&arn) {
             Some(existing) if existing.path.len() <= path.len() => {}
