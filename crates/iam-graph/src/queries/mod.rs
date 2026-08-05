@@ -20,17 +20,6 @@ where
         .map_err(|e| GraphError::UnexpectedResult(format!("column `{name}`: {e}")))
 }
 
-/// Extract a column that is legitimately absent for some rows, falling back to
-/// `T::default()`. Only call this where the caller has documented *why* absence is a valid
-/// data-model state (see call sites) — everywhere else, use [`col`] so malformed rows fail
-/// loudly instead of silently becoming empty values.
-pub(crate) fn col_or_default<'r, T>(row: &'r neo4rs::Row, name: &'static str) -> T
-where
-    T: serde::Deserialize<'r> + Default,
-{
-    row.get(name).unwrap_or_default()
-}
-
 pub use accounts::{list_accounts, AccountRecord};
 pub use analysis::{
     entity_permissions, instance_profiles_with_action, risky_instance_profiles, who_can, EntityRef,

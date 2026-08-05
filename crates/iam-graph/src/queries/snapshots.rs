@@ -1,5 +1,5 @@
 use crate::errors::GraphError;
-use crate::queries::{col, col_or_default};
+use crate::queries::col;
 use neo4rs::Graph;
 
 /// A snapshot record stored in the graph.
@@ -30,10 +30,12 @@ pub async fn list_snapshots(
         let account_id: String = col(&row, "account_id")?;
         let collected_at: String = col(&row, "collected_at")?;
         let is_partial: bool = col(&row, "is_partial")?;
-        // Optional-by-design: snapshots ingested before `partial_reasons` existed have no such
-        // property. list_snapshots.cypher coalesces it to `[]`, so this is a documented
-        // fallback rather than a silently-swallowed malformed row.
-        let partial_reasons: Vec<String> = col_or_default(&row, "partial_reasons");
+        // Snapshots ingested before `partial_reasons` existed have no such property, but
+        // list_snapshots.cypher already `coalesce`s it to `[]` — the column is never absent,
+        // so a wrong Bolt type here is a malformed row like every other field, not a
+        // legitimately-missing one. Read it with `col` so it fails loudly instead of silently
+        // reporting "partial: true, reasons: (none)".
+        let partial_reasons: Vec<String> = col(&row, "partial_reasons")?;
         let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
             .ok()
             .filter(|s| !s.is_empty());
@@ -101,8 +103,8 @@ pub async fn snapshot_record(
         let account_id: String = col(&row, "account_id")?;
         let collected_at: String = col(&row, "collected_at")?;
         let is_partial: bool = col(&row, "is_partial")?;
-        // Optional-by-design: see the matching comment in `list_snapshots`.
-        let partial_reasons: Vec<String> = col_or_default(&row, "partial_reasons");
+        // See the matching comment in `list_snapshots`.
+        let partial_reasons: Vec<String> = col(&row, "partial_reasons")?;
         let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
             .ok()
             .filter(|s| !s.is_empty());
