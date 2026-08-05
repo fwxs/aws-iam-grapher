@@ -7,6 +7,19 @@ pub mod scope;
 pub mod snapshots;
 pub mod stitch;
 
+use crate::errors::GraphError;
+
+/// Extract a required column from a `Row`, folding a missing/mistyped column into
+/// [`GraphError::UnexpectedResult`] with the column name attached — `neo4rs`'s own
+/// deserialization error (e.g. "The property does not exist") doesn't name the column.
+pub(crate) fn col<'r, T>(row: &'r neo4rs::Row, name: &'static str) -> Result<T, GraphError>
+where
+    T: serde::Deserialize<'r>,
+{
+    row.get(name)
+        .map_err(|e| GraphError::UnexpectedResult(format!("column `{name}`: {e}")))
+}
+
 pub use accounts::{list_accounts, AccountRecord};
 pub use analysis::{
     entity_permissions, instance_profiles_with_action, risky_instance_profiles, who_can, EntityRef,
