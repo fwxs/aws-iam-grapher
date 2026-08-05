@@ -252,6 +252,18 @@ async fn list_snapshots_reports_column_name_on_malformed_row() {
         .await
         .expect_err("malformed is_partial column must fail");
 
+    // Restore the node before asserting: this container is shared by every test in this
+    // binary (see helpers::shared_client), so a left-behind malformed property would break
+    // any later test that lists snapshots across accounts. Do this before the assertions
+    // below so cleanup still runs if they panic.
+    graph
+        .run(
+            neo4rs::query("MATCH (s:Snapshot {id: $id}) SET s.is_partial = false")
+                .param("id", snapshot_id.as_str()),
+        )
+        .await
+        .expect("restoring query must succeed");
+
     match err {
         GraphError::UnexpectedResult(message) => {
             assert!(
