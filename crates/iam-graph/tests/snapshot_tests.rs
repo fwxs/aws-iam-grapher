@@ -1,7 +1,8 @@
 mod helpers;
 
 use iam_graph::{
-    delete_snapshot, list_account_ids, list_snapshots, snapshot_account_id, GraphIngester,
+    delete_snapshot, list_account_ids, list_snapshots, snapshot_account_id, GraphError,
+    GraphIngester,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -219,4 +220,45 @@ async fn snapshot_account_id_returns_none_for_unknown_snapshot() {
         .expect("snapshot_account_id must succeed");
 
     assert_eq!(resolved, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn list_snapshots_reports_column_name_on_malformed_row() {
+    let client = helpers::shared_client().await;
+    let account_id = "910000000004";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let graph = ingester.client().inner();
+
+    // Corrupt the type of `is_partial` on the Snapshot node — the row-extraction helper
+    // (`col` in queries/mod.rs) must surface the column name in the resulting error.
+    graph
+        .run(
+            neo4rs::query("MATCH (s:Snapshot {id: $id}) SET s.is_partial = 'not-a-bool'")
+                .param("id", snapshot_id.as_str()),
+        )
+        .await
+        .expect("corrupting query must succeed");
+
+    let err = list_snapshots(graph, account_id)
+        .await
+        .expect_err("malformed is_partial column must fail");
+
+    match err {
+        GraphError::UnexpectedResult(message) => {
+            assert!(
+                message.contains("is_partial"),
+                "error must name the malformed column, got: {message}"
+            );
+        }
+        other => panic!("expected UnexpectedResult, got: {other:?}"),
+    }
 }
