@@ -1,4 +1,4 @@
-use crate::output::{json, table, table::RenderSpec, OutputFormat};
+use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
 use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use iam_graph::{
@@ -250,12 +250,22 @@ struct ScopedOutput<'a> {
     single: bool,
 }
 
+/// Renders a query result as Graphviz DOT text, given (result, suggested graph name).
+type ToDot<'a, T> = &'a dyn Fn(&T, &str) -> String;
+
 /// Run a query over one or more resolved scopes and render the result uniformly.
+///
+/// `to_dot`, when present, renders a scope's result as Graphviz DOT text. Pass `None`
+/// for queries with no graph-shaped result — `--output graphviz` is rejected up front
+/// in `run()` for those, so this is never called with `out.format == Graphviz` and
+/// `to_dot: None` at once.
+#[allow(clippy::too_many_arguments)]
 async fn run_scoped<T, F, Fut>(
     out: ScopedOutput<'_>,
     scopes: Vec<ResolvedScope>,
     query: F,
     render: impl Fn(&T) -> RenderSpec,
+    to_dot: Option<ToDot<'_, T>>,
     heading: impl Fn(ScopeCount) -> String,
     empty_msg: &str,
 ) -> anyhow::Result<()>
@@ -264,6 +274,12 @@ where
     F: Fn(QueryContext) -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
+    if *out.format == OutputFormat::Graphviz {
+        let to_dot = to_dot
+            .ok_or_else(|| anyhow::anyhow!("--output graphviz is not supported for this query"))?;
+        return run_scoped_graphviz(out, scopes, query, to_dot).await;
+    }
+
     if out.single {
         let [ResolvedScope { context, snapshot }] = <[ResolvedScope; 1]>::try_from(scopes)
             .map_err(|scopes| {
@@ -314,6 +330,53 @@ where
             continue;
         }
         println!("{}", table::format_table(spec.headers, &spec.rows));
+    }
+    Ok(())
+}
+
+/// Graphviz counterpart to the tail of `run_scoped`: single-account mode emits one
+/// digraph; multi-account mode concatenates one digraph per account (each with a
+/// distinct graph name embedding the account id) into a single `.dot` file/stream —
+/// valid Graphviz input, since the DOT grammar allows a file to contain a list of graphs.
+async fn run_scoped_graphviz<T, F, Fut>(
+    out: ScopedOutput<'_>,
+    scopes: Vec<ResolvedScope>,
+    query: F,
+    to_dot: ToDot<'_, T>,
+) -> anyhow::Result<()>
+where
+    F: Fn(QueryContext) -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    let mut dot = String::new();
+
+    if out.single {
+        let [ResolvedScope { context, snapshot }] = <[ResolvedScope; 1]>::try_from(scopes)
+            .map_err(|scopes| {
+                anyhow::anyhow!(
+                    "single-account mode resolved {} scopes, expected exactly 1",
+                    scopes.len()
+                )
+            })?;
+        print_partial_warning(&snapshot);
+        let result = query(context).await?;
+        dot.push_str(&to_dot(&result, "query_result"));
+    } else {
+        for scope in &scopes {
+            print_partial_warning(&scope.snapshot);
+            let result = query(scope.context.clone()).await?;
+            let graph_name = format!("account_{}", scope.context.account_id);
+            dot.push_str(&to_dot(&result, &graph_name));
+        }
+    }
+
+    match out.file {
+        Some(path) => {
+            std::fs::write(path, &dot).with_context(|| {
+                format!("failed to write graphviz output to {}", path.display())
+            })?;
+        }
+        None => print!("{dot}"),
     }
     Ok(())
 }
@@ -373,6 +436,20 @@ enum QueryCommand {
 }
 
 pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
+    if args.output == OutputFormat::Graphviz
+        && !matches!(
+            args.command,
+            QueryCommand::WhoCan { .. }
+                | QueryCommand::PrivilegeEscalation { .. }
+                | QueryCommand::OrgEscalation { .. }
+        )
+    {
+        anyhow::bail!(
+            "--output graphviz is not supported for this query; supported queries: \
+             who-can, privilege-escalation, org-escalation"
+        );
+    }
+
     let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &args.neo4j_pass)
         .await
         .with_context(|| format!("failed to connect to Neo4j at {}", args.neo4j_uri))?;
@@ -460,6 +537,17 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             let paths = org_escalation_paths(client.inner(), &ctx, max_hops)
                 .await
                 .context("org-escalation query failed")?;
+
+            if args.output == OutputFormat::Graphviz {
+                let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
+                match args.output_file.as_deref() {
+                    Some(path) => std::fs::write(path, &dot).with_context(|| {
+                        format!("failed to write graphviz output to {}", path.display())
+                    })?,
+                    None => print!("{dot}"),
+                }
+                return Ok(());
+            }
 
             if !emit_json(&paths, &args.output, args.output_file.as_deref())? {
                 return Ok(());
@@ -587,6 +675,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                 },
                 |results: &Vec<EntityRef>| who_can_rows(results),
+                Some(&|results: &Vec<EntityRef>, graph_name: &str| {
+                    graphviz::who_can_to_dot(graph_name, &action, results)
+                }),
                 |sc| match sc {
                     ScopeCount::Single(snapshot_id) => format!(
                         "Entities with permission {} (snapshot: {})",
@@ -627,6 +718,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                 },
                 |perms: &Vec<PermissionRow>| entity_perm_rows(perms),
+                None,
                 |sc| match sc {
                     ScopeCount::Single(_) => format!("Permissions for {arn}"),
                     ScopeCount::Multi(n) => {
@@ -662,6 +754,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                 },
                 |results: &Vec<EntityRef>| instance_profile_rows(results),
+                None,
                 |sc| match sc {
                     ScopeCount::Single(snapshot_id) => format!(
                         "Instance profiles granting {} (snapshot: {})",
@@ -700,6 +793,9 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     }
                 },
                 |paths: &Vec<EscalationPath>| escalation_rows(paths),
+                Some(&|paths: &Vec<EscalationPath>, graph_name: &str| {
+                    graphviz::escalation_paths_to_dot(graph_name, paths)
+                }),
                 |sc| match sc {
                     ScopeCount::Single(snapshot_id) => format!(
                         "Privilege escalation paths (snapshot: {}, max-hops: {})",
@@ -811,6 +907,7 @@ mod tests {
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
             render_str,
+            None,
             |sc| {
                 calls.borrow_mut().push(match sc {
                     ScopeCount::Single(_) => "single".to_string(),
@@ -843,6 +940,7 @@ mod tests {
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
             render_str,
+            None,
             |sc| {
                 calls.borrow_mut().push(match sc {
                     ScopeCount::Single(id) => format!("single:{id}"),
@@ -872,11 +970,62 @@ mod tests {
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
             render_str,
+            None,
             |_sc| String::new(),
             "empty",
         )
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_scoped_graphviz_single_mode_renders_to_dot_output() {
+        let scopes = vec![scope("111111111111", "snap-a")];
+        let out = ScopedOutput {
+            format: &OutputFormat::Graphviz,
+            file: None,
+            single: true,
+        };
+
+        let result = run_scoped(
+            out,
+            scopes,
+            |ctx: QueryContext| async move { Ok(ctx.account_id) },
+            render_str,
+            Some(&|s: &String, graph_name: &str| format!("digraph {graph_name} {{ {s} }}")),
+            |_sc| String::new(),
+            "empty",
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_scoped_graphviz_without_to_dot_errors() {
+        let scopes = vec![scope("111111111111", "snap-a")];
+        let out = ScopedOutput {
+            format: &OutputFormat::Graphviz,
+            file: None,
+            single: true,
+        };
+
+        let result = run_scoped(
+            out,
+            scopes,
+            |ctx: QueryContext| async move { Ok(ctx.account_id) },
+            render_str,
+            None,
+            |_sc| String::new(),
+            "empty",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not supported for this query"));
     }
 }
