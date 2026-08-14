@@ -28,35 +28,23 @@ fn short_name(arn: &str) -> &str {
     arn.rsplit('/').next().unwrap_or(arn)
 }
 
-/// Render privilege-escalation paths as a DOT digraph: one node per entity that
-/// appears on any path, edges following each path's `CAN_ASSUME_ROLE` chain, and the
-/// risk-holding terminal node of each path highlighted with its risky actions.
+struct EscalationNode<'a> {
+    entity_type: &'a str,
+    /// `Some` for org-wide paths, labeled `[account_id]`; `None` for single-account paths.
+    account_id: Option<&'a str>,
+    risky_actions: Option<String>,
+}
+
+/// Shared renderer behind [`escalation_paths_to_dot`] and [`org_escalation_paths_to_dot`]:
+/// one node per entity ARN appearing on any path, edges following each path's
+/// `CAN_ASSUME_ROLE` chain, and the risk-holding terminal node of each path highlighted
+/// with its risky actions (merged if the same ARN is terminal on more than one path).
 /// Conditional paths (unresolved runtime trust conditions) render with dashed, colored edges.
-pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> String {
-    struct Node {
-        entity_type: String,
-        risky_actions: Option<String>,
-    }
-
-    let mut nodes: BTreeMap<&str, Node> = BTreeMap::new();
-    let mut edges: Vec<(&str, &str, bool)> = Vec::new();
-
-    for p in paths {
-        let terminal_arn = p.path.last().map(|h| h.arn.as_str()).unwrap_or(&p.arn);
-        for hop in &p.path {
-            let node = nodes.entry(&hop.arn).or_insert_with(|| Node {
-                entity_type: hop.entity_type.clone(),
-                risky_actions: None,
-            });
-            if hop.arn == terminal_arn {
-                node.risky_actions = Some(p.risky_actions.join(", "));
-            }
-        }
-        for window in p.path.windows(2) {
-            edges.push((&window[0].arn, &window[1].arn, p.conditional));
-        }
-    }
-
+fn render_escalation_dot(
+    graph_name: &str,
+    nodes: BTreeMap<&str, EscalationNode>,
+    edges: &[(&str, &str, bool)],
+) -> String {
     let mut out = String::new();
     writeln!(out, "digraph {} {{", quoted(graph_name)).unwrap();
     writeln!(out, "  rankdir=LR;").unwrap();
@@ -68,11 +56,14 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
     .unwrap();
 
     for (arn, node) in &nodes {
-        let label = format!(
+        let mut label = format!(
             "{}\\n({})",
             escape(short_name(arn)),
-            escape(&node.entity_type)
+            escape(node.entity_type)
         );
+        if let Some(account_id) = node.account_id {
+            write!(label, "\\n[{}]", escape(account_id)).unwrap();
+        }
         let mut attrs = format!("label={}", quoted(&label));
         if let Some(actions) = &node.risky_actions {
             write!(
@@ -86,33 +77,37 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
         writeln!(out, "  {} [{}];", quoted(arn), attrs).unwrap();
     }
 
-    write_edges(&mut out, &edges);
+    write_edges(&mut out, edges);
     writeln!(out, "}}").unwrap();
     out
 }
 
-/// Render cross-account escalation paths as a DOT digraph, same shape as
-/// [`escalation_paths_to_dot`] but with each node labeled with its account id.
-pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]) -> String {
-    struct Node {
-        entity_type: String,
-        account_id: String,
-        risky_actions: Option<String>,
+/// Merge `actions` into a node's risky-action tooltip, combining rather than overwriting
+/// when the same ARN is the terminal node of more than one path.
+fn merge_risky_actions(existing: Option<String>, actions: String) -> Option<String> {
+    match existing {
+        Some(existing) if existing != actions => Some(format!("{existing}, {actions}")),
+        Some(existing) => Some(existing),
+        None => Some(actions),
     }
+}
 
-    let mut nodes: BTreeMap<&str, Node> = BTreeMap::new();
+/// Render privilege-escalation paths as a DOT digraph. See [`render_escalation_dot`].
+pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> String {
+    let mut nodes: BTreeMap<&str, EscalationNode> = BTreeMap::new();
     let mut edges: Vec<(&str, &str, bool)> = Vec::new();
 
     for p in paths {
         let terminal_arn = p.path.last().map(|h| h.arn.as_str()).unwrap_or(&p.arn);
         for hop in &p.path {
-            let node = nodes.entry(&hop.arn).or_insert_with(|| Node {
-                entity_type: hop.entity_type.clone(),
-                account_id: hop.account_id.clone(),
+            let node = nodes.entry(&hop.arn).or_insert_with(|| EscalationNode {
+                entity_type: &hop.entity_type,
+                account_id: None,
                 risky_actions: None,
             });
             if hop.arn == terminal_arn {
-                node.risky_actions = Some(p.risky_actions.join(", "));
+                node.risky_actions =
+                    merge_risky_actions(node.risky_actions.take(), p.risky_actions.join(", "));
             }
         }
         for window in p.path.windows(2) {
@@ -120,39 +115,35 @@ pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]
         }
     }
 
-    let mut out = String::new();
-    writeln!(out, "digraph {} {{", quoted(graph_name)).unwrap();
-    writeln!(out, "  rankdir=LR;").unwrap();
-    writeln!(
-        out,
-        "  node [shape=box, style=filled, fontname=\"Helvetica\", fillcolor={}];",
-        quoted(DEFAULT_FILL)
-    )
-    .unwrap();
+    render_escalation_dot(graph_name, nodes, &edges)
+}
 
-    for (arn, node) in &nodes {
-        let label = format!(
-            "{}\\n({})\\n[{}]",
-            escape(short_name(arn)),
-            escape(&node.entity_type),
-            escape(&node.account_id)
-        );
-        let mut attrs = format!("label={}", quoted(&label));
-        if let Some(actions) = &node.risky_actions {
-            write!(
-                attrs,
-                ", fillcolor={}, tooltip={}",
-                quoted(RISK_FILL),
-                quoted(actions)
-            )
-            .unwrap();
+/// Render cross-account escalation paths as a DOT digraph, same shape as
+/// [`escalation_paths_to_dot`] but with each node labeled with its account id.
+/// See [`render_escalation_dot`].
+pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]) -> String {
+    let mut nodes: BTreeMap<&str, EscalationNode> = BTreeMap::new();
+    let mut edges: Vec<(&str, &str, bool)> = Vec::new();
+
+    for p in paths {
+        let terminal_arn = p.path.last().map(|h| h.arn.as_str()).unwrap_or(&p.arn);
+        for hop in &p.path {
+            let node = nodes.entry(&hop.arn).or_insert_with(|| EscalationNode {
+                entity_type: &hop.entity_type,
+                account_id: Some(&hop.account_id),
+                risky_actions: None,
+            });
+            if hop.arn == terminal_arn {
+                node.risky_actions =
+                    merge_risky_actions(node.risky_actions.take(), p.risky_actions.join(", "));
+            }
         }
-        writeln!(out, "  {} [{}];", quoted(arn), attrs).unwrap();
+        for window in p.path.windows(2) {
+            edges.push((&window[0].arn, &window[1].arn, p.conditional));
+        }
     }
 
-    write_edges(&mut out, &edges);
-    writeln!(out, "}}").unwrap();
-    out
+    render_escalation_dot(graph_name, nodes, &edges)
 }
 
 /// Render `who-can` results as a DOT digraph: one central node for the queried action,
@@ -293,6 +284,38 @@ mod tests {
         // Only the terminal node (C) carries the risky-action tooltip.
         assert_eq!(dot.matches("iam:CreateAccessKey").count(), 1);
         assert!(dot.contains("role/C"));
+    }
+
+    #[test]
+    fn escalation_paths_to_dot_merges_risky_actions_on_shared_terminal_node() {
+        let paths = vec![
+            EscalationPath {
+                arn: "arn:aws:iam::111111111111:role/A".to_string(),
+                name: "A".to_string(),
+                entity_type: "Role".to_string(),
+                risky_actions: vec!["iam:PutUserPolicy".to_string()],
+                path: vec![
+                    hop("arn:aws:iam::111111111111:role/A", "Role"),
+                    hop("arn:aws:iam::111111111111:role/C", "Role"),
+                ],
+                conditional: false,
+            },
+            EscalationPath {
+                arn: "arn:aws:iam::111111111111:role/B".to_string(),
+                name: "B".to_string(),
+                entity_type: "Role".to_string(),
+                risky_actions: vec!["iam:CreateAccessKey".to_string()],
+                path: vec![
+                    hop("arn:aws:iam::111111111111:role/B", "Role"),
+                    hop("arn:aws:iam::111111111111:role/C", "Role"),
+                ],
+                conditional: false,
+            },
+        ];
+
+        let dot = escalation_paths_to_dot("privilege_escalation", &paths);
+
+        assert!(dot.contains("iam:PutUserPolicy, iam:CreateAccessKey"));
     }
 
     #[test]

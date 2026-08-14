@@ -370,9 +370,14 @@ where
         }
     }
 
-    match out.file {
+    write_dot_output(&dot, out.file)
+}
+
+/// Write rendered DOT text to `file`, or stdout when `file` is `None`.
+fn write_dot_output(dot: &str, file: Option<&Path>) -> anyhow::Result<()> {
+    match file {
         Some(path) => {
-            std::fs::write(path, &dot).with_context(|| {
+            std::fs::write(path, dot).with_context(|| {
                 format!("failed to write graphviz output to {}", path.display())
             })?;
         }
@@ -540,12 +545,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
             if args.output == OutputFormat::Graphviz {
                 let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
-                match args.output_file.as_deref() {
-                    Some(path) => std::fs::write(path, &dot).with_context(|| {
-                        format!("failed to write graphviz output to {}", path.display())
-                    })?,
-                    None => print!("{dot}"),
-                }
+                write_dot_output(&dot, args.output_file.as_deref())?;
                 return Ok(());
             }
 
