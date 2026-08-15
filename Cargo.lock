@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "iam-collector"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "iam-expander"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "iam-graph"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "iam-collector",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "iam-grapher"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2031,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "iam-models"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "pretty_assertions",
