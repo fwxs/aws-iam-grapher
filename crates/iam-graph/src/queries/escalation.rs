@@ -1,15 +1,9 @@
 use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
+use crate::queries::render_hop_bound;
 use neo4rs::Graph;
 use std::collections::HashMap;
-
-/// Default `CAN_ASSUME_ROLE` traversal depth when the caller doesn't specify one.
-pub const DEFAULT_MAX_HOPS: u32 = 3;
-
-/// Upper bound on traversal depth to keep variable-length path matching bounded on
-/// dense `CAN_ASSUME_ROLE` graphs.
-pub const MAX_HOPS_CAP: u32 = 10;
 
 /// One hop in an escalation path — the ARN and entity-type label of a node on the chain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,8 +40,7 @@ pub async fn privilege_escalation_paths(
     ctx: &QueryContext,
     max_hops: u32,
 ) -> Result<Vec<EscalationPath>, GraphError> {
-    let max_hops = max_hops.clamp(1, MAX_HOPS_CAP);
-    let cypher = ESCALATION_QUERY.replace("{max_hops}", &max_hops.to_string());
+    let cypher = render_hop_bound(ESCALATION_QUERY, max_hops);
 
     let mut stream = graph
         .execute(
