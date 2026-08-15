@@ -265,8 +265,7 @@ aws-iam-grapher collect org \
   --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
   --exclude-ou-id ou-sandbox-1111 \
-  --exclude-ou-name Legacy \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --exclude-ou-name Legacy
 ```
 
 `--exclude-ou-id` and `--exclude-ou-name` (both repeatable) prune matching OU subtrees before
@@ -300,8 +299,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --include-ou-name Prod \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --include-ou-name Prod
 ```
 
 Omitting `--include-ou-name` collects the full org tree as usual. Repeating it ORs the filter
@@ -331,8 +329,7 @@ aws-iam-grapher collect org \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
   --ou-profile-override Quarantine=legacy-static-creds \
-  --ou-profile-override ThirdParty=vendor-keys \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-profile-override ThirdParty=vendor-keys
 ```
 
 This is not a way to bypass assume-role entirely — the named profile is only ever used to call
@@ -363,8 +360,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole
 ```
 
 Matching, inheritance, and the fatal-unmatched-key behavior are the same as
