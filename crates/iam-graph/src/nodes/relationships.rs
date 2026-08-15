@@ -1,121 +1,166 @@
 use crate::nodes::uid::{entity_uid, excluded_permission_uid, inline_policy_uid, permission_uid};
+use crate::nodes::Row;
 use iam_models::Condition;
 use neo4rs::{query, Query};
 
-const SNAPSHOT_INCLUDES: &str = "
-    MATCH (s:Snapshot {id: $snapshot_id})
-    MATCH (n {uid: $uid})
+/// UNWIND-batched: INCLUDES relationship from Snapshot to any entity node, per row.
+pub const SNAPSHOT_INCLUDES: &str = "
+    UNWIND $rows AS row
+    MATCH (s:Snapshot {id: row.snapshot_id})
+    MATCH (n {uid: row.uid})
     MERGE (s)-[:INCLUDES]->(n)
 ";
 
-const HAS_ATTACHED_POLICY: &str = "
-    MATCH (e {uid: $entity_uid})
-    MATCH (p:Policy {uid: $policy_uid})
+/// UNWIND-batched: HAS_ATTACHED_POLICY from entity to managed policy, per row.
+pub const HAS_ATTACHED_POLICY: &str = "
+    UNWIND $rows AS row
+    MATCH (e {uid: row.entity_uid})
+    MATCH (p:Policy {uid: row.policy_uid})
     MERGE (e)-[:HAS_ATTACHED_POLICY]->(p)
 ";
 
-const HAS_INLINE_POLICY: &str = "
-    MATCH (e {uid: $entity_uid})
-    MATCH (ip:InlinePolicy {uid: $inline_uid})
+/// UNWIND-batched: HAS_INLINE_POLICY from entity to inline policy, per row.
+pub const HAS_INLINE_POLICY: &str = "
+    UNWIND $rows AS row
+    MATCH (e {uid: row.entity_uid})
+    MATCH (ip:InlinePolicy {uid: row.inline_uid})
     MERGE (e)-[:HAS_INLINE_POLICY]->(ip)
 ";
 
-const MEMBER_OF: &str = "
-    MATCH (u:User {uid: $user_uid})
-    MATCH (g:Group {uid: $group_uid})
+/// UNWIND-batched: MEMBER_OF from user to group, per row.
+pub const MEMBER_OF: &str = "
+    UNWIND $rows AS row
+    MATCH (u:User {uid: row.user_uid})
+    MATCH (g:Group {uid: row.group_uid})
     MERGE (u)-[:MEMBER_OF]->(g)
 ";
 
-const POLICY_GRANTS: &str = "
-    MATCH (p:Policy {uid: $policy_uid})
-    MATCH (perm:Permission {uid: $perm_uid})
+/// UNWIND-batched: GRANTS from managed policy to permission, per row.
+pub const POLICY_GRANTS: &str = "
+    UNWIND $rows AS row
+    MATCH (p:Policy {uid: row.policy_uid})
+    MATCH (perm:Permission {uid: row.perm_uid})
     MERGE (p)-[:GRANTS]->(perm)
 ";
 
-const INLINE_GRANTS: &str = "
-    MATCH (ip:InlinePolicy {uid: $inline_uid})
-    MATCH (perm:Permission {uid: $perm_uid})
+/// UNWIND-batched: GRANTS from inline policy to permission, per row.
+pub const INLINE_GRANTS: &str = "
+    UNWIND $rows AS row
+    MATCH (ip:InlinePolicy {uid: row.inline_uid})
+    MATCH (perm:Permission {uid: row.perm_uid})
     MERGE (ip)-[:GRANTS]->(perm)
 ";
 
-const CAN_ASSUME: &str = "
-    MERGE (pr:Principal {id: $principal_id, type: $principal_type})
-    WITH pr
-    MATCH (r:Role {uid: $role_uid})
-    MERGE (pr)-[:CAN_ASSUME {conditional: $conditional}]->(r)
+/// UNWIND-batched: CAN_ASSUME from a principal to a role (trust policy), per row.
+pub const CAN_ASSUME: &str = "
+    UNWIND $rows AS row
+    MERGE (pr:Principal {id: row.principal_id, type: row.principal_type})
+    WITH pr, row
+    MATCH (r:Role {uid: row.role_uid})
+    MERGE (pr)-[:CAN_ASSUME {conditional: row.conditional}]->(r)
 ";
 
-const CAN_ASSUME_ROLE: &str = "
-    MATCH (assumer {arn: $principal_id, snapshot_id: $snapshot_id})
+/// UNWIND-batched: CAN_ASSUME_ROLE from an in-snapshot Role/User entity to the Role
+/// it can assume, per row.
+pub const CAN_ASSUME_ROLE: &str = "
+    UNWIND $rows AS row
+    MATCH (assumer {arn: row.principal_id, snapshot_id: row.snapshot_id})
     WHERE assumer:Role OR assumer:User
-    MATCH (r:Role {uid: $role_uid})
-    MERGE (assumer)-[:CAN_ASSUME_ROLE {conditional: $conditional}]->(r)
+    MATCH (r:Role {uid: row.role_uid})
+    MERGE (assumer)-[:CAN_ASSUME_ROLE {conditional: row.conditional}]->(r)
 ";
 
-const CONTAINS_ROLE: &str = "
-    MATCH (ip:InstanceProfile {uid: $profile_uid})
-    MATCH (r:Role {uid: $role_uid})
+/// UNWIND-batched: CONTAINS_ROLE from InstanceProfile to Role, per row.
+pub const CONTAINS_ROLE: &str = "
+    UNWIND $rows AS row
+    MATCH (ip:InstanceProfile {uid: row.profile_uid})
+    MATCH (r:Role {uid: row.role_uid})
     MERGE (ip)-[:CONTAINS_ROLE]->(r)
 ";
 
-const BOUNDED_BY: &str = "
-    MATCH (e {uid: $entity_uid})
-    MATCH (p:Policy {uid: $policy_uid})
+/// UNWIND-batched: BOUNDED_BY from entity to permissions-boundary policy, per row.
+pub const BOUNDED_BY: &str = "
+    UNWIND $rows AS row
+    MATCH (e {uid: row.entity_uid})
+    MATCH (p:Policy {uid: row.policy_uid})
     MERGE (e)-[:BOUNDED_BY]->(p)
 ";
 
 const STITCH_CROSS_ACCOUNT: &str = include_str!("../../queries/stitch_cross_account.cypher");
 
-/// INCLUDES relationship from Snapshot to any entity node.
-pub fn snapshot_includes_query(snapshot_id: &str, entity_uid: &str) -> Query {
-    query(SNAPSHOT_INCLUDES)
-        .param("snapshot_id", snapshot_id)
-        .param("uid", entity_uid)
+/// Build a row for the `SNAPSHOT_INCLUDES` UNWIND statement.
+pub fn snapshot_includes_row(snapshot_id: &str, entity_uid: &str) -> Row {
+    Row::from([
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        ("uid".to_string(), entity_uid.into()),
+    ])
 }
 
-/// HAS_ATTACHED_POLICY from entity to managed policy.
-pub fn has_attached_policy_query(snapshot_id: &str, entity_arn: &str, policy_arn: &str) -> Query {
-    query(HAS_ATTACHED_POLICY)
-        .param("entity_uid", entity_uid(snapshot_id, entity_arn))
-        .param("policy_uid", entity_uid(snapshot_id, policy_arn))
+/// Build a row for the `HAS_ATTACHED_POLICY` UNWIND statement.
+pub fn has_attached_policy_row(snapshot_id: &str, entity_arn: &str, policy_arn: &str) -> Row {
+    Row::from([
+        (
+            "entity_uid".to_string(),
+            entity_uid(snapshot_id, entity_arn).into(),
+        ),
+        (
+            "policy_uid".to_string(),
+            entity_uid(snapshot_id, policy_arn).into(),
+        ),
+    ])
 }
 
-/// HAS_INLINE_POLICY from entity to inline policy.
-pub fn has_inline_policy_query(snapshot_id: &str, entity_arn: &str, inline_name: &str) -> Query {
-    query(HAS_INLINE_POLICY)
-        .param("entity_uid", entity_uid(snapshot_id, entity_arn))
-        .param(
-            "inline_uid",
-            inline_policy_uid(snapshot_id, entity_arn, inline_name),
-        )
+/// Build a row for the `HAS_INLINE_POLICY` UNWIND statement.
+pub fn has_inline_policy_row(snapshot_id: &str, entity_arn: &str, inline_name: &str) -> Row {
+    Row::from([
+        (
+            "entity_uid".to_string(),
+            entity_uid(snapshot_id, entity_arn).into(),
+        ),
+        (
+            "inline_uid".to_string(),
+            inline_policy_uid(snapshot_id, entity_arn, inline_name).into(),
+        ),
+    ])
 }
 
-/// MEMBER_OF from user to group.
-pub fn member_of_query(snapshot_id: &str, user_arn: &str, group_arn: &str) -> Query {
-    query(MEMBER_OF)
-        .param("user_uid", entity_uid(snapshot_id, user_arn))
-        .param("group_uid", entity_uid(snapshot_id, group_arn))
+/// Build a row for the `MEMBER_OF` UNWIND statement.
+pub fn member_of_row(snapshot_id: &str, user_arn: &str, group_arn: &str) -> Row {
+    Row::from([
+        (
+            "user_uid".to_string(),
+            entity_uid(snapshot_id, user_arn).into(),
+        ),
+        (
+            "group_uid".to_string(),
+            entity_uid(snapshot_id, group_arn).into(),
+        ),
+    ])
 }
 
-/// GRANTS from managed policy to permission.
-pub fn policy_grants_query(
+/// Build a row for the `POLICY_GRANTS` UNWIND statement.
+pub fn policy_grants_row(
     snapshot_id: &str,
     policy_arn: &str,
     effect: &str,
     action: &str,
     resource: &str,
     condition: Option<&Condition>,
-) -> Query {
-    query(POLICY_GRANTS)
-        .param("policy_uid", entity_uid(snapshot_id, policy_arn))
-        .param(
-            "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource, condition),
-        )
+) -> Row {
+    Row::from([
+        (
+            "policy_uid".to_string(),
+            entity_uid(snapshot_id, policy_arn).into(),
+        ),
+        (
+            "perm_uid".to_string(),
+            permission_uid(snapshot_id, effect, action, resource, condition).into(),
+        ),
+    ])
 }
 
-/// GRANTS from inline policy to permission.
-pub fn inline_grants_query(
+/// Build a row for the `INLINE_GRANTS` UNWIND statement.
+pub fn inline_grants_row(
     snapshot_id: &str,
     owner_arn: &str,
     inline_name: &str,
@@ -123,37 +168,44 @@ pub fn inline_grants_query(
     action: &str,
     resource: &str,
     condition: Option<&Condition>,
-) -> Query {
-    query(INLINE_GRANTS)
-        .param(
-            "inline_uid",
-            inline_policy_uid(snapshot_id, owner_arn, inline_name),
-        )
-        .param(
-            "perm_uid",
-            permission_uid(snapshot_id, effect, action, resource, condition),
-        )
+) -> Row {
+    Row::from([
+        (
+            "inline_uid".to_string(),
+            inline_policy_uid(snapshot_id, owner_arn, inline_name).into(),
+        ),
+        (
+            "perm_uid".to_string(),
+            permission_uid(snapshot_id, effect, action, resource, condition).into(),
+        ),
+    ])
 }
 
-/// GRANTS from managed policy to an allow-all-except Permission node.
-pub fn policy_grants_excluded_query(
+/// Build a row for the `POLICY_GRANTS` UNWIND statement targeting an
+/// allow-all-except Permission node.
+pub fn policy_grants_excluded_row(
     snapshot_id: &str,
     policy_arn: &str,
     effect: &str,
     resource: &str,
     excluded: &[String],
     condition: Option<&Condition>,
-) -> Query {
-    query(POLICY_GRANTS)
-        .param("policy_uid", entity_uid(snapshot_id, policy_arn))
-        .param(
-            "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
-        )
+) -> Row {
+    Row::from([
+        (
+            "policy_uid".to_string(),
+            entity_uid(snapshot_id, policy_arn).into(),
+        ),
+        (
+            "perm_uid".to_string(),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition).into(),
+        ),
+    ])
 }
 
-/// GRANTS from inline policy to an allow-all-except Permission node.
-pub fn inline_grants_excluded_query(
+/// Build a row for the `INLINE_GRANTS` UNWIND statement targeting an
+/// allow-all-except Permission node.
+pub fn inline_grants_excluded_row(
     snapshot_id: &str,
     owner_arn: &str,
     inline_name: &str,
@@ -161,19 +213,20 @@ pub fn inline_grants_excluded_query(
     resource: &str,
     excluded: &[String],
     condition: Option<&Condition>,
-) -> Query {
-    query(INLINE_GRANTS)
-        .param(
-            "inline_uid",
-            inline_policy_uid(snapshot_id, owner_arn, inline_name),
-        )
-        .param(
-            "perm_uid",
-            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition),
-        )
+) -> Row {
+    Row::from([
+        (
+            "inline_uid".to_string(),
+            inline_policy_uid(snapshot_id, owner_arn, inline_name).into(),
+        ),
+        (
+            "perm_uid".to_string(),
+            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition).into(),
+        ),
+    ])
 }
 
-/// CAN_ASSUME from a principal to a role (trust policy).
+/// Build a row for the `CAN_ASSUME` UNWIND statement (trust policy).
 ///
 /// `principal_kind` should come from the trust policy block key (`AWS`, `Service`,
 /// `Federated`, `CanonicalUser`) rather than being re-inferred from the id string.
@@ -183,52 +236,74 @@ pub fn inline_grants_excluded_query(
 /// Deterministic conditions (e.g. a `PrincipalAccount` check consistent with the
 /// listed principal) are folded into `false`; contradictory ones suppress the edge
 /// entirely before this function is even called.
-pub fn can_assume_query(
+pub fn can_assume_row(
     snapshot_id: &str,
     principal_kind: &str,
     principal_id: &str,
     role_arn: &str,
     conditional: bool,
-) -> Query {
-    query(CAN_ASSUME)
-        .param("principal_id", principal_id)
-        .param("principal_type", principal_kind)
-        .param("role_uid", entity_uid(snapshot_id, role_arn))
-        .param("conditional", conditional)
+) -> Row {
+    Row::from([
+        ("principal_id".to_string(), principal_id.into()),
+        ("principal_type".to_string(), principal_kind.into()),
+        (
+            "role_uid".to_string(),
+            entity_uid(snapshot_id, role_arn).into(),
+        ),
+        ("conditional".to_string(), conditional.into()),
+    ])
 }
 
-/// CAN_ASSUME_ROLE from an in-snapshot Role/User entity to the Role it can assume.
+/// Build a row for the `CAN_ASSUME_ROLE` UNWIND statement.
 ///
 /// Direct entity-to-entity bridge over `CAN_ASSUME` (which targets an ARN-keyed
 /// `Principal` node, not the entity node itself), materialized only when the trust
 /// policy principal resolves to a Role or User ARN present in this snapshot. This is
 /// what makes `CAN_ASSUME_ROLE*1..N` variable-length traversal possible for
 /// transitive `sts:AssumeRole` privilege-escalation analysis.
-pub fn can_assume_role_query(
+pub fn can_assume_role_row(
     snapshot_id: &str,
     principal_arn: &str,
     role_arn: &str,
     conditional: bool,
-) -> Query {
-    query(CAN_ASSUME_ROLE)
-        .param("principal_id", principal_arn)
-        .param("snapshot_id", snapshot_id)
-        .param("role_uid", entity_uid(snapshot_id, role_arn))
-        .param("conditional", conditional)
+) -> Row {
+    Row::from([
+        ("principal_id".to_string(), principal_arn.into()),
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        (
+            "role_uid".to_string(),
+            entity_uid(snapshot_id, role_arn).into(),
+        ),
+        ("conditional".to_string(), conditional.into()),
+    ])
 }
 
-/// CONTAINS_ROLE from InstanceProfile to Role.
-pub fn contains_role_query(snapshot_id: &str, profile_arn: &str, role_arn: &str) -> Query {
-    query(CONTAINS_ROLE)
-        .param("profile_uid", entity_uid(snapshot_id, profile_arn))
-        .param("role_uid", entity_uid(snapshot_id, role_arn))
+/// Build a row for the `CONTAINS_ROLE` UNWIND statement.
+pub fn contains_role_row(snapshot_id: &str, profile_arn: &str, role_arn: &str) -> Row {
+    Row::from([
+        (
+            "profile_uid".to_string(),
+            entity_uid(snapshot_id, profile_arn).into(),
+        ),
+        (
+            "role_uid".to_string(),
+            entity_uid(snapshot_id, role_arn).into(),
+        ),
+    ])
 }
 
-/// BOUNDED_BY from entity to permissions-boundary policy.
-pub fn bounded_by_query(snapshot_id: &str, entity_arn: &str, boundary_arn: &str) -> Query {
-    query(BOUNDED_BY)
-        .param("entity_uid", entity_uid(snapshot_id, entity_arn))
-        .param("policy_uid", entity_uid(snapshot_id, boundary_arn))
+/// Build a row for the `BOUNDED_BY` UNWIND statement.
+pub fn bounded_by_row(snapshot_id: &str, entity_arn: &str, boundary_arn: &str) -> Row {
+    Row::from([
+        (
+            "entity_uid".to_string(),
+            entity_uid(snapshot_id, entity_arn).into(),
+        ),
+        (
+            "policy_uid".to_string(),
+            entity_uid(snapshot_id, boundary_arn).into(),
+        ),
+    ])
 }
 
 /// Build the cross-account stitch query for one org collection run.

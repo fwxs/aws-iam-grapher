@@ -163,7 +163,7 @@ by `--resource`; their `resource` is only surfaced in the output for callers to 
 themselves. When `--resource` is omitted, behavior is unchanged from before and every result now
 also carries the matched grant's `resource`.
 
-Caveat: `iam_expander::glob_match` lowercases both sides before comparing (it was written for
+Caveat: `iam_expander::glob_match` compares characters case-insensitively (it was written for
 case-insensitive IAM action matching). ARN resource segments (bucket names, object keys) are
 case-sensitive in real AWS, so a queried resource that differs from the grant only by case will
 incorrectly be treated as a match. This is a known limitation of reusing the action-glob matcher
@@ -316,13 +316,13 @@ walking the tree is reported as a warning, not silently ignored.
 
 ### Mixed-authentication orgs (`--ou-profile-override`)
 
-Some organizations are not authentication-homogeneous: most accounts are reachable via the
-`--management-profile` → `sts:AssumeRole` jump-role path, but a subset — often quarantined into
-their own OU for exactly this reason — can only be authenticated to via a separate local AWS
-profile (e.g. long-lived static credentials, or its own SSO profile). `--ou-profile-override
-<ou_id_or_name>=<aws_profile>` (repeatable) collects accounts under a matching OU, and all its
-descendant OUs, directly with the named local profile's credentials instead of assuming the jump
-role — while still filing every account, from both paths, into the same
+Some organizations are not authentication-homogeneous: most accounts assume the jump role from
+`--jump-from-profile`, but a subset — often quarantined into their own OU for exactly this reason
+— must assume it from a *different* source identity (e.g. a separate set of long-lived static
+credentials, or its own SSO profile) instead. `--ou-profile-override <ou_id_or_name>=<aws_profile>`
+(repeatable) makes accounts under a matching OU, and all its descendant OUs, assume
+`--assume-role-name` from the named local profile instead of `--jump-from-profile` — every account,
+from both paths, still calls `sts:AssumeRole` into the same role name and is filed into the same
 `org_collection_run_id`:
 
 ```bash
@@ -335,6 +335,12 @@ aws-iam-grapher collect org \
   --neo4j-pass "$NEO4J_PASSWORD"
 ```
 
+This is not a way to bypass assume-role entirely — the named profile is only ever used to call
+`sts:AssumeRole`, exactly like `--jump-from-profile` is, just scoped to that OU subtree instead of
+the whole run. It does **not** collect the profile's own account directly, and the profile itself
+does not need `iam:GetAccountAuthorizationDetails` — only permission to assume
+`--assume-role-name` in each account under the matching OU.
+
 Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
 id and its display name. When nested overridden OUs disagree, the innermost (nearest ancestor)
 override wins for a given account. Unlike `--exclude-ou-*`, an override key that never matches
@@ -342,3 +348,37 @@ any OU encountered while walking the tree is a **fatal** validation error — co
 before any account is touched, rather than proceeding as if the override had no effect. Likewise,
 an override's local profile must resolve real credentials before collection starts; an unresolvable
 profile also fails fast with a validation error.
+
+### Role-heterogeneous orgs (`--ou-role-override`)
+
+Some orgs don't use the same cross-account role name everywhere — a legacy or acquired subtree
+exposes it under a different name than `--assume-role-name`. `--ou-role-override
+<ou_id_or_name>=<role_name>` (repeatable) assumes `<role_name>` instead of `--assume-role-name` in
+every account under a matching OU and its descendants; everything else (source identity, region,
+run id) is unchanged. It is independent of `--ou-profile-override` — one changes the target role
+name, the other the source identity — and both may apply to the same OU and compose.
+
+```bash
+aws-iam-grapher collect org \
+  --management-profile org-management \
+  --jump-from-profile default \
+  --assume-role-name OrganizationAccountAccessRole \
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
+  --neo4j-pass "$NEO4J_PASSWORD"
+```
+
+Matching, inheritance, and the fatal-unmatched-key behavior are the same as
+`--ou-profile-override` above, with three deviations:
+
+- **`--exclude-ou-*` short-circuits before role-override resolution.** A key that matches only an
+  OU that was itself excluded is reported as a *shadowed-by-exclude* warning, not the fatal
+  unmatched-key error — the exclusion is assumed deliberate.
+- **When one OU is matched by both an id-keyed and a name-keyed entry** with different role
+  names, the id-keyed value wins.
+- **Duplicate identical keys use last-value-wins** (the more common CLI convention), not the
+  first-value-wins used by `--ou-profile-override` — a deliberate divergence, noted here since the
+  two flags otherwise behave symmetrically.
+
+The role name is validated at parse time (non-empty, no ARN/path fragments or whitespace) so a
+malformed value is rejected before any AWS call rather than surfacing as an opaque per-account
+`AssumeRole` failure deep in the walk.

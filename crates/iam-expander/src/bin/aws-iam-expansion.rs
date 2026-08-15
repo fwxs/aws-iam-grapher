@@ -35,7 +35,16 @@ async fn main() {
 
     match cli.command {
         Commands::ExpandActions { service, prefix } => {
-            match iam_expander::expand_actions(&service, prefix.as_deref()).await {
+            let mut cache = match iam_expander::ActionCache::load().await {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match iam_expander::expand_actions_with_cache(&service, prefix.as_deref(), &mut cache)
+                .await
+            {
                 Ok(actions) => {
                     for action in actions {
                         println!("{action}");
@@ -43,8 +52,15 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("error: {e}");
+                    if let Err(flush_err) = cache.flush().await {
+                        eprintln!("error flushing cache: {flush_err}");
+                    }
                     std::process::exit(1);
                 }
+            }
+            if let Err(e) = cache.flush().await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
         Commands::ExpandPolicy { input } => {
@@ -66,12 +82,26 @@ async fn main() {
                 }
             };
 
-            match iam_expander::expand_policy_document(&json).await {
-                Ok(expanded) => println!("{expanded}"),
+            let mut cache = match iam_expander::ActionCache::load().await {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 }
+            };
+            match iam_expander::expand_policy_document_with_cache(&json, &mut cache).await {
+                Ok(expanded) => println!("{expanded}"),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    if let Err(flush_err) = cache.flush().await {
+                        eprintln!("error flushing cache: {flush_err}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+            if let Err(e) = cache.flush().await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
     }

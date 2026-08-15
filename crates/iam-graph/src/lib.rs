@@ -30,8 +30,9 @@ pub use ingester::{GraphIngester, IngestConfig, IngestStats};
 pub use queries::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     latest_org_run_id, list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
-    privilege_escalation_paths, risky_instance_profiles, snapshot_account_id, stitch_cross_account,
-    who_can, AccountRecord, EntityRef, EscalationPath, Hop, OrgEscalationPath, OrgHop,
-    OrgQueryContext, PermissionDiff, PermissionRecord, PermissionRow, QueryContext,
-    RiskyInstanceProfile, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+    privilege_escalation_paths, resolve_org_context, resolve_scopes, risky_instance_profiles,
+    snapshot_account_id, snapshot_record, stitch_cross_account, who_can, AccountRecord, EntityRef,
+    EscalationPath, Hop, OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff,
+    PermissionRecord, PermissionRow, QueryContext, ResolvedScope, RiskyInstanceProfile,
+    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };

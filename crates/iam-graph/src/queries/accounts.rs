@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::queries::col;
 use neo4rs::Graph;
 
 /// One `AwsAccount` node in the graph: its id, optional alias, and — for accounts ingested
@@ -23,12 +24,16 @@ pub async fn list_accounts(graph: &Graph) -> Result<Vec<AccountRecord>, GraphErr
 
     let mut results = Vec::new();
     while let Some(row) = stream.next().await? {
-        let id: String = row
-            .get("id")
-            .map_err(|e| GraphError::UnexpectedResult(e.to_string()))?;
-        let alias: String = row.get("alias").unwrap_or_default();
-        let ou_id: String = row.get("ou_id").unwrap_or_default();
-        let ou_name: String = row.get("ou_name").unwrap_or_default();
+        let id: String = col(&row, "id")?;
+        // alias/ou_id/ou_name are optional-by-data-model (an account has no alias unless one
+        // was set, and only accounts ingested via `collect org` carry an OU), but the Cypher
+        // (list_accounts.cypher) already `coalesce`s each to "" — the column itself is never
+        // absent. "Not set" is therefore represented by an empty string in a present column,
+        // not by a missing one, so this is a hard `col` read like every other field: a wrong
+        // Bolt type here is a malformed row, not a legitimately-absent value.
+        let alias: String = col(&row, "alias")?;
+        let ou_id: String = col(&row, "ou_id")?;
+        let ou_name: String = col(&row, "ou_name")?;
         results.push(AccountRecord {
             id,
             alias: non_empty(alias),

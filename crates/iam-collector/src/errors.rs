@@ -21,6 +21,15 @@ pub enum CollectorError {
 
     #[error("invalid --ou-profile-override: {0}")]
     InvalidOuProfileOverride(String),
+
+    #[error("invalid --ou-role-override: {0}")]
+    InvalidOuRoleOverride(String),
+
+    #[error("invalid --profile: {0}")]
+    InvalidProfile(String),
+
+    #[error("AWS credentials unavailable: {0}")]
+    CredentialsUnavailable(String),
 }
 
 /// Non-fatal warnings produced during collection.

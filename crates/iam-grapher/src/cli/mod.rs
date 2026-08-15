@@ -104,8 +104,26 @@ mod tests {
             account_id: None,
             account_alias: None,
             regions: Vec::new(),
+            profile: None,
         };
         assert!(collect::validate(&args).is_err());
+    }
+
+    #[test]
+    fn collect_profile_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--profile",
+            "work",
+            "--neo4j-pass",
+            "test",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(top.account.profile, Some("work".to_string()));
     }
 
     #[test]
