@@ -70,11 +70,12 @@ pub enum GraphError {
 
 impl GraphError {
     /// True for transport/connection-level failures (retryable; maps to HTTP 503
-    /// in the GUI). Only `neo4rs`'s unambiguous IO/connection variants qualify —
-    /// `Neo4j(_)` (including its `Transient` kind) and decode errors
-    /// (`RowDecode`, whose source is a `DeError` — a column mismatch, never a
-    /// transport failure) are protocol/application level, not connection
-    /// failures, so they are deliberately excluded even though some `Transient`
+    /// in the GUI). `Neo4j(_)`, `Ingestion`, and `SchemaInit` are checked via
+    /// their inner `neo4rs::Error`; only its unambiguous `IOError`/`ConnectionError`
+    /// variants qualify. Other `neo4rs::Error` variants (including `Transient`)
+    /// and decode errors (`RowDecode`, whose source is a `DeError` — a column
+    /// mismatch, never a transport failure) are protocol/application level, not
+    /// connection failures, so they are excluded even though some `Transient`
     /// cases are retryable.
     pub fn is_connection_error(&self) -> bool {
         let source = match self {
