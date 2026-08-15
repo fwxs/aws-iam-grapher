@@ -141,7 +141,8 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let neo4j_pass = crate::cli::collect::resolve_neo4j_pass()?;
+    let neo4j_pass =
+        crate::cli::collect::resolve_neo4j_pass(args.shared.neo4j_pass_file.as_deref())?;
     let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
         .await
         .with_context(|| format!("failed to connect to Neo4j at {}", args.shared.neo4j_uri))?;
