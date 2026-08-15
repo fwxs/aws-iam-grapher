@@ -66,6 +66,24 @@ mod tests {
     }
 
     #[test]
+    fn collect_neo4j_pass_file_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--neo4j-pass-file",
+            "/run/secrets/neo4j_pass",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(
+            top.account.shared.neo4j_pass_file,
+            Some(std::path::PathBuf::from("/run/secrets/neo4j_pass"))
+        );
+    }
+
+    #[test]
     fn collect_offline_parses_with_input_file() {
         let cli = Cli::try_parse_from([
             "aws-iam-grapher",
@@ -92,6 +110,7 @@ mod tests {
             shared: collect::SharedCollectArgs {
                 neo4j_uri: "bolt://localhost:7687".to_string(),
                 neo4j_user: "neo4j".to_string(),
+                neo4j_pass_file: None,
                 batch_size: 500,
                 dry_run: false,
                 output: crate::output::OutputFormat::Table,
@@ -326,6 +345,19 @@ mod tests {
             "query",
             "--output-file",
             "/tmp/out.json",
+            "list-snapshots",
+        ])
+        .expect("parse must succeed");
+        assert!(matches!(cli.command, Commands::Query(_)));
+    }
+
+    #[test]
+    fn query_neo4j_pass_file_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "--neo4j-pass-file",
+            "/run/secrets/neo4j_pass",
             "list-snapshots",
         ])
         .expect("parse must succeed");
