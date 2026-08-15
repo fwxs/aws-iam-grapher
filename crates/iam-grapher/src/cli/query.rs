@@ -24,10 +24,6 @@ pub struct QueryArgs {
     #[arg(long, default_value = "neo4j")]
     neo4j_user: String,
 
-    /// Neo4j password.
-    #[arg(long, env = "NEO4J_PASSWORD")]
-    neo4j_pass: String,
-
     /// AWS account ID to query. If omitted, the query runs once per account that has a
     /// snapshot in the graph, each scoped to its own (account_id, snapshot_id).
     #[arg(long)]
@@ -455,7 +451,8 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         );
     }
 
-    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &args.neo4j_pass)
+    let neo4j_pass = crate::cli::collect::resolve_neo4j_pass()?;
+    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &neo4j_pass)
         .await
         .with_context(|| format!("failed to connect to Neo4j at {}", args.neo4j_uri))?;
 

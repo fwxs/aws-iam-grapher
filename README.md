@@ -197,8 +197,7 @@ them all under one `org_collection_run_id`:
 aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
-  --assume-role-name OrganizationAccountAccessRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --assume-role-name OrganizationAccountAccessRole
 ```
 
 `--exclude-ou-id`/`--exclude-ou-name` and `--include-ou-name` scope which OUs are collected;
@@ -212,8 +211,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole
 ```
 
 All of these flags are repeatable, match against both OU id and display name, and are documented
@@ -244,8 +242,7 @@ export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
-    --assume-role-name OrganizationAccountAccessRole \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --assume-role-name OrganizationAccountAccessRole
 ```
 
 ### Scoping which accounts are collected
@@ -262,8 +259,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --assume-role-name OrganizationAccountAccessRole \
     --exclude-ou-id ou-root1-sandbox \
-    --include-ou-name Production \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --include-ou-name Production
 ```
 
 ### Mixed-authentication organizations (`--ou-profile-override`)
@@ -287,8 +283,7 @@ aws-iam-grapher collect org \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
     --ou-profile-override Quarantine=legacy-static-creds \
-    --ou-profile-override ThirdParty=vendor-sso \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --ou-profile-override ThirdParty=vendor-sso
 ```
 
 Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
@@ -313,8 +308,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
-    --concurrency 8 \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --concurrency 8
 ```
 
 ---
@@ -353,7 +347,7 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 ## Query Commands
 
-All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+All query commands require the `NEO4J_PASSWORD` environment variable to be set. If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
 
 `--account-id` is optional. When it's provided, the query scopes to exactly that account (as
 before). When it's **omitted**, `query` resolves every distinct account with at least one

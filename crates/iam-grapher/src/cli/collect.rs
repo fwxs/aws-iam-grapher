@@ -28,12 +28,6 @@ pub struct SharedCollectArgs {
     #[arg(long, default_value = "neo4j")]
     pub neo4j_user: String,
 
-    /// Neo4j password. Required via flag or NEO4J_PASSWORD env var, but not enforced by
-    /// clap directly since this struct is also flattened into the `collect org` parent
-    /// command where it is unused — see `resolve_neo4j_pass`.
-    #[arg(long, env = "NEO4J_PASSWORD")]
-    pub neo4j_pass: Option<String>,
-
     /// Batch size for Neo4j writes.
     #[arg(long, default_value = "500")]
     pub batch_size: usize,
@@ -105,14 +99,13 @@ pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve the Neo4j password, erroring with a friendly message if it's missing.
-/// Not enforced by clap directly because `SharedCollectArgs` is also flattened into the
-/// `collect org` parent command, where this particular instance of it goes unused.
-pub fn resolve_neo4j_pass(shared: &SharedCollectArgs) -> anyhow::Result<String> {
-    shared
-        .neo4j_pass
-        .clone()
-        .context("Neo4j password required: pass --neo4j-pass or set the NEO4J_PASSWORD env var")
+/// Resolve the Neo4j password from the `NEO4J_PASSWORD` environment variable, erroring
+/// with a friendly message if it's missing. The single source of truth for `collect`,
+/// `collect org`, and `query` — the password is never accepted as a CLI argument, since
+/// that would leak it into `ps` output, shell history, and Claude Code transcripts.
+pub fn resolve_neo4j_pass() -> anyhow::Result<String> {
+    std::env::var("NEO4J_PASSWORD")
+        .context("Neo4j password required: set the NEO4J_PASSWORD environment variable")
 }
 
 pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
@@ -135,7 +128,7 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
     }
 
     let snapshot_id = Uuid::new_v4().to_string();
-    let neo4j_pass = resolve_neo4j_pass(&args.shared)?;
+    let neo4j_pass = resolve_neo4j_pass()?;
     let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
         .await
         .with_context(|| format!("failed to connect to Neo4j at {}", args.shared.neo4j_uri))?;
