@@ -264,13 +264,18 @@ async fn list_snapshots_reports_column_name_on_malformed_row() {
         .await
         .expect("restoring query must succeed");
 
+    assert!(
+        !err.is_connection_error(),
+        "a decode failure must not classify as a connection error"
+    );
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "decode error must preserve its neo4rs source"
+    );
     match err {
-        GraphError::UnexpectedResult(message) => {
-            assert!(
-                message.contains("is_partial"),
-                "error must name the malformed column, got: {message}"
-            );
+        GraphError::RowDecode { column, .. } => {
+            assert_eq!(column, "is_partial", "error must name the malformed column");
         }
-        other => panic!("expected UnexpectedResult, got: {other:?}"),
+        other => panic!("expected RowDecode, got: {other:?}"),
     }
 }
