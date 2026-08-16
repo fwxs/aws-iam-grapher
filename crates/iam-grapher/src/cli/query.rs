@@ -43,8 +43,9 @@ pub struct QueryArgs {
     #[arg(long, value_enum, default_value = "table")]
     output: OutputFormat,
 
-    /// Write JSON result to this file. Overrides --output to JSON for the file;
-    /// the human-readable table/summary still prints to stdout.
+    /// Write the result to this file, in whatever format --output selects (json or
+    /// graphviz; table has no file-writable form, so this has no effect with the default
+    /// --output table). For --output json, stdout is suppressed once the file is written.
     #[arg(long)]
     output_file: Option<PathBuf>,
 
@@ -52,8 +53,15 @@ pub struct QueryArgs {
     command: QueryCommand,
 }
 
-/// Emit JSON to `output_file` and/or stdout per `output`/`output_file` settings.
+/// Emit JSON to `output_file` (if given) and/or stdout per `output`.
 /// Returns `true` if the human-readable view should still be printed to stdout.
+///
+/// | output | output_file | file | stdout |
+/// |--------|-------------|------|--------|
+/// | table  | absent      | —    | table  |
+/// | json   | absent      | —    | json   |
+/// | table  | present     | json | table  |
+/// | json   | present     | json | (none) |
 fn emit_json<T: Serialize>(
     value: &T,
     output: &OutputFormat,
@@ -61,10 +69,11 @@ fn emit_json<T: Serialize>(
 ) -> anyhow::Result<bool> {
     if let Some(path) = output_file {
         json::write_json(value, path)?;
-        return Ok(true);
     }
     if *output == OutputFormat::Json {
-        json::print_json(value)?;
+        if output_file.is_none() {
+            json::print_json(value)?;
+        }
         return Ok(false);
     }
     Ok(true)
@@ -897,6 +906,59 @@ mod tests {
             headers: &["X"],
             rows: vec![vec![s.clone()]],
         }
+    }
+
+    #[derive(Serialize)]
+    struct SampleValue {
+        n: u32,
+    }
+
+    #[test]
+    fn emit_json_table_no_file_prints_table_no_file_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table = emit_json(&SampleValue { n: 1 }, &OutputFormat::Table, None).unwrap();
+
+        assert!(print_table);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn emit_json_json_no_file_suppresses_table_no_file_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table = emit_json(&SampleValue { n: 1 }, &OutputFormat::Json, None).unwrap();
+
+        assert!(!print_table);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn emit_json_table_with_file_writes_file_and_prints_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table =
+            emit_json(&SampleValue { n: 1 }, &OutputFormat::Table, Some(&path)).unwrap();
+
+        assert!(print_table);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn emit_json_json_with_file_writes_file_and_suppresses_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table =
+            emit_json(&SampleValue { n: 1 }, &OutputFormat::Json, Some(&path)).unwrap();
+
+        assert!(!print_table);
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"n\": 1"));
     }
 
     #[tokio::test]
