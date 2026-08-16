@@ -32,7 +32,10 @@ pub async fn initialize(graph: &Graph) -> Result<(), GraphError> {
         graph
             .run(neo4rs::query(stmt))
             .await
-            .map_err(|e| GraphError::SchemaInit(format!("{e}: {stmt}")))?;
+            .map_err(|e| GraphError::SchemaInit {
+                statement: stmt.to_string(),
+                source: e,
+            })?;
     }
     Ok(())
 }

@@ -58,12 +58,29 @@ mod tests {
 
     #[test]
     fn collect_default_mode_is_hybrid() {
-        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--neo4j-pass", "test"])
-            .expect("parse must succeed");
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect"]).expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
             panic!("expected Collect subcommand");
         };
         assert_eq!(top.account.mode, CollectMode::Hybrid);
+    }
+
+    #[test]
+    fn collect_neo4j_pass_file_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "collect",
+            "--neo4j-pass-file",
+            "/run/secrets/neo4j_pass",
+        ])
+        .expect("parse must succeed");
+        let Commands::Collect(top) = cli.command else {
+            panic!("expected Collect subcommand");
+        };
+        assert_eq!(
+            top.account.shared.neo4j_pass_file,
+            Some(std::path::PathBuf::from("/run/secrets/neo4j_pass"))
+        );
     }
 
     #[test]
@@ -75,8 +92,6 @@ mod tests {
             "offline",
             "--input-file",
             "/tmp/auth.json",
-            "--neo4j-pass",
-            "test",
         ])
         .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
@@ -95,7 +110,7 @@ mod tests {
             shared: collect::SharedCollectArgs {
                 neo4j_uri: "bolt://localhost:7687".to_string(),
                 neo4j_user: "neo4j".to_string(),
-                neo4j_pass: Some("neo4j".to_string()),
+                neo4j_pass_file: None,
                 batch_size: 500,
                 dry_run: false,
                 output: crate::output::OutputFormat::Table,
@@ -111,15 +126,8 @@ mod tests {
 
     #[test]
     fn collect_profile_parses() {
-        let cli = Cli::try_parse_from([
-            "aws-iam-grapher",
-            "collect",
-            "--profile",
-            "work",
-            "--neo4j-pass",
-            "test",
-        ])
-        .expect("parse must succeed");
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--profile", "work"])
+            .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
             panic!("expected Collect subcommand");
         };
@@ -128,14 +136,8 @@ mod tests {
 
     #[test]
     fn collect_dry_run_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "aws-iam-grapher",
-            "collect",
-            "--dry-run",
-            "--neo4j-pass",
-            "test",
-        ])
-        .expect("parse must succeed");
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--dry-run"])
+            .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
             panic!("expected Collect subcommand");
         };
@@ -149,8 +151,6 @@ mod tests {
             "collect",
             "--output-file",
             "/tmp/out.json",
-            "--neo4j-pass",
-            "test",
         ])
         .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
@@ -164,8 +164,7 @@ mod tests {
 
     #[test]
     fn collect_regions_flag_defaults_to_empty() {
-        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect", "--neo4j-pass", "test"])
-            .expect("parse must succeed");
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "collect"]).expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
             panic!("expected Collect subcommand");
         };
@@ -181,8 +180,6 @@ mod tests {
             "us-west-2",
             "--region",
             "eu-central-1",
-            "--neo4j-pass",
-            "test",
         ])
         .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
@@ -201,8 +198,6 @@ mod tests {
             "mgmt",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
             "--exclude-ou-id",
             "ou-1111",
             "--exclude-ou-id",
@@ -231,8 +226,6 @@ mod tests {
             "mgmt",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
             "--exclude-ou-name",
             "Sandbox",
             "--exclude-ou-name",
@@ -259,8 +252,6 @@ mod tests {
             "mgmt",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
             "--include-ou-name",
             "Prod",
             "--include-ou-name",
@@ -289,8 +280,6 @@ mod tests {
             "default",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
         ])
         .expect("parse must succeed");
         let Commands::Collect(top) = cli.command else {
@@ -312,8 +301,6 @@ mod tests {
             "mgmt",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
             "--region",
             "us-west-2",
         ])
@@ -335,8 +322,6 @@ mod tests {
             "org",
             "--assume-role-name",
             "OrgAccess",
-            "--neo4j-pass",
-            "test",
         ]);
         assert!(result.is_err());
     }
@@ -349,8 +334,6 @@ mod tests {
             "org",
             "--management-profile",
             "mgmt",
-            "--neo4j-pass",
-            "test",
         ]);
         assert!(result.is_err());
     }
@@ -360,10 +343,21 @@ mod tests {
         let cli = Cli::try_parse_from([
             "aws-iam-grapher",
             "query",
-            "--neo4j-pass",
-            "test",
             "--output-file",
             "/tmp/out.json",
+            "list-snapshots",
+        ])
+        .expect("parse must succeed");
+        assert!(matches!(cli.command, Commands::Query(_)));
+    }
+
+    #[test]
+    fn query_neo4j_pass_file_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "--neo4j-pass-file",
+            "/run/secrets/neo4j_pass",
             "list-snapshots",
         ])
         .expect("parse must succeed");

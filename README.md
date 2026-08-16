@@ -56,6 +56,41 @@ docker volume inspect aws-iam-grapher_neo4j_data   # see where Docker stores it
 docker compose down -v   # drops the volume — full reset, all snapshots lost
 ```
 
+## Neo4j password and secret mounts
+
+The Neo4j password is never accepted as a bare CLI value — it would leak into `ps`
+output, shell history, and process listings. `collect`, `collect org`, and `query` all
+resolve it with this precedence:
+
+1. `--neo4j-pass-file <path>` — reads the password from a file. A trailing newline is
+   trimmed. Use this for container/Kubernetes deployments where the secret is mounted as
+   a file (e.g. `/run/secrets/neo4j_pass`), which avoids exposing it via
+   `/proc/<pid>/environ`, `docker inspect`, or inheritance by child processes — all of
+   which apply to environment variables.
+2. `NEO4J_PASSWORD` environment variable — used if `--neo4j-pass-file` is not given.
+
+If neither is set, the command fails with an error naming both options.
+
+```bash
+# Docker: mount a secret file read-only and point --neo4j-pass-file at it
+docker run --rm \
+  -v ./neo4j_pass.txt:/run/secrets/neo4j_pass:ro \
+  aws-iam-grapher collect --neo4j-pass-file /run/secrets/neo4j_pass ...
+```
+
+```yaml
+# Kubernetes: mount a Secret as a file and reference it the same way
+volumeMounts:
+  - name: neo4j-pass
+    mountPath: /run/secrets
+    readOnly: true
+volumes:
+  - name: neo4j-pass
+    secret:
+      secretName: neo4j-pass
+# then: --neo4j-pass-file /run/secrets/neo4j_pass
+```
+
 **Backup and restore:**
 
 Neo4j Community has no online (hot) backup — only offline. `scripts/neo4j-backup.sh`
@@ -197,8 +232,7 @@ them all under one `org_collection_run_id`:
 aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
-  --assume-role-name OrganizationAccountAccessRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --assume-role-name OrganizationAccountAccessRole
 ```
 
 `--exclude-ou-id`/`--exclude-ou-name` and `--include-ou-name` scope which OUs are collected;
@@ -212,8 +246,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole
 ```
 
 All of these flags are repeatable, match against both OU id and display name, and are documented
@@ -244,8 +277,7 @@ export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
-    --assume-role-name OrganizationAccountAccessRole \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --assume-role-name OrganizationAccountAccessRole
 ```
 
 ### Scoping which accounts are collected
@@ -262,8 +294,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --assume-role-name OrganizationAccountAccessRole \
     --exclude-ou-id ou-root1-sandbox \
-    --include-ou-name Production \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --include-ou-name Production
 ```
 
 ### Mixed-authentication organizations (`--ou-profile-override`)
@@ -287,8 +318,7 @@ aws-iam-grapher collect org \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
     --ou-profile-override Quarantine=legacy-static-creds \
-    --ou-profile-override ThirdParty=vendor-sso \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --ou-profile-override ThirdParty=vendor-sso
 ```
 
 Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
@@ -313,8 +343,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
-    --concurrency 8 \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --concurrency 8
 ```
 
 ---
@@ -353,7 +382,8 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 ## Query Commands
 
-All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+All query commands require the Neo4j password, resolved via `--neo4j-pass-file <path>` or
+the `NEO4J_PASSWORD` environment variable (see [Neo4j password and secret mounts](#neo4j-password-and-secret-mounts)). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
 
 `--account-id` is optional. When it's provided, the query scopes to exactly that account (as
 before). When it's **omitted**, `query` resolves every distinct account with at least one

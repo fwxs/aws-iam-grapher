@@ -17,3 +17,17 @@ services:
 
 volumes:
   neo4j_data:
+
+# This compose file runs the Neo4j server only; `aws-iam-grapher` itself runs locally via
+# `cargo run` (see README.md). If you run the CLI as a container too, prefer a mounted
+# secret file over an env var for its password:
+#
+#   services:
+#     aws-iam-grapher:
+#       secrets:
+#         - neo4j_pass
+#       command: ["collect", "--neo4j-pass-file", "/run/secrets/neo4j_pass", ...]
+#
+#   secrets:
+#     neo4j_pass:
+#       file: ./neo4j_pass.txt

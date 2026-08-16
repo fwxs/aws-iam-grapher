@@ -24,7 +24,7 @@ pub mod nodes;
 pub mod queries;
 mod schema;
 
-pub use client::GraphClient;
+pub use client::{redact_uri, GraphClient};
 pub use errors::GraphError;
 pub use ingester::{GraphIngester, IngestConfig, IngestStats};
 pub use queries::{

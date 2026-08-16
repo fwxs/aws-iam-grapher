@@ -1,10 +1,9 @@
 use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
+use crate::queries::render_hop_bound;
 use neo4rs::Graph;
 use std::collections::HashMap;
-
-pub use crate::queries::escalation::{DEFAULT_MAX_HOPS, MAX_HOPS_CAP};
 
 /// One hop in a cross-account escalation path — includes `account_id` for account labeling.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,8 +40,7 @@ pub async fn org_escalation_paths(
     ctx: &OrgQueryContext,
     max_hops: u32,
 ) -> Result<Vec<OrgEscalationPath>, GraphError> {
-    let max_hops = max_hops.clamp(1, MAX_HOPS_CAP);
-    let cypher = ORG_ESCALATION_QUERY.replace("{max_hops}", &max_hops.to_string());
+    let cypher = render_hop_bound(ORG_ESCALATION_QUERY, max_hops);
 
     let mut stream = graph
         .execute(neo4rs::query(&cypher).param("org_run_id", ctx.org_run_id.as_str()))

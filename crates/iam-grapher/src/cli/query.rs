@@ -24,9 +24,10 @@ pub struct QueryArgs {
     #[arg(long, default_value = "neo4j")]
     neo4j_user: String,
 
-    /// Neo4j password.
-    #[arg(long, env = "NEO4J_PASSWORD")]
-    neo4j_pass: String,
+    /// Path to a file containing the Neo4j password (e.g. a Docker/Kubernetes secret
+    /// mount). Takes precedence over NEO4J_PASSWORD. A trailing newline is trimmed.
+    #[arg(long)]
+    neo4j_pass_file: Option<PathBuf>,
 
     /// AWS account ID to query. If omitted, the query runs once per account that has a
     /// snapshot in the graph, each scoped to its own (account_id, snapshot_id).
@@ -42,8 +43,9 @@ pub struct QueryArgs {
     #[arg(long, value_enum, default_value = "table")]
     output: OutputFormat,
 
-    /// Write JSON result to this file. Overrides --output to JSON for the file;
-    /// the human-readable table/summary still prints to stdout.
+    /// Write the result to this file, in whatever format --output selects (json or
+    /// graphviz; table has no file-writable form, so this has no effect with the default
+    /// --output table). For --output json, stdout is suppressed once the file is written.
     #[arg(long)]
     output_file: Option<PathBuf>,
 
@@ -60,9 +62,15 @@ struct QueryResponse<'a, T: Serialize> {
     caveats: Vec<Caveat>,
 }
 
-/// Emit JSON (wrapped in [`QueryResponse`]) to `output_file` and/or stdout per
-/// `output`/`output_file` settings. Returns `true` if the human-readable view should still
-/// be printed to stdout.
+/// Emit JSON (wrapped in [`QueryResponse`]) to `output_file` (if given) and/or stdout per
+/// `output`. Returns `true` if the human-readable view should still be printed to stdout.
+///
+/// | output | output_file | file | stdout |
+/// |--------|-------------|------|--------|
+/// | table  | absent      | —    | table  |
+/// | json   | absent      | —    | json   |
+/// | table  | present     | json | table  |
+/// | json   | present     | json | (none) |
 fn emit_json<T: Serialize>(
     value: &T,
     caveats: Vec<Caveat>,
@@ -75,10 +83,11 @@ fn emit_json<T: Serialize>(
     };
     if let Some(path) = output_file {
         json::write_json(&response, path)?;
-        return Ok(true);
     }
     if *output == OutputFormat::Json {
-        json::print_json(&response)?;
+        if output_file.is_none() {
+            json::print_json(&response)?;
+        }
         return Ok(false);
     }
     Ok(true)
@@ -512,9 +521,15 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
         );
     }
 
-    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &args.neo4j_pass)
+    let neo4j_pass = crate::cli::collect::resolve_neo4j_pass(args.neo4j_pass_file.as_deref())?;
+    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &neo4j_pass)
         .await
-        .with_context(|| format!("failed to connect to Neo4j at {}", args.neo4j_uri))?;
+        .with_context(|| {
+            format!(
+                "failed to connect to Neo4j at {}",
+                iam_graph::redact_uri(&args.neo4j_uri)
+            )
+        })?;
 
     match args.command {
         QueryCommand::ListSnapshots => {
@@ -980,6 +995,76 @@ mod tests {
             headers: &["X"],
             rows: vec![vec![s.clone()]],
         }
+    }
+
+    #[derive(Serialize)]
+    struct SampleValue {
+        n: u32,
+    }
+
+    #[test]
+    fn emit_json_table_no_file_prints_table_no_file_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table = emit_json(
+            &SampleValue { n: 1 },
+            Vec::new(),
+            &OutputFormat::Table,
+            None,
+        )
+        .unwrap();
+
+        assert!(print_table);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn emit_json_json_no_file_suppresses_table_no_file_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table =
+            emit_json(&SampleValue { n: 1 }, Vec::new(), &OutputFormat::Json, None).unwrap();
+
+        assert!(!print_table);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn emit_json_table_with_file_writes_file_and_prints_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table = emit_json(
+            &SampleValue { n: 1 },
+            Vec::new(),
+            &OutputFormat::Table,
+            Some(&path),
+        )
+        .unwrap();
+
+        assert!(print_table);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn emit_json_json_with_file_writes_file_and_suppresses_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        let print_table = emit_json(
+            &SampleValue { n: 1 },
+            Vec::new(),
+            &OutputFormat::Json,
+            Some(&path),
+        )
+        .unwrap();
+
+        assert!(!print_table);
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"n\": 1"));
     }
 
     #[tokio::test]
