@@ -168,6 +168,38 @@ mod tests {
         assert!(std::error::Error::source(&err).is_some());
     }
 
+    #[tokio::test]
+    async fn connect_failure_error_string_excludes_password() {
+        // Arrange: credentials embedded in the URI itself (worst case for leakage)
+        // plus passed again as separate connect() args, against an unreachable port.
+        let uri = "bolt://neo4j:supersecretpw@127.0.0.1:1";
+        let client = crate::client::GraphClient::connect(uri, "neo4j", "supersecretpw")
+            .await
+            .expect("connect() only builds the lazy pool, it doesn't dial yet");
+
+        // Act
+        let result = client.run(neo4rs::query("RETURN 1")).await;
+        let Err(err) = result else {
+            panic!("querying an unreachable port must fail");
+        };
+
+        // Assert: neither Display nor Debug output may contain the password.
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+        assert!(
+            !display.contains("supersecretpw"),
+            "error Display leaked the password: {display}"
+        );
+        assert!(
+            !debug.contains("supersecretpw"),
+            "error Debug leaked the password: {debug}"
+        );
+        assert!(
+            !display.contains("neo4j:supersecretpw"),
+            "error Display leaked the userinfo form: {display}"
+        );
+    }
+
     #[test]
     fn ingestion_error_preserves_source_chain() {
         // Arrange: the CLI boundary wraps GraphError in anyhow::Error via `?`,

@@ -459,7 +459,12 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
     let neo4j_pass = crate::cli::collect::resolve_neo4j_pass(args.neo4j_pass_file.as_deref())?;
     let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &neo4j_pass)
         .await
-        .with_context(|| format!("failed to connect to Neo4j at {}", args.neo4j_uri))?;
+        .with_context(|| {
+            format!(
+                "failed to connect to Neo4j at {}",
+                iam_graph::redact_uri(&args.neo4j_uri)
+            )
+        })?;
 
     match args.command {
         QueryCommand::ListSnapshots => {
