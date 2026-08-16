@@ -45,8 +45,9 @@ pub struct SharedCollectArgs {
     #[arg(long, value_enum, default_value = "table")]
     pub output: OutputFormat,
 
-    /// Write JSON summary to this file. Overrides --output to JSON for the file;
-    /// the human-readable summary still prints to stdout.
+    /// Write the JSON summary to this file. For --output json, stdout is suppressed
+    /// once the file is written; the human-readable summary still prints for
+    /// --output table (default), the only case this has no effect for.
     #[arg(long)]
     pub output_file: Option<PathBuf>,
 }
@@ -333,10 +334,13 @@ fn print_collect_summary(
 
     if let Some(path) = output_file {
         crate::output::json::write_json(&summary, path)?;
-    } else if *format == OutputFormat::Json {
-        let json = serde_json::to_string_pretty(&summary)
-            .context("failed to serialize collect summary")?;
-        println!("{json}");
+    }
+    if *format == OutputFormat::Json {
+        if output_file.is_none() {
+            let json = serde_json::to_string_pretty(&summary)
+                .context("failed to serialize collect summary")?;
+            println!("{json}");
+        }
         return Ok(());
     }
 
@@ -375,6 +379,64 @@ mod tests {
         file.write_all(contents.as_bytes())
             .expect("write temp file");
         file
+    }
+
+    fn summary_args(
+        format: OutputFormat,
+        output_file: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        print_collect_summary(
+            "snap-1",
+            "offline",
+            &CollectedData::default(),
+            &IngestStats::default(),
+            0.5,
+            &format,
+            output_file,
+        )
+    }
+
+    #[test]
+    fn print_collect_summary_table_no_file_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Table, None).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_json_no_file_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Json, None).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_table_with_file_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Table, Some(&path)).unwrap();
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_json_with_file_writes_valid_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Json, Some(&path)).unwrap();
+
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["snapshot_id"], "snap-1");
     }
 
     #[test]
