@@ -391,7 +391,8 @@ snapshot in the graph and runs the query once per account, each correctly scoped
 `(account_id, snapshot_id)` — never merging results across accounts. This applies to
 `who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`, and
 `list-snapshots`. Output (table and JSON) groups results under an `=== Account: ... ===`
-header (table) or an `account_id`/`snapshot_id`/`results` envelope per account (JSON). A
+header (table) or an `account_id`/`snapshot_id`/`results` envelope per account, nested inside
+the outer `results` array of the top-level `{results, caveats}` JSON envelope (see below). A
 graph with only one account degrades to a single group. `--snapshot-id` cannot be combined
 with multi-account mode (more than one account resolved) since a snapshot id would be
 ambiguous across accounts — pass `--account-id` to target one account instead.
@@ -402,9 +403,10 @@ errors if the two snapshots belong to different accounts.
 `list-accounts` is inherently cross-account and never requires (or uses) `--account-id` — use
 it to discover which accounts exist in the graph before targeting one with `--account-id`.
 
-Add `--output-file <path>` to write the result as JSON to a file, regardless of `--output`. The
-human-readable table still prints to stdout — useful for downstream tooling that wants a clean
-JSON artifact without scraping stdout/stderr:
+Add `--output-file <path>` to write the result as JSON to a file. With `--output table`
+(the default), the table still prints to stdout in addition to the file; with `--output json`,
+stdout is suppressed once the file is written — useful for downstream tooling that wants a
+clean JSON artifact without scraping stdout/stderr:
 
 ```bash
 aws-iam-grapher query \
@@ -414,6 +416,13 @@ aws-iam-grapher query \
 ```
 
 The `collect` subcommand supports the same `--output-file` flag for its summary.
+
+Every JSON query response is an envelope, not a bare array/object:
+`{ "results": ..., "caveats": [...] }`. `results` holds what previously was the entire
+top-level payload; `caveats` is always present (empty when none apply) and lists which
+approximations documented in [`docs/limitations.md`](docs/limitations.md) apply to that
+specific query and snapshot. **This is a breaking change for scripts written against pre-caveats
+JSON output** — `jq '.[0].arn'` on a `who-can` result becomes `jq '.results[0].arn'`.
 
 ### Who can perform an action?
 

@@ -11,9 +11,9 @@
 /// a rename of the literal breaks both sides at compile time instead of drifting silently.
 pub const WILDCARDS_NOT_EXPANDED_REASON: &str = "some wildcards not expanded";
 
-/// Closed set of known result approximations. Deliberately not `#[non_exhaustive]`: the set is
-/// a contract consumers (including the D8 JSON-schema gate) branch on, so a new approximation
-/// must be a visible addition here, not silently absorbed by a wildcard match.
+/// Closed set of known result approximations. Deliberately not `#[non_exhaustive]`: consumers
+/// branch on this set, so a new approximation must be a visible addition here, not silently
+/// absorbed by a wildcard match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CaveatCode {

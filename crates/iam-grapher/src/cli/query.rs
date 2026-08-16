@@ -133,6 +133,24 @@ fn snapshot_caveats(snapshots: &[&SnapshotRecord]) -> Vec<Caveat> {
     caveats
 }
 
+/// Static caveats for `who_can` (`crates/iam-graph/src/queries/analysis.rs`), the only query
+/// that performs both glob-based Deny subtraction (via `iam_expander::glob_match`) and
+/// `NotAction` exclusion evaluation — see "Deny scope is approximate" and "`NotAction` —
+/// implemented as allow-all-except" in `docs/limitations.md`. Do not reuse this for a query
+/// that doesn't call `who_can`/`privilege_escalation_paths`-style Deny/NotAction logic; check
+/// the query's own Cypher and Rust before attaching either caveat.
+fn who_can_static_caveats() -> Vec<Caveat> {
+    vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()]
+}
+
+/// Static caveats for `privilege_escalation_paths`/`org_escalation_paths`
+/// (`crates/iam-graph/src/queries/escalation.rs`, `org_escalation.rs`), which track
+/// `allowed_actions`/`deny_actions` and subtract Deny via the same glob matcher as `who_can`,
+/// but never evaluate `NotAction` — so only `approximate-deny` applies here.
+fn escalation_static_caveats() -> Vec<Caveat> {
+    vec![Caveat::approximate_deny()]
+}
+
 fn print_account_header(account_id: &str, snapshot_id: &str) {
     println!(
         "=== Account: {} (snapshot: {}) ===",
@@ -635,11 +653,16 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let snapshots = snapshots_for_org_run(client.inner(), &run_id)
-                .await
-                .context("failed to resolve org-run snapshots for caveats")?;
-            let mut caveats = vec![Caveat::approximate_deny()];
-            caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
+            // Snapshot-derived caveats need one extra graph query across the whole org run.
+            // Only pay for it when the result will actually carry caveats: `--output table`
+            // with no `--output-file` never serializes JSON at all.
+            let mut caveats = escalation_static_caveats();
+            if args.output == OutputFormat::Json || args.output_file.is_some() {
+                let snapshots = snapshots_for_org_run(client.inner(), &run_id)
+                    .await
+                    .context("failed to resolve org-run snapshots for caveats")?;
+                caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
+            }
             if !emit_json(&paths, caveats, &args.output, args.output_file.as_deref())? {
                 return Ok(());
             }
@@ -686,13 +709,22 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             ref snapshot_a,
             ref snapshot_b,
         } => {
+            // Fetch both full records once — needed for `partial-snapshot`/`expansion-degraded`
+            // caveats regardless, and reused below to derive `account_id` when `--account-id`
+            // is omitted instead of issuing a second pair of lookups for that alone.
+            let record_a = snapshot_record(client.inner(), snapshot_a)
+                .await?
+                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
+            let record_b = snapshot_record(client.inner(), snapshot_b)
+                .await?
+                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
+
             let resolved_account_id;
             let account_id = match args.account_id.as_deref() {
                 Some(id) => id,
                 None => {
-                    resolved_account_id = resolve_diff_account_id(&client, snapshot_a, snapshot_b)
-                        .await
-                        .context("failed to resolve account for diff")?;
+                    resolved_account_id =
+                        diff_account_id_from_records(snapshot_a, &record_a, snapshot_b, &record_b)?;
                     &resolved_account_id
                 }
             };
@@ -700,14 +732,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("diff query failed")?;
 
-            let record_a = snapshot_record(client.inner(), snapshot_a)
-                .await?
-                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
-            let record_b = snapshot_record(client.inner(), snapshot_b)
-                .await?
-                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
-            let mut caveats = vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()];
-            caveats.extend(snapshot_caveats(&[&record_a, &record_b]));
+            // diff_permissions()/diff_added.cypher/diff_removed.cypher do a raw structural
+            // existence-diff of stored (action, resource, effect) triples — no Deny
+            // reconciliation, no glob matching, no NotAction logic. Neither approximation
+            // caveat applies; only snapshot-derived caveats can.
+            let caveats = snapshot_caveats(&[&record_a, &record_b]);
             if !emit_json(&diff, caveats, &args.output, args.output_file.as_deref())? {
                 return Ok(());
             }
@@ -754,7 +783,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
-                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
+                    caveats: who_can_static_caveats(),
                 },
                 scopes,
                 |ctx| {
@@ -805,7 +834,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
-                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
+                    // entity_permissions() does no Deny subtraction and no NotAction
+                    // handling — it returns every stored Allow/Deny row unfiltered, with
+                    // `effective` computed only from permission-boundary capping. Neither
+                    // caveat applies; see crates/iam-graph/src/queries/analysis.rs.
+                    caveats: Vec::new(),
                 },
                 scopes,
                 |ctx| {
@@ -843,7 +876,11 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
-                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
+                    // instance_profiles_with_action.cypher matches only exact
+                    // `effect: 'Allow', action: $action` — no Deny exclusion, no
+                    // wildcard/NotAction arm. Neither caveat applies; see
+                    // crates/iam-graph/queries/instance_profiles_with_action.cypher.
+                    caveats: Vec::new(),
                 },
                 scopes,
                 |ctx| {
@@ -884,7 +921,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
-                    caveats: vec![Caveat::approximate_deny()],
+                    caveats: escalation_static_caveats(),
                 },
                 scopes,
                 |ctx| {
@@ -941,27 +978,21 @@ fn parse_condition_context(
 /// Derive the account a `diff` should run in from its two explicit snapshot ids, for use
 /// when `--account-id` is omitted. Errors if either snapshot doesn't exist, or if they
 /// belong to different accounts (diff only compares snapshots within one account).
-async fn resolve_diff_account_id(
-    client: &GraphClient,
+fn diff_account_id_from_records(
     snapshot_a: &str,
+    record_a: &SnapshotRecord,
     snapshot_b: &str,
+    record_b: &SnapshotRecord,
 ) -> anyhow::Result<String> {
-    let account_a = snapshot_record(client.inner(), snapshot_a)
-        .await?
-        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?
-        .account_id;
-    let account_b = snapshot_record(client.inner(), snapshot_b)
-        .await?
-        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?
-        .account_id;
-
-    if account_a != account_b {
+    if record_a.account_id != record_b.account_id {
         anyhow::bail!(
-            "snapshot {snapshot_a} belongs to account {account_a} but snapshot {snapshot_b} \
-             belongs to account {account_b}; diff requires both snapshots in the same account"
+            "snapshot {snapshot_a} belongs to account {} but snapshot {snapshot_b} belongs to \
+             account {}; diff requires both snapshots in the same account",
+            record_a.account_id,
+            record_b.account_id,
         );
     }
-    Ok(account_a)
+    Ok(record_a.account_id.clone())
 }
 
 fn short_id(id: &str) -> &str {
@@ -1289,5 +1320,52 @@ mod tests {
             .filter(|c| c.code == iam_graph::CaveatCode::PartialSnapshot)
             .count();
         assert_eq!(partial_count, 1);
+    }
+
+    #[test]
+    fn who_can_static_caveats_includes_deny_and_notaction() {
+        let codes: Vec<_> = who_can_static_caveats()
+            .into_iter()
+            .map(|c| c.code)
+            .collect();
+
+        assert_eq!(
+            codes,
+            [
+                iam_graph::CaveatCode::ApproximateDeny,
+                iam_graph::CaveatCode::NotactionNotExpanded,
+            ]
+        );
+    }
+
+    #[test]
+    fn escalation_static_caveats_includes_only_deny() {
+        let codes: Vec<_> = escalation_static_caveats()
+            .into_iter()
+            .map(|c| c.code)
+            .collect();
+
+        assert_eq!(codes, [iam_graph::CaveatCode::ApproximateDeny]);
+    }
+
+    #[test]
+    fn diff_account_id_from_records_matches_when_accounts_agree() {
+        let record = snapshot(false, &[]);
+
+        let account_id =
+            diff_account_id_from_records("snap-a", &record, "snap-b", &record).unwrap();
+
+        assert_eq!(account_id, "111111111111");
+    }
+
+    #[test]
+    fn diff_account_id_from_records_errors_on_account_mismatch() {
+        let mut record_b = snapshot(false, &[]);
+        record_b.account_id = "222222222222".to_string();
+
+        let result =
+            diff_account_id_from_records("snap-a", &snapshot(false, &[]), "snap-b", &record_b);
+
+        assert!(result.is_err());
     }
 }

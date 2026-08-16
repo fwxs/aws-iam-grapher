@@ -55,8 +55,7 @@ pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
 pub use scope::{resolve_org_context, resolve_scopes, ResolvedScope, ScopeSelector};
 pub use snapshots::{
     delete_snapshot, diff_permissions, latest_org_run_id, list_account_ids, list_snapshots,
-    snapshot_account_id, snapshot_record, snapshots_for_org_run, PermissionDiff, PermissionRecord,
-    SnapshotRecord,
+    snapshot_record, snapshots_for_org_run, PermissionDiff, PermissionRecord, SnapshotRecord,
 };
 pub use stitch::stitch_cross_account;
 
