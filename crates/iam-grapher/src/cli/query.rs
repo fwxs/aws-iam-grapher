@@ -4,9 +4,9 @@ use clap::{Args, Subcommand};
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
-    privilege_escalation_paths, resolve_org_context, resolve_scopes, snapshot_account_id, who_can,
-    EntityRef, EscalationPath, GraphClient, GraphError, PermissionRow, QueryContext, ResolvedScope,
-    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
+    privilege_escalation_paths, resolve_org_context, resolve_scopes, snapshot_record,
+    snapshots_for_org_run, who_can, Caveat, EntityRef, EscalationPath, GraphClient, GraphError,
+    PermissionRow, QueryContext, ResolvedScope, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -51,19 +51,34 @@ pub struct QueryArgs {
     command: QueryCommand,
 }
 
-/// Emit JSON to `output_file` and/or stdout per `output`/`output_file` settings.
-/// Returns `true` if the human-readable view should still be printed to stdout.
+/// Envelope for every JSON query response: results plus the approximations (see
+/// `docs/limitations.md`) that apply to this query and the snapshot(s) it ran against.
+/// Always present, even when `caveats` is empty, so JSON consumers have a stable schema.
+#[derive(Serialize)]
+struct QueryResponse<'a, T: Serialize> {
+    results: &'a T,
+    caveats: Vec<Caveat>,
+}
+
+/// Emit JSON (wrapped in [`QueryResponse`]) to `output_file` and/or stdout per
+/// `output`/`output_file` settings. Returns `true` if the human-readable view should still
+/// be printed to stdout.
 fn emit_json<T: Serialize>(
     value: &T,
+    caveats: Vec<Caveat>,
     output: &OutputFormat,
     output_file: Option<&Path>,
 ) -> anyhow::Result<bool> {
+    let response = QueryResponse {
+        results: value,
+        caveats,
+    };
     if let Some(path) = output_file {
-        json::write_json(value, path)?;
+        json::write_json(&response, path)?;
         return Ok(true);
     }
     if *output == OutputFormat::Json {
-        json::print_json(value)?;
+        json::print_json(&response)?;
         return Ok(false);
     }
     Ok(true)
@@ -75,6 +90,38 @@ struct AccountGroup<T: Serialize> {
     account_id: String,
     snapshot_id: String,
     results: T,
+}
+
+/// Approximations derived from the snapshot(s) a query actually ran against: at most one
+/// `partial-snapshot` caveat (reasons unioned and deduped across all given snapshots, so a
+/// multi-account fan-out reports one caveat, not one per account) plus `expansion-degraded`
+/// when any of those reasons is specifically the wildcard-expansion fallback.
+fn snapshot_caveats(snapshots: &[&SnapshotRecord]) -> Vec<Caveat> {
+    let mut reasons = Vec::new();
+    let mut is_partial = false;
+    let mut expansion_degraded = false;
+    for snapshot in snapshots {
+        if snapshot.is_partial {
+            is_partial = true;
+        }
+        for reason in &snapshot.partial_reasons {
+            if reason == iam_graph::queries::caveats::WILDCARDS_NOT_EXPANDED_REASON {
+                expansion_degraded = true;
+            }
+            if !reasons.contains(reason) {
+                reasons.push(reason.clone());
+            }
+        }
+    }
+
+    let mut caveats = Vec::new();
+    if is_partial {
+        caveats.push(Caveat::partial_snapshot(&reasons));
+    }
+    if expansion_degraded {
+        caveats.push(Caveat::expansion_degraded());
+    }
+    caveats
 }
 
 fn print_account_header(account_id: &str, snapshot_id: &str) {
@@ -248,6 +295,10 @@ struct ScopedOutput<'a> {
     /// the `--account-id`-omitted path always wraps in `AccountGroup` and prints an
     /// account header, even for a one-account graph. Mirrors base behavior.
     single: bool,
+    /// Approximations that apply to this query kind regardless of which snapshot(s) it runs
+    /// against (e.g. `approximate-deny` for `who-can`). Unioned with the snapshot-derived
+    /// caveats (`partial-snapshot`, `expansion-degraded`) before `emit_json`.
+    caveats: Vec<Caveat>,
 }
 
 /// Renders a query result as Graphviz DOT text, given (result, suggested graph name).
@@ -291,7 +342,9 @@ where
         print_partial_warning(&snapshot);
         let result = query(context.clone()).await?;
 
-        if !emit_json(&result, out.format, out.file)? {
+        let mut caveats = out.caveats;
+        caveats.extend(snapshot_caveats(&[&snapshot]));
+        if !emit_json(&result, caveats, out.format, out.file)? {
             return Ok(());
         }
 
@@ -307,6 +360,7 @@ where
     }
 
     let mut groups = Vec::with_capacity(scopes.len());
+    let mut all_snapshots = Vec::with_capacity(scopes.len());
     for scope in &scopes {
         print_partial_warning(&scope.snapshot);
         let results = query(scope.context.clone()).await?;
@@ -315,9 +369,12 @@ where
             snapshot_id: scope.context.snapshot_id.clone(),
             results,
         });
+        all_snapshots.push(&scope.snapshot);
     }
 
-    if !emit_json(&groups, out.format, out.file)? {
+    let mut caveats = out.caveats;
+    caveats.extend(snapshot_caveats(&all_snapshots));
+    if !emit_json(&groups, caveats, out.format, out.file)? {
         return Ok(());
     }
 
@@ -479,7 +536,14 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 }
             };
 
-            if !emit_json(&snapshots, &args.output, args.output_file.as_deref())? {
+            // A snapshot listing isn't an access query — it's metadata, and each row
+            // already self-reports `is_partial`/`partial_reasons`. No caveats apply.
+            if !emit_json(
+                &snapshots,
+                Vec::new(),
+                &args.output,
+                args.output_file.as_deref(),
+            )? {
                 return Ok(());
             }
 
@@ -505,7 +569,14 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("list-accounts query failed")?;
 
-            if !emit_json(&accounts, &args.output, args.output_file.as_deref())? {
+            // Cross-account discovery, not an access query. Always empty (acceptance
+            // criterion: `list-accounts --output json` returns `caveats: []`).
+            if !emit_json(
+                &accounts,
+                Vec::new(),
+                &args.output,
+                args.output_file.as_deref(),
+            )? {
                 return Ok(());
             }
 
@@ -549,7 +620,12 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            if !emit_json(&paths, &args.output, args.output_file.as_deref())? {
+            let snapshots = snapshots_for_org_run(client.inner(), &run_id)
+                .await
+                .context("failed to resolve org-run snapshots for caveats")?;
+            let mut caveats = vec![Caveat::approximate_deny()];
+            caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
+            if !emit_json(&paths, caveats, &args.output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -609,7 +685,15 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("diff query failed")?;
 
-            if !emit_json(&diff, &args.output, args.output_file.as_deref())? {
+            let record_a = snapshot_record(client.inner(), snapshot_a)
+                .await?
+                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
+            let record_b = snapshot_record(client.inner(), snapshot_b)
+                .await?
+                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
+            let mut caveats = vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()];
+            caveats.extend(snapshot_caveats(&[&record_a, &record_b]));
+            if !emit_json(&diff, caveats, &args.output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -655,6 +739,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
+                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
                 },
                 scopes,
                 |ctx| {
@@ -705,6 +790,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
+                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
                 },
                 scopes,
                 |ctx| {
@@ -742,6 +828,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
+                    caveats: vec![Caveat::approximate_deny(), Caveat::notaction_not_expanded()],
                 },
                 scopes,
                 |ctx| {
@@ -782,6 +869,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                     format: &args.output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
+                    caveats: vec![Caveat::approximate_deny()],
                 },
                 scopes,
                 |ctx| {
@@ -843,12 +931,14 @@ async fn resolve_diff_account_id(
     snapshot_a: &str,
     snapshot_b: &str,
 ) -> anyhow::Result<String> {
-    let account_a = snapshot_account_id(client.inner(), snapshot_a)
+    let account_a = snapshot_record(client.inner(), snapshot_a)
         .await?
-        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
-    let account_b = snapshot_account_id(client.inner(), snapshot_b)
+        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?
+        .account_id;
+    let account_b = snapshot_record(client.inner(), snapshot_b)
         .await?
-        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
+        .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?
+        .account_id;
 
     if account_a != account_b {
         anyhow::bail!(
@@ -900,6 +990,7 @@ mod tests {
             format: &OutputFormat::Table,
             file: None,
             single: false,
+            caveats: Vec::new(),
         };
 
         run_scoped(
@@ -933,6 +1024,7 @@ mod tests {
             format: &OutputFormat::Table,
             file: None,
             single: true,
+            caveats: Vec::new(),
         };
 
         run_scoped(
@@ -963,6 +1055,7 @@ mod tests {
             format: &OutputFormat::Table,
             file: None,
             single: true,
+            caveats: Vec::new(),
         };
 
         let result = run_scoped(
@@ -986,6 +1079,7 @@ mod tests {
             format: &OutputFormat::Graphviz,
             file: None,
             single: true,
+            caveats: Vec::new(),
         };
 
         let result = run_scoped(
@@ -1009,6 +1103,7 @@ mod tests {
             format: &OutputFormat::Graphviz,
             file: None,
             single: true,
+            caveats: Vec::new(),
         };
 
         let result = run_scoped(
@@ -1027,5 +1122,87 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not supported for this query"));
+    }
+
+    fn snapshot(is_partial: bool, reasons: &[&str]) -> SnapshotRecord {
+        SnapshotRecord {
+            id: "snap-a".to_string(),
+            account_id: "111111111111".to_string(),
+            collected_at: String::new(),
+            is_partial,
+            partial_reasons: reasons.iter().map(|r| r.to_string()).collect(),
+            org_collection_run_id: None,
+        }
+    }
+
+    #[test]
+    fn emit_json_wraps_value_in_results_with_caveats_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        emit_json(&"hello", Vec::new(), &OutputFormat::Table, Some(&path)).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"results\""));
+        assert!(contents.contains("\"caveats\""));
+    }
+
+    #[test]
+    fn emit_json_emits_empty_caveats_array_when_none_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        emit_json(&"hello", Vec::new(), &OutputFormat::Table, Some(&path)).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"caveats\": []"));
+    }
+
+    #[test]
+    fn snapshot_caveats_partial_snapshot_includes_reasons() {
+        let snap = snapshot(true, &["instance profiles missing"]);
+
+        let caveats = snapshot_caveats(&[&snap]);
+
+        assert_eq!(caveats.len(), 1);
+        assert_eq!(caveats[0].code, iam_graph::CaveatCode::PartialSnapshot);
+        assert!(caveats[0].message.contains("instance profiles missing"));
+    }
+
+    #[test]
+    fn snapshot_caveats_complete_snapshot_is_empty() {
+        let snap = snapshot(false, &[]);
+
+        let caveats = snapshot_caveats(&[&snap]);
+
+        assert!(caveats.is_empty());
+    }
+
+    #[test]
+    fn snapshot_caveats_wildcard_reason_adds_expansion_degraded() {
+        let snap = snapshot(
+            true,
+            &[iam_graph::queries::caveats::WILDCARDS_NOT_EXPANDED_REASON],
+        );
+
+        let caveats = snapshot_caveats(&[&snap]);
+
+        let codes: Vec<_> = caveats.iter().map(|c| c.code).collect();
+        assert!(codes.contains(&iam_graph::CaveatCode::PartialSnapshot));
+        assert!(codes.contains(&iam_graph::CaveatCode::ExpansionDegraded));
+    }
+
+    #[test]
+    fn snapshot_caveats_dedups_partial_across_multiple_scopes() {
+        let snap_a = snapshot(true, &["instance profiles missing"]);
+        let snap_b = snapshot(true, &["instance profiles missing"]);
+
+        let caveats = snapshot_caveats(&[&snap_a, &snap_b]);
+
+        let partial_count = caveats
+            .iter()
+            .filter(|c| c.code == iam_graph::CaveatCode::PartialSnapshot)
+            .count();
+        assert_eq!(partial_count, 1);
     }
 }

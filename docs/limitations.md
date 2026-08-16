@@ -148,6 +148,49 @@ queries honor Deny-over-Allow precedence: a deny-all-except node suppresses acce
   a Deny on one of their member users — groups are not IAM principals that take action, so this
   is out of scope.
 
+### Partial snapshots
+
+Collection can be incomplete for a variety of reasons (an AWS API call was throttled or denied,
+inline policies couldn't be resolved, MFA/login/access-key metadata couldn't be listed, or
+wildcard action expansion degraded — see "Wildcard expansion degradation" below). When any of
+these occur during `collect`, the resulting `Snapshot` node is marked `is_partial: true` and
+carries a `partial_reasons` list enumerating the causes.
+
+**A partial snapshot understates access**: entities or permissions that could not be collected
+are simply absent from the graph, not flagged as missing on a per-entity basis. `query
+list-snapshots` reports `is_partial`/`partial_reasons` per snapshot. `query ... --output json`
+against a partial snapshot surfaces this as the `partial-snapshot` caveat, with the recorded
+reasons included in the caveat message.
+
+### Wildcard expansion degradation
+
+`iam-expander` expands wildcard IAM action strings (e.g. `s3:*`) to concrete action lists by
+querying awsiamactions.io, with results cached locally. If that service is unreachable during
+collection — network failure, or the local action cache fails to load — wildcard expansion falls
+back and the affected wildcard actions are stored unexpanded rather than as their concrete
+action list.
+
+**Effect on queries:** a concrete-action query (e.g. `who-can s3:DeleteObject`) may miss an
+entity that holds only an unexpanded wildcard covering that action, since the query matches
+concrete actions and exact/known wildcard forms, not arbitrary unexpanded patterns. This is a
+collection-time degradation, recorded as the `"some wildcards not expanded"` reason in the
+snapshot's `partial_reasons` (see "Partial snapshots" above) and surfaced separately at query
+time as the `expansion-degraded` caveat, since it specifically means action *matching* may miss
+results, not merely that collection was incomplete in general.
+
+## Caveat codes
+
+`query ... --output json` attaches a `caveats` array to every response, populated with only the
+codes below that actually apply to that query and that snapshot. The array is always present,
+empty when no caveat applies.
+
+| Code | Meaning | Heading |
+|---|---|---|
+| `approximate-deny` | Deny subtraction uses literal glob comparison for wildcard-vs-wildcard cases; may overstate access. | [Deny scope is approximate](#deny-scope-is-approximate) |
+| `notaction-not-expanded` | `NotAction` grants aren't resource- or condition-scoped; may overstate access. | [`NotAction` — implemented as allow-all-except (query-time exclusion)](#notaction-implemented-as-allow-all-except-query-time-exclusion) |
+| `partial-snapshot` | The queried snapshot's collection was incomplete; may understate access. | [Partial snapshots](#partial-snapshots) |
+| `expansion-degraded` | Wildcard action expansion fell back during collection; concrete-action queries may miss matches. | [Wildcard expansion degradation](#wildcard-expansion-degradation) |
+
 ### `Action: "*"` resource scope intersection (`--resource`)
 
 `who_can` accepts an optional `--resource <arn>`. When supplied, it intersects the queried

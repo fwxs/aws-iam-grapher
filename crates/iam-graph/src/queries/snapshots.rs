@@ -51,6 +51,41 @@ pub async fn list_snapshots(
     Ok(results)
 }
 
+const SNAPSHOTS_FOR_ORG_RUN_QUERY: &str =
+    include_str!("../../queries/snapshots_for_org_run.cypher");
+
+/// Return all snapshots belonging to one org collection run, across every member account.
+pub async fn snapshots_for_org_run(
+    graph: &Graph,
+    org_run_id: &str,
+) -> Result<Vec<SnapshotRecord>, GraphError> {
+    let mut stream = graph
+        .execute(neo4rs::query(SNAPSHOTS_FOR_ORG_RUN_QUERY).param("org_run_id", org_run_id))
+        .await?;
+
+    let mut results = Vec::new();
+    while let Some(row) = stream.next().await? {
+        let id: String = col(&row, "id")?;
+        let account_id: String = col(&row, "account_id")?;
+        let collected_at: String = col(&row, "collected_at")?;
+        let is_partial: bool = col(&row, "is_partial")?;
+        // See the matching comment in `list_snapshots`.
+        let partial_reasons: Vec<String> = col(&row, "partial_reasons")?;
+        let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
+            .ok()
+            .filter(|s| !s.is_empty());
+        results.push(SnapshotRecord {
+            id,
+            account_id,
+            collected_at,
+            is_partial,
+            partial_reasons,
+            org_collection_run_id,
+        });
+    }
+    Ok(results)
+}
+
 const LIST_ACCOUNT_IDS_QUERY: &str = include_str!("../../queries/list_account_ids.cypher");
 
 /// Return every distinct account_id that has at least one snapshot in the graph.
