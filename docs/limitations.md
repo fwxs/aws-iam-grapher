@@ -12,7 +12,7 @@ This document describes known analysis limitations of the V1 release. Understand
 
 Neo4j Community supports exactly one database per instance. All accounts, all collection runs, and all snapshots coexist in this database. There is no physical isolation between tenants.
 
-**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See [QUERIES.md § 1](../QUERIES.md#1-mandatory-filter-context).
+**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See CLAUDE.md "Key Constraints" below.
 
 **Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
 
@@ -98,55 +98,9 @@ Cycles (e.g. A → B → A) are handled by Cypher's default acyclic-relationship
 
 **Caveat:** the entity-to-entity bridge is only created when the trust-policy principal is an `AWS` ARN that resolves to a Role or User node already present in the same snapshot (kind `IamEntity`). `Service`, `Federated`, `CanonicalUser`, `Wildcard`, and cross-account `AssumedRole` principals are recorded on the original `CAN_ASSUME` edge (see above) but do not extend the transitive chain — see "Multi-account" in the V2 roadmap.
 
-### `NotAction` — implemented as allow-all-except (query-time exclusion)
-
-IAM `NotAction` statements (e.g. `Allow NotAction: ["s3:*"]` — allow everything *except* the
-listed actions) are fully supported using a sentinel + query-time exclusion model:
-
-1. **Wildcard expansion:** wildcards *inside* the `NotAction` list (e.g. `s3:*`) are expanded
-   to a concrete, wildcard-free list of excluded actions at collection time, exactly like `Action`
-   wildcards. The excluded list is bounded (service-scoped); the allowed complement is not
-   materialized.
-
-2. **Graph representation:** one `Permission` node is created per resource with `action = '*'` and
-   an `excluded_actions` list property carrying the concrete excluded actions. This node is distinct
-   from a true full-admin `*` node (its UID encodes the excluded set, preventing collisions).
-
-3. **Query evaluation:** `who_can(action)` matches allow-all-except grants and applies
-   `WHERE NOT $action IN excluded_actions` — so an entity with `Allow NotAction: ["s3:*"]` appears
-   in `who_can("ec2:DescribeInstances")` (not excluded) and is absent from `who_can("s3:DeleteObject")`
-   (excluded). True full-admin nodes (no `excluded_actions`) are unchanged — `coalesce([], [])` makes
-   them match every action.
-
-**Remaining approximations:**
-- The resource scope of an allow-all-except grant is not intersected with the queried resource
-  (same approximation as for full-admin `*` grants — see below).
-- Condition evaluation on `NotAction` statements is not implemented (same limitation as all
-  permission nodes — see "Policy conditions not evaluated").
-
-### Deny scope is approximate
-
-Explicit Deny subtraction matches Deny actions against the queried/risky action using IAM glob
-semantics (`iam_expander::glob_match`, reusing the same matcher as wildcard `Action` expansion).
-A Deny with a wildcard action (e.g. `Deny: s3:Delete*`) now correctly suppresses an Allow for
-`s3:DeleteObject`, as does an exact match or a true full-admin Deny (`action: '*'`).
-
-Group-inherited Deny is evaluated: a user's effective Deny set is the union of Deny permissions
-on its own policies and on every group it is `MEMBER_OF`. A Deny from either side suppresses the
-user's Allow, in `who_can` and `privilege_escalation_paths` alike.
-
-`Deny NotAction` (deny-all-except) is now evaluated: a Deny-NotAction sentinel node
-(`action = '*'` Deny with `excluded_actions` set) denies every action except the ones listed.
-`who_can` matches it when `$action NOT IN excluded_actions`; `privilege_escalation_paths` drops
-a risky action from `allowed_actions` unless it appears in every deny-all-except node's
-`excluded_actions` reachable from the terminal entity (own policies and member groups). Both
-queries honor Deny-over-Allow precedence: a deny-all-except node suppresses access even when an
-`Allow *` (full-admin) or allow-all-except (`NotAction`) grant is also present.
-
-**Remaining approximations:**
-- Group results themselves (a `Group` returned directly as `who_can`'s `e`) are not suppressed by
-  a Deny on one of their member users — groups are not IAM principals that take action, so this
-  is out of scope.
+See [`docs/caveats.md`](caveats.md) for approximations surfaced in `query --output json`'s
+`caveats` array (`NotAction` allow-all-except, Deny scope, partial snapshots, wildcard expansion
+degradation, and the `Caveat codes` table).
 
 ### `Action: "*"` resource scope intersection (`--resource`)
 
@@ -228,7 +182,7 @@ These limitations are targeted for resolution in a future major version:
 |---|---|
 | Permission Boundaries — Deny statements inside the boundary, and boundary wildcard-vs-wildcard set containment | Extend boundary intersection to evaluate Deny statements and expand wildcards before comparison |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
-| Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
+| Remaining condition keys (`s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks) and unifying trust-policy condition evaluation onto `iam_models::condition::evaluate` | Extend `evaluate_key()` (`crates/iam-models/src/condition.rs`) with the remaining operators; replace `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`) with the shared evaluator |
 | Multi-account cross-account role chaining | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
 
 ## Multi-account (AWS Organizations) collection

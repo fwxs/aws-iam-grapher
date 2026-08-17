@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod analysis;
+pub mod caveats;
 pub mod context;
 pub mod escalation;
 pub mod org_escalation;
@@ -47,13 +48,14 @@ pub use analysis::{
     entity_permissions, instance_profiles_with_action, risky_instance_profiles, who_can, EntityRef,
     PermissionRow, RiskyInstanceProfile,
 };
+pub use caveats::{Caveat, CaveatCode};
 pub use context::{OrgQueryContext, QueryContext};
 pub use escalation::{privilege_escalation_paths, EscalationPath, Hop};
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
 pub use scope::{resolve_org_context, resolve_scopes, ResolvedScope, ScopeSelector};
 pub use snapshots::{
     delete_snapshot, diff_permissions, latest_org_run_id, list_account_ids, list_snapshots,
-    snapshot_account_id, snapshot_record, PermissionDiff, PermissionRecord, SnapshotRecord,
+    snapshot_record, snapshots_for_org_run, PermissionDiff, PermissionRecord, SnapshotRecord,
 };
 pub use stitch::stitch_cross_account;
 

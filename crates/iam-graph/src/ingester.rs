@@ -131,7 +131,7 @@ impl GraphIngester {
                     "some inline policies not resolved".to_string()
                 }
                 iam_collector::CollectorWarning::WildcardsNotExpanded => {
-                    "some wildcards not expanded".to_string()
+                    crate::queries::caveats::WILDCARDS_NOT_EXPANDED_REASON.to_string()
                 }
                 iam_collector::CollectorWarning::MfaDevicesMissing => {
                     "some users' MFA devices could not be listed".to_string()
