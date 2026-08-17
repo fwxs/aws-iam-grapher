@@ -86,7 +86,7 @@ Tests in `crates/iam-graph/tests/` share one Neo4j container per test binary (fo
 - `Action: "*"` (unqualified full-admin) is stored as a literal `Permission` node with `action = "*"`. The `who_can` query has an explicit UNION arm to match it.
 - Explicit Deny evaluation subtracts exact-action, wildcard-action (via `iam_expander::glob_match`), and `action = "*"` Denies, including group-inherited Denies and `Deny NotAction` (deny-all-except). The remaining approximation is wildcard-vs-wildcard literal glob comparison (not semantic set containment), and Denies on a group's member users don't suppress a `Group` returned directly. See `docs/limitations.md`.
 - `NotAction` statements are fully evaluated via a sentinel + query-time exclusion model (not merely parsed) — an entity with `Allow NotAction: [...]` correctly appears/is absent from `who_can` results. Remaining approximations: the grant's resource scope isn't intersected with `--resource`, and conditions on `NotAction` statements aren't evaluated. See `docs/limitations.md`.
-- `query ... --output json` attaches a `caveats` array (closed `CaveatCode` enum: `approximate-deny`, `notaction-not-expanded`, `partial-snapshot`, `expansion-degraded`) to every response, describing which of the above approximations apply to that query and snapshot. Always present, empty when none apply. See `docs/limitations.md#caveat-codes`.
+- `query ... --output json` attaches a `caveats` array (closed `CaveatCode` enum: `approximate-deny`, `notaction-not-expanded`, `partial-snapshot`, `expansion-degraded`) to every response, describing which of the above approximations apply to that query and snapshot. Always present, empty when none apply. See `docs/caveats.md`.
 
 ## graphify
 

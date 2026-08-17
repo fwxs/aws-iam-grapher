@@ -11,6 +11,12 @@
 /// a rename of the literal breaks both sides at compile time instead of drifting silently.
 pub const WILDCARDS_NOT_EXPANDED_REASON: &str = "some wildcards not expanded";
 
+/// Plain-prose pointer used for every `Caveat::doc_anchor`. Deliberately not a `docs/x.md#anchor`
+/// path: that format implied local resolvability an installed binary doesn't have (no `docs/`
+/// folder ships next to it). See `docs/caveats.md`.
+const CAVEAT_DOC_POINTER: &str =
+    "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository";
+
 /// Closed set of known result approximations. Deliberately not `#[non_exhaustive]`: consumers
 /// branch on this set, so a new approximation must be a visible addition here, not silently
 /// absorbed by a wildcard match.
@@ -43,7 +49,7 @@ impl Caveat {
                 by a wildcard Deny may be reported as permitted. Group results are not \
                 suppressed by Denies on member users."
                 .to_string(),
-            doc_anchor: "docs/limitations.md#deny-scope-is-approximate".to_string(),
+            doc_anchor: CAVEAT_DOC_POINTER.to_string(),
         }
     }
 
@@ -56,9 +62,7 @@ impl Caveat {
                 is not intersected with --resource and conditions on NotAction statements are \
                 not evaluated; results may overstate access."
                 .to_string(),
-            doc_anchor:
-                "docs/limitations.md#notaction-implemented-as-allow-all-except-query-time-exclusion"
-                    .to_string(),
+            doc_anchor: CAVEAT_DOC_POINTER.to_string(),
         }
     }
 
@@ -76,7 +80,7 @@ impl Caveat {
                 "Snapshot is marked partial; collection was incomplete, so results may \
                 understate access. Reasons: {joined}"
             ),
-            doc_anchor: "docs/limitations.md#partial-snapshots".to_string(),
+            doc_anchor: CAVEAT_DOC_POINTER.to_string(),
         }
     }
 
@@ -89,7 +93,7 @@ impl Caveat {
                 unreachable); some wildcard actions were stored unexpanded and may not match \
                 this query."
                 .to_string(),
-            doc_anchor: "docs/limitations.md#wildcard-expansion-degradation".to_string(),
+            doc_anchor: CAVEAT_DOC_POINTER.to_string(),
         }
     }
 }
@@ -134,13 +138,8 @@ mod tests {
     }
 
     #[test]
-    fn every_caveat_doc_anchor_resolves_to_a_heading_in_limitations_md() {
-        let limitations = include_str!("../../../../docs/limitations.md");
-        let headings: std::collections::HashSet<String> = limitations
-            .lines()
-            .filter(|line| line.starts_with('#'))
-            .map(slugify_heading)
-            .collect();
+    fn every_caveat_doc_anchor_points_at_caveats_md_and_it_covers_every_caveat() {
+        let caveats_doc = include_str!("../../../../docs/caveats.md");
 
         let caveats = [
             Caveat::approximate_deny(),
@@ -149,45 +148,22 @@ mod tests {
             Caveat::expansion_degraded(),
         ];
 
-        for caveat in caveats {
-            let fragment = caveat
-                .doc_anchor
-                .split('#')
-                .nth(1)
-                .expect("doc_anchor must contain a `#fragment`");
+        let expected_headings = [
+            "Deny scope is approximate",
+            "NotAction",
+            "Partial snapshots",
+            "Wildcard expansion degradation",
+        ];
 
+        for caveat in caveats {
+            assert_eq!(caveat.doc_anchor, CAVEAT_DOC_POINTER);
+        }
+
+        for heading in expected_headings {
             assert!(
-                headings.contains(fragment),
-                "doc_anchor `{}` (code {:?}) has no matching heading in limitations.md; slugged headings: {:?}",
-                caveat.doc_anchor,
-                caveat.code,
-                headings
+                caveats_doc.contains(heading),
+                "docs/caveats.md is missing expected section `{heading}`; doc drifted from CaveatCode variants"
             );
         }
-    }
-
-    /// Mirrors GitHub's Markdown heading-anchor algorithm closely enough for this file's
-    /// headings: strip leading `#`s, drop backticks/parens, lowercase, collapse non-alphanumeric
-    /// runs (other than existing hyphens) to a single hyphen, trim edge hyphens.
-    fn slugify_heading(line: &str) -> String {
-        let text = line.trim_start_matches('#').trim();
-        let cleaned: String = text
-            .chars()
-            .filter(|c| *c != '`' && *c != '(' && *c != ')' && *c != '"')
-            .collect();
-
-        let mut slug = String::new();
-        let mut last_was_hyphen = false;
-        for ch in cleaned.chars() {
-            if ch.is_alphanumeric() {
-                slug.push(ch.to_ascii_lowercase());
-                last_was_hyphen = false;
-            } else if !last_was_hyphen {
-                slug.push('-');
-                last_was_hyphen = true;
-            }
-        }
-
-        slug.trim_matches('-').to_string()
     }
 }

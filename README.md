@@ -420,7 +420,7 @@ The `collect` subcommand supports the same `--output-file` flag for its summary.
 Every JSON query response is an envelope, not a bare array/object:
 `{ "results": ..., "caveats": [...] }`. `results` holds what previously was the entire
 top-level payload; `caveats` is always present (empty when none apply) and lists which
-approximations documented in [`docs/limitations.md`](docs/limitations.md) apply to that
+approximations documented in [`docs/caveats.md`](docs/caveats.md) apply to that
 specific query and snapshot. **This is a breaking change for scripts written against pre-caveats
 JSON output** — `jq '.[0].arn'` on a `who-can` result becomes `jq '.results[0].arn'`.
 
