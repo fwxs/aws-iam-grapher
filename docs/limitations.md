@@ -12,7 +12,7 @@ This document describes known analysis limitations of the V1 release. Understand
 
 Neo4j Community supports exactly one database per instance. All accounts, all collection runs, and all snapshots coexist in this database. There is no physical isolation between tenants.
 
-**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See [QUERIES.md § 1](../QUERIES.md#1-mandatory-filter-context).
+**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See CLAUDE.md "Key Constraints" below.
 
 **Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
 
@@ -182,7 +182,7 @@ These limitations are targeted for resolution in a future major version:
 |---|---|
 | Permission Boundaries — Deny statements inside the boundary, and boundary wildcard-vs-wildcard set containment | Extend boundary intersection to evaluate Deny statements and expand wildcards before comparison |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
-| Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
+| Remaining condition keys (`s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks) and unifying trust-policy condition evaluation onto `iam_models::condition::evaluate` | Extend `evaluate_key()` (`crates/iam-models/src/condition.rs`) with the remaining operators; replace `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`) with the shared evaluator |
 | Multi-account cross-account role chaining | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
 
 ## Multi-account (AWS Organizations) collection
