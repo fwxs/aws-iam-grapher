@@ -1,8 +1,23 @@
 mod cli;
+mod exit_code;
 mod output;
 
+use clap::Parser as _;
+use output::OutputFormat;
+use std::process::ExitCode;
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
+    let parsed_cli = cli::Cli::parse();
+    let json = parsed_cli.output == OutputFormat::Json;
+
+    match run(parsed_cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => exit_code::handle_error(err, json),
+    }
+}
+
+async fn run(parsed_cli: cli::Cli) -> anyhow::Result<()> {
     // RUST_LOG, when set, takes full control (e.g. `RUST_LOG=iam_collector=debug`) — our
     // defaults below only apply when the user hasn't opted into their own filter, otherwise a
     // same-target default directive would always win ties against the user's own.
@@ -17,5 +32,5 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    cli::run().await
+    cli::run(parsed_cli).await
 }

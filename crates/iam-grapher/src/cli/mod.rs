@@ -2,6 +2,7 @@ pub mod collect;
 pub mod collect_org;
 pub mod query;
 
+use crate::output::OutputFormat;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
@@ -11,6 +12,11 @@ use clap::{Args, Parser, Subcommand};
     version
 )]
 pub struct Cli {
+    /// Output format. Global so the error path (exit-code JSON envelope on stderr) and
+    /// every subcommand's success-path output agree on the same format.
+    #[arg(long, value_enum, global = true, default_value = "table")]
+    pub output: OutputFormat,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -40,14 +46,14 @@ pub enum CollectVerb {
     Org(collect_org::OrgArgs),
 }
 
-pub async fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+pub async fn run(cli: Cli) -> anyhow::Result<()> {
+    let output = cli.output;
     match cli.command {
         Commands::Collect(top) => match top.verb {
             Some(CollectVerb::Org(args)) => collect_org::run(args).await,
-            None => collect::run(top.account).await,
+            None => collect::run(top.account, output).await,
         },
-        Commands::Query(args) => query::run(*args).await,
+        Commands::Query(args) => query::run(*args, output).await,
     }
 }
 
@@ -113,7 +119,6 @@ mod tests {
                 neo4j_pass_file: None,
                 batch_size: 500,
                 dry_run: false,
-                output: crate::output::OutputFormat::Table,
                 output_file: None,
             },
             account_id: None,

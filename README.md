@@ -360,6 +360,32 @@ RUST_LOG=iam_collector=debug aws-iam-grapher collect --mode live --account-alias
 
 ---
 
+## Exit Codes
+
+Every command exits with a code identifying the failure class, so scripts and the
+`aws-iam-grapher` Claude Code skill can branch on outcome without parsing error text:
+
+| Code | Meaning | Examples |
+|------|---------|----------|
+| `0` | Success, including empty result sets | a `who-can` query that matches nothing |
+| `1` | Unexpected / internal error | ingestion failure, schema init failure, unclassified errors |
+| `2` | Usage or validation error | invalid CLI flags, offline mode without `--input-file`, `--snapshot-id` combined with multi-account fan-out |
+| `3` | Credential or connection failure | Neo4j unreachable, missing/empty Neo4j password, AWS credential resolution failure |
+| `4` | Requested scope not found | unknown snapshot ID, no snapshots for an account, no snapshots in the graph at all |
+
+Under `--output json`, a failure also writes a JSON envelope to **stderr** (stdout is always
+left empty on error, so it can be parsed unconditionally):
+
+```json
+{"error": {"code": "scope-not-found", "message": "snapshot abc123 not found"}}
+```
+
+`message` is the outermost error text only — never the full causal chain — so internal paths
+or connection details aren't leaked to a machine consumer. Set `RUST_LOG` for full diagnostic
+detail (see [Logging](#logging) above).
+
+---
+
 ## Data Coverage by Collection Mode
 
 The table below shows what data is available in each mode. Missing data can silently skew analysis results — review this before interpreting the graph output.

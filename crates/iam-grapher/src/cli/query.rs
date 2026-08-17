@@ -1,3 +1,4 @@
+use crate::exit_code::CliValidationError;
 use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
 use anyhow::Context as _;
 use clap::{Args, Subcommand};
@@ -38,10 +39,6 @@ pub struct QueryArgs {
     /// with multi-account mode (--account-id omitted and more than one account found).
     #[arg(long)]
     snapshot_id: Option<String>,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value = "table")]
-    output: OutputFormat,
 
     /// Write the result to this file, in whatever format --output selects (json or
     /// graphviz; table has no file-writable form, so this has no effect with the default
@@ -273,12 +270,10 @@ async fn resolve_command_scopes(
             Some(snapshot_id) => {
                 let accounts = resolve_all_account_ids(client).await?;
                 if accounts.len() > 1 {
-                    anyhow::bail!(
-                        "--snapshot-id cannot be combined with multi-account mode \
-                         (no --account-id, {} accounts found); pass --account-id to \
-                         target a single account",
-                        accounts.len()
-                    );
+                    return Err(CliValidationError::SnapshotIdMultiAccountConflict {
+                        accounts: accounts.len(),
+                    }
+                    .into());
                 }
                 ScopeSelector::snapshot(snapshot_id, None)
             }
@@ -524,8 +519,8 @@ enum QueryCommand {
     },
 }
 
-pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
-    if args.output == OutputFormat::Graphviz
+pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
+    if output == OutputFormat::Graphviz
         && !matches!(
             args.command,
             QueryCommand::WhoCan { .. }
@@ -533,10 +528,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 | QueryCommand::OrgEscalation { .. }
         )
     {
-        anyhow::bail!(
-            "--output graphviz is not supported for this query; supported queries: \
-             who-can, privilege-escalation, org-escalation"
-        );
+        return Err(CliValidationError::GraphvizUnsupported.into());
     }
 
     let neo4j_pass = crate::cli::collect::resolve_neo4j_pass(args.neo4j_pass_file.as_deref())?;
@@ -571,12 +563,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
             // A snapshot listing isn't an access query — it's metadata, and each row
             // already self-reports `is_partial`/`partial_reasons`. No caveats apply.
-            if !emit_json(
-                &snapshots,
-                Vec::new(),
-                &args.output,
-                args.output_file.as_deref(),
-            )? {
+            if !emit_json(&snapshots, Vec::new(), &output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -604,12 +591,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
 
             // Cross-account discovery, not an access query. Always empty (acceptance
             // criterion: `list-accounts --output json` returns `caveats: []`).
-            if !emit_json(
-                &accounts,
-                Vec::new(),
-                &args.output,
-                args.output_file.as_deref(),
-            )? {
+            if !emit_json(&accounts, Vec::new(), &output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -647,7 +629,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
                 .await
                 .context("org-escalation query failed")?;
 
-            if args.output == OutputFormat::Graphviz {
+            if output == OutputFormat::Graphviz {
                 let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
                 write_dot_output(&dot, args.output_file.as_deref())?;
                 return Ok(());
@@ -657,13 +639,13 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             // Only pay for it when the result will actually carry caveats: `--output table`
             // with no `--output-file` never serializes JSON at all.
             let mut caveats = escalation_static_caveats();
-            if args.output == OutputFormat::Json || args.output_file.is_some() {
+            if output == OutputFormat::Json || args.output_file.is_some() {
                 let snapshots = snapshots_for_org_run(client.inner(), &run_id)
                     .await
                     .context("failed to resolve org-run snapshots for caveats")?;
                 caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
             }
-            if !emit_json(&paths, caveats, &args.output, args.output_file.as_deref())? {
+            if !emit_json(&paths, caveats, &output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -737,7 +719,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             // reconciliation, no glob matching, no NotAction logic. Neither approximation
             // caveat applies; only snapshot-derived caveats can.
             let caveats = snapshot_caveats(&[&record_a, &record_b]);
-            if !emit_json(&diff, caveats, &args.output, args.output_file.as_deref())? {
+            if !emit_json(&diff, caveats, &output, args.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -780,7 +762,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             .await?;
             run_scoped(
                 ScopedOutput {
-                    format: &args.output,
+                    format: &output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     caveats: who_can_static_caveats(),
@@ -831,7 +813,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             .await?;
             run_scoped(
                 ScopedOutput {
-                    format: &args.output,
+                    format: &output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     // entity_permissions() does no Deny subtraction and no NotAction
@@ -873,7 +855,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             .await?;
             run_scoped(
                 ScopedOutput {
-                    format: &args.output,
+                    format: &output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     // instance_profiles_with_action.cypher matches only exact
@@ -918,7 +900,7 @@ pub async fn run(args: QueryArgs) -> anyhow::Result<()> {
             .await?;
             run_scoped(
                 ScopedOutput {
-                    format: &args.output,
+                    format: &output,
                     file: args.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     caveats: escalation_static_caveats(),

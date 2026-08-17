@@ -1,4 +1,5 @@
 use anyhow::Context as _;
+use serde::Serialize;
 use std::path::Path;
 
 /// Serialize `value` to pretty-printed JSON and print to stdout.
@@ -6,6 +7,38 @@ pub fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     let s = serde_json::to_string_pretty(value)?;
     println!("{s}");
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ErrorEnvelope<'a> {
+    error: ErrorBody<'a>,
+}
+
+#[derive(Serialize)]
+struct ErrorBody<'a> {
+    code: &'a str,
+    message: String,
+}
+
+/// Print a `{"error": {"code": ..., "message": ...}}` envelope to stderr. `message` should
+/// be the outermost error text only (never a full causal chain) — see
+/// `exit_code::handle_error`. Falls back to a hand-written literal if serialization itself
+/// fails (`code`/`message` are plain strings, so this should never happen in practice).
+pub fn eprint_json_error(code: &str, message: &str) {
+    let envelope = ErrorEnvelope {
+        error: ErrorBody {
+            code,
+            message: message.to_string(),
+        },
+    };
+    match serde_json::to_string_pretty(&envelope) {
+        Ok(s) => eprintln!("{s}"),
+        Err(_) => {
+            eprintln!(
+                r#"{{"error":{{"code":"unexpected","message":"failed to serialize error"}}}}"#
+            );
+        }
+    }
 }
 
 /// Serialize `value` to pretty-printed JSON and write it to `path`.
