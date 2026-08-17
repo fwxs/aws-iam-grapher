@@ -108,8 +108,8 @@ pub fn resolve_neo4j_pass(pass_file: Option<&std::path::Path>) -> anyhow::Result
     if let Some(path) = pass_file {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read Neo4j password file {}", path.display()))?;
-        let trimmed = contents.trim_end_matches(['\n', '\r']);
-        if trimmed.trim().is_empty() {
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
             return Err(CliError::MissingNeo4jPassword {
                 detail: "password file is empty or whitespace-only",
             }
@@ -129,9 +129,7 @@ pub fn resolve_neo4j_pass(pass_file: Option<&std::path::Path>) -> anyhow::Result
 pub async fn run(args: CollectArgs, output: OutputFormat) -> anyhow::Result<()> {
     validate(&args)?;
 
-    let data = collect_data(&args)
-        .await
-        .map_err(|e| anyhow::Error::from(CliError::from(e)).context("collection failed"))?;
+    let data = collect_data(&args).await?;
 
     print_warnings(&data);
 
@@ -230,6 +228,12 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     }
 }
 
+/// Always plain text on stderr, regardless of `--output` — these are non-fatal collection
+/// diagnostics, not the fatal-error JSON envelope this issue (#144) adds. Mirrors
+/// `query.rs`'s `print_partial_warning`, an already-accepted instance of the same pattern:
+/// informational stderr lines are fine alongside JSON stdout: only a fatal error's envelope
+/// needs to be machine-parseable. Turning warnings into structured JSON is a separate,
+/// larger change (a caveats-style schema) out of scope here.
 fn print_warnings(data: &CollectedData) {
     for warning in &data.warnings {
         let msg: &str = match warning {
@@ -439,6 +443,15 @@ mod tests {
     #[test]
     fn resolve_neo4j_pass_trims_trailing_newline() {
         let file = write_pass_file("secret\n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        assert_eq!(result.expect("resolve must succeed"), "secret");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_trims_leading_whitespace() {
+        let file = write_pass_file("\nsecret\n");
 
         let result = resolve_neo4j_pass(Some(file.path()));
 

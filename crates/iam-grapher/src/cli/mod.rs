@@ -50,7 +50,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let output = cli.output;
     match cli.command {
         Commands::Collect(top) => match top.verb {
-            Some(CollectVerb::Org(args)) => collect_org::run(args).await,
+            Some(CollectVerb::Org(args)) => collect_org::run(args, output).await,
             None => collect::run(top.account, output).await,
         },
         Commands::Query(args) => query::run(*args, output).await,

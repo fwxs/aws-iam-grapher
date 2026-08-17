@@ -693,13 +693,14 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
         } => {
             // Fetch both full records once — needed for `partial-snapshot`/`expansion-degraded`
             // caveats regardless, and reused below to derive `account_id` when `--account-id`
-            // is omitted instead of issuing a second pair of lookups for that alone.
-            let record_a = snapshot_record(client.inner(), snapshot_a)
-                .await?
-                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
-            let record_b = snapshot_record(client.inner(), snapshot_b)
-                .await?
-                .ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
+            // is omitted instead of issuing a second pair of lookups for that alone. Fetched
+            // concurrently: the two snapshot ids are independent read-only lookups.
+            let (record_a, record_b) = tokio::try_join!(
+                snapshot_record(client.inner(), snapshot_a),
+                snapshot_record(client.inner(), snapshot_b),
+            )?;
+            let record_a = record_a.ok_or_else(|| GraphError::snapshot_not_found(snapshot_a))?;
+            let record_b = record_b.ok_or_else(|| GraphError::snapshot_not_found(snapshot_b))?;
 
             let resolved_account_id;
             let account_id = match args.account_id.as_deref() {

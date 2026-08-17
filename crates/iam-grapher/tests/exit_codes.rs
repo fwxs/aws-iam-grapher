@@ -233,6 +233,42 @@ fn collect_offline(neo4j: &Neo4jHandle) -> Output {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
+async fn credential_wrong_neo4j_password_exits_3() {
+    let neo4j = start_neo4j().await;
+
+    let mut wrong_pass_file = tempfile::NamedTempFile::new().expect("create temp pass file");
+    use std::io::Write as _;
+    wrong_pass_file
+        .write_all(b"definitely-the-wrong-password")
+        .expect("write temp pass file");
+
+    let output = Command::new(bin())
+        .args([
+            "--output",
+            "json",
+            "query",
+            "--neo4j-uri",
+            &neo4j.uri,
+            "--neo4j-user",
+            &neo4j.user,
+            "--neo4j-pass-file",
+            wrong_pass_file.path().to_str().unwrap(),
+            "list-snapshots",
+        ])
+        .env_remove("NEO4J_PASSWORD")
+        .output()
+        .expect("query must spawn");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    let envelope = json_error_envelope(&output);
+    assert_eq!(envelope["error"]["code"], "credential");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(!message.contains("definitely-the-wrong-password"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
 async fn scope_not_found_nonexistent_snapshot_exits_4() {
     let neo4j = start_neo4j().await;
     let collect_output = collect_offline(&neo4j);

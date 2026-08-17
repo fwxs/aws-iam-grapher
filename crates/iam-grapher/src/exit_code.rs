@@ -110,7 +110,7 @@ fn graph_exit_class(err: &iam_graph::GraphError) -> ExitClass {
         | GraphError::NoSnapshots
         | GraphError::NoOrgRuns
         | GraphError::AccountMismatch { .. } => ExitClass::ScopeNotFound,
-        _ if err.is_connection_error() => ExitClass::Credential,
+        _ if err.is_connection_error() || err.is_credential_error() => ExitClass::Credential,
         _ => ExitClass::Unexpected,
     }
 }
@@ -118,8 +118,13 @@ fn graph_exit_class(err: &iam_graph::GraphError) -> ExitClass {
 fn collector_exit_class(err: &iam_collector::CollectorError) -> ExitClass {
     use iam_collector::CollectorError;
     match err {
-        CollectorError::CredentialsUnavailable(_) => ExitClass::Credential,
-        CollectorError::ManualInterventionRequired { .. } => ExitClass::Usage,
+        CollectorError::CredentialsUnavailable(_) | CollectorError::InsufficientPermissions(_) => {
+            ExitClass::Credential
+        }
+        CollectorError::ManualInterventionRequired { .. }
+        | CollectorError::InvalidOuProfileOverride(_)
+        | CollectorError::InvalidOuRoleOverride(_)
+        | CollectorError::InvalidProfile(_) => ExitClass::Usage,
         _ => ExitClass::Unexpected,
     }
 }
@@ -204,6 +209,14 @@ mod tests {
     }
 
     #[test]
+    fn graph_authentication_error_classifies_as_credential() {
+        let err = iam_graph::GraphError::from(neo4rs::Error::AuthenticationError(
+            "wrong password".into(),
+        ));
+        assert_eq!(graph_exit_class(&err), ExitClass::Credential);
+    }
+
+    #[test]
     fn graph_row_decode_classifies_as_unexpected() {
         let err = iam_graph::GraphError::RowDecode {
             column: "x",
@@ -225,6 +238,32 @@ mod tests {
             instructions: "i".into(),
         };
         assert_eq!(collector_exit_class(&err), ExitClass::Usage);
+    }
+
+    #[test]
+    fn collector_insufficient_permissions_classifies_as_credential() {
+        let err = iam_collector::CollectorError::InsufficientPermissions("iam:GetRole".into());
+        assert_eq!(collector_exit_class(&err), ExitClass::Credential);
+    }
+
+    #[test]
+    fn collector_bad_cli_argument_variants_classify_as_usage() {
+        assert_eq!(
+            collector_exit_class(&iam_collector::CollectorError::InvalidOuProfileOverride(
+                "bad".into()
+            )),
+            ExitClass::Usage
+        );
+        assert_eq!(
+            collector_exit_class(&iam_collector::CollectorError::InvalidOuRoleOverride(
+                "bad".into()
+            )),
+            ExitClass::Usage
+        );
+        assert_eq!(
+            collector_exit_class(&iam_collector::CollectorError::InvalidProfile("bad".into())),
+            ExitClass::Usage
+        );
     }
 
     #[test]

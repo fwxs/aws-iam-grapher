@@ -7,7 +7,7 @@ pub enum GraphError {
     Neo4j(#[from] neo4rs::Error),
 
     /// Schema initialization failed.
-    #[error("schema initialization failed: {statement}")]
+    #[error("schema initialization failed: {statement}: {source}")]
     SchemaInit {
         statement: String,
         #[source]
@@ -15,7 +15,7 @@ pub enum GraphError {
     },
 
     /// Ingestion error in a specific phase.
-    #[error("ingestion failed in phase {phase}")]
+    #[error("ingestion failed in phase {phase}: {source}")]
     Ingestion {
         phase: u8,
         #[source]
@@ -87,6 +87,27 @@ impl GraphError {
             source,
             neo4rs::Error::IOError { .. } | neo4rs::Error::ConnectionError
         )
+    }
+
+    /// True for authentication/authorization failures against Neo4j itself (wrong
+    /// password, expired token) — distinct from [`is_connection_error`](Self::is_connection_error),
+    /// which is transport-level (the driver never reached a server at all). Both map to
+    /// the CLI's "credential" exit class, but a caller that wants to tell "can't reach
+    /// the server" from "reached it, credentials rejected" apart uses these separately.
+    pub fn is_credential_error(&self) -> bool {
+        let source = match self {
+            Self::Neo4j(e) => e,
+            Self::Ingestion { source, .. } | Self::SchemaInit { source, .. } => source,
+            _ => return false,
+        };
+        match source {
+            neo4rs::Error::AuthenticationError(_) => true,
+            neo4rs::Error::Neo4j(e) => matches!(
+                e.kind(),
+                neo4rs::Neo4jErrorKind::Client(neo4rs::Neo4jClientErrorKind::Security(_))
+            ),
+            _ => false,
+        }
     }
 
     /// Construct a [`GraphError::SnapshotNotFound`] error.
