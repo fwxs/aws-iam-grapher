@@ -1,3 +1,4 @@
+use crate::exit_code::{CliError, CliValidationError};
 use crate::output::OutputFormat;
 use anyhow::Context as _;
 use clap::{Args, ValueEnum};
@@ -40,10 +41,6 @@ pub struct SharedCollectArgs {
     /// Show what would happen without writing to Neo4j.
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value = "table")]
-    pub output: OutputFormat,
 
     /// Write the JSON summary to this file. For --output json, stdout is suppressed
     /// once the file is written; the human-readable summary still prints for
@@ -96,11 +93,7 @@ pub struct CollectArgs {
 /// Validate argument combinations before making any network calls.
 pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
     if args.mode == CollectMode::Offline && args.input_file.is_none() {
-        anyhow::bail!(
-            "offline mode requires --input-file.\n\n\
-             Generate the file with:\n\n    \
-             aws iam get-account-authorization-details --output json > account-auth-details.json"
-        );
+        return Err(CliError::from(CliValidationError::OfflineMissingInputFile).into());
     }
     Ok(())
 }
@@ -115,33 +108,28 @@ pub fn resolve_neo4j_pass(pass_file: Option<&std::path::Path>) -> anyhow::Result
     if let Some(path) = pass_file {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read Neo4j password file {}", path.display()))?;
-        let trimmed = contents.trim_end_matches(['\n', '\r']);
-        if trimmed.trim().is_empty() {
-            anyhow::bail!(
-                "Neo4j password file {} is empty or whitespace-only",
-                path.display()
-            );
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            return Err(CliError::MissingNeo4jPassword {
+                detail: "password file is empty or whitespace-only",
+            }
+            .into());
         }
         return Ok(trimmed.to_string());
     }
 
-    std::env::var("NEO4J_PASSWORD").context(
-        "Neo4j password required: pass --neo4j-pass-file <path> or set the \
-         NEO4J_PASSWORD environment variable",
-    )
+    std::env::var("NEO4J_PASSWORD").map_err(|_| {
+        CliError::MissingNeo4jPassword {
+            detail: "NEO4J_PASSWORD is not set",
+        }
+        .into()
+    })
 }
 
-pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
+pub async fn run(args: CollectArgs, output: OutputFormat) -> anyhow::Result<()> {
     validate(&args)?;
 
-    let data = match collect_data(&args).await {
-        Ok(d) => d,
-        Err(CollectorError::ManualInterventionRequired { instructions, .. }) => {
-            eprintln!("{instructions}");
-            std::process::exit(1);
-        }
-        Err(e) => return Err(e).context("collection failed"),
-    };
+    let data = collect_data(&args).await?;
 
     print_warnings(&data);
 
@@ -172,12 +160,7 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         .account_id
         .clone()
         .or_else(|| data.account_id.clone())
-        .with_context(|| {
-            "could not determine AWS account ID: no entities were collected and \
-             --account-id was not provided.\n\n\
-             Pass the account ID explicitly:\n\n    \
-             aws-iam-grapher collect --account-id 123456789012 ..."
-        })?;
+        .ok_or(CliValidationError::AccountIdNotResolved)?;
 
     let config = IngestConfig {
         snapshot_id: snapshot_id.clone(),
@@ -204,7 +187,7 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         &data,
         &stats,
         duration_secs,
-        &args.shared.output,
+        &output,
         args.shared.output_file.as_deref(),
     )?;
     Ok(())
@@ -245,6 +228,12 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     }
 }
 
+/// Always plain text on stderr, regardless of `--output` — these are non-fatal collection
+/// diagnostics, not the fatal-error JSON envelope this issue (#144) adds. Mirrors
+/// `query.rs`'s `print_partial_warning`, an already-accepted instance of the same pattern:
+/// informational stderr lines are fine alongside JSON stdout: only a fatal error's envelope
+/// needs to be machine-parseable. Turning warnings into structured JSON is a separate,
+/// larger change (a caveats-style schema) out of scope here.
 fn print_warnings(data: &CollectedData) {
     for warning in &data.warnings {
         let msg: &str = match warning {
@@ -461,6 +450,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_neo4j_pass_trims_leading_whitespace() {
+        let file = write_pass_file("\nsecret\n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        assert_eq!(result.expect("resolve must succeed"), "secret");
+    }
+
+    #[test]
     fn resolve_neo4j_pass_empty_file_is_distinct_error() {
         let file = write_pass_file("   \n");
 
@@ -468,6 +466,7 @@ mod tests {
 
         let err = result.expect_err("empty file must error");
         assert!(err.to_string().contains("empty or whitespace-only"));
+        assert!(err.downcast_ref::<CliError>().is_some());
     }
 
     #[test]
