@@ -38,10 +38,6 @@ impl HybridCollector {
 
 #[async_trait::async_trait]
 impl IamDataSource for HybridCollector {
-    fn mode(&self) -> CollectorMode {
-        CollectorMode::Hybrid
-    }
-
     async fn collect(&self) -> Result<CollectedData, CollectorError> {
         match self.live.collect().await {
             Ok(mut data) => {
