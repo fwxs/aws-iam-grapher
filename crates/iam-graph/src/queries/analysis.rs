@@ -37,15 +37,6 @@ pub struct PermissionRow {
     pub effective: bool,
 }
 
-/// An instance profile that has privilege-escalation permissions.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RiskyInstanceProfile {
-    pub arn: String,
-    pub name: String,
-    pub entity_type: String,
-    pub risky_actions: Vec<String>,
-}
-
 const WHO_CAN_QUERY: &str = include_str!("../../queries/who_can.cypher");
 const CANDIDATE_DENY_ACTIONS_QUERY: &str =
     include_str!("../../queries/candidate_deny_actions.cypher");
@@ -323,38 +314,6 @@ pub async fn instance_profiles_with_action(
             .param("account_id", ctx.account_id.as_str()),
     )
     .await
-}
-
-const RISKY_INSTANCE_PROFILES_QUERY: &str =
-    include_str!("../../queries/risky_instance_profiles.cypher");
-
-/// Return instance profiles whose roles have privilege-escalation permissions,
-/// including the specific risky actions found.
-pub async fn risky_instance_profiles(
-    graph: &Graph,
-    ctx: &QueryContext,
-) -> Result<Vec<RiskyInstanceProfile>, GraphError> {
-    let mut stream = graph
-        .execute(
-            neo4rs::query(RISKY_INSTANCE_PROFILES_QUERY)
-                .param("account_id", ctx.account_id.as_str())
-                .param("snapshot_id", ctx.snapshot_id.as_str()),
-        )
-        .await?;
-
-    let mut results = Vec::new();
-    while let Some(row) = stream.next().await? {
-        let arn: String = col(&row, "arn")?;
-        let name: String = col(&row, "name")?;
-        let risky_actions: Vec<String> = col(&row, "risky_actions")?;
-        results.push(RiskyInstanceProfile {
-            arn,
-            name,
-            entity_type: "InstanceProfile".to_string(),
-            risky_actions,
-        });
-    }
-    Ok(results)
 }
 
 async fn collect_instance_profile_refs(
