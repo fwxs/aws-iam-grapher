@@ -60,10 +60,6 @@ impl Default for OfflineCollectorBuilder {
 
 #[async_trait::async_trait]
 impl IamDataSource for OfflineCollector {
-    fn mode(&self) -> CollectorMode {
-        CollectorMode::Offline
-    }
-
     async fn collect(&self) -> Result<CollectedData, CollectorError> {
         info!("starting offline IAM collection");
         let mut warnings = vec![CollectorWarning::UserSecurityAttributesNotCollected];
@@ -145,5 +141,32 @@ impl IamDataSource for OfflineCollector {
         expand_collected_data(&mut data).await;
 
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn collect_sets_source_to_offline() {
+        let auth_details_json = r#"{
+            "UserDetailList": [],
+            "GroupDetailList": [],
+            "RoleDetailList": [],
+            "Policies": []
+        }"#;
+
+        let collector = OfflineCollectorBuilder::new()
+            .auth_details_json(auth_details_json)
+            .build()
+            .expect("valid auth details JSON");
+
+        let data = collector
+            .collect()
+            .await
+            .expect("offline collection succeeds");
+
+        assert_eq!(data.source, CollectorMode::Offline);
     }
 }

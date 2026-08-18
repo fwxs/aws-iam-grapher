@@ -51,5 +51,4 @@ impl Default for CollectedData {
 #[async_trait::async_trait]
 pub trait IamDataSource: Send + Sync {
     async fn collect(&self) -> Result<CollectedData, crate::errors::CollectorError>;
-    fn mode(&self) -> CollectorMode;
 }
