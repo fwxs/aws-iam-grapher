@@ -411,6 +411,11 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 All query commands require the Neo4j password, resolved via `--neo4j-pass-file <path>` or
 the `NEO4J_PASSWORD` environment variable (see [Neo4j password and secret mounts](#neo4j-password-and-secret-mounts)). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
 
+`--neo4j-uri`, `--neo4j-user`, `--neo4j-pass-file`, and `--output-file` are global flags and
+may be given before or after the query verb, e.g. both `query who-can s3:GetObject
+--neo4j-pass-file ...` and `query --neo4j-pass-file ... who-can s3:GetObject` work.
+`--account-id` and `--snapshot-id` are query-scoped, not global, and must precede the verb.
+
 `--account-id` is optional. When it's provided, the query scopes to exactly that account (as
 before). When it's **omitted**, `query` resolves every distinct account with at least one
 snapshot in the graph and runs the query once per account, each correctly scoped to its own

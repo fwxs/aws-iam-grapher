@@ -1,3 +1,4 @@
+use crate::cli::common::{ConnectionArgs, OutputArgs};
 use crate::exit_code::CliValidationError;
 use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
 use anyhow::Context as _;
@@ -14,22 +15,12 @@ use iam_models::condition::ConditionContext;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Args)]
 pub struct QueryArgs {
-    /// Neo4j bolt URI.
-    #[arg(long, default_value = "bolt://localhost:7687")]
-    neo4j_uri: String,
-
-    /// Neo4j username.
-    #[arg(long, default_value = "neo4j")]
-    neo4j_user: String,
-
-    /// Path to a file containing the Neo4j password (e.g. a Docker/Kubernetes secret
-    /// mount). Takes precedence over NEO4J_PASSWORD. A trailing newline is trimmed.
-    #[arg(long)]
-    neo4j_pass_file: Option<PathBuf>,
+    #[command(flatten)]
+    connection: ConnectionArgs,
 
     /// AWS account ID to query. If omitted, the query runs once per account that has a
     /// snapshot in the graph, each scoped to its own (account_id, snapshot_id).
@@ -41,11 +32,8 @@ pub struct QueryArgs {
     #[arg(long)]
     snapshot_id: Option<String>,
 
-    /// Write the result to this file, in whatever format --output selects (json or
-    /// graphviz; table has no file-writable form, so this has no effect with the default
-    /// --output table). For --output json, stdout is suppressed once the file is written.
-    #[arg(long)]
-    output_file: Option<PathBuf>,
+    #[command(flatten)]
+    output: OutputArgs,
 
     #[command(subcommand)]
     command: QueryCommand,
@@ -495,10 +483,8 @@ enum QueryCommand {
     /// Entities with privilege-escalation permissions, directly or via a transitive
     /// sts:AssumeRole chain.
     PrivilegeEscalation {
-        /// Max sts:AssumeRole hops to traverse when looking for transitive escalation
-        /// paths. Capped at 10 to bound traversal cost on dense CAN_ASSUME_ROLE graphs.
-        #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
-        max_hops: u32,
+        #[command(flatten)]
+        hops: MaxHopsArg,
     },
     /// List available snapshots for the account.
     ListSnapshots,
@@ -514,36 +500,61 @@ enum QueryCommand {
     DeleteSnapshot { snapshot_id: String },
     /// Cross-account privilege-escalation paths across an org collection run.
     OrgEscalation {
-        /// Max sts:AssumeRole hops to traverse.
-        #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
-        max_hops: u32,
+        #[command(flatten)]
+        hops: MaxHopsArg,
         /// Org collection run id (default: most recent org run).
         #[arg(long)]
         org_run_id: Option<String>,
     },
 }
 
-pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
-    if output == OutputFormat::Graphviz
-        && !matches!(
-            args.command,
+/// Max sts:AssumeRole hops to traverse when looking for transitive escalation paths.
+/// Capped at 10 to bound traversal cost on dense CAN_ASSUME_ROLE graphs. Shared by
+/// `PrivilegeEscalation` and `OrgEscalation`.
+#[derive(Args)]
+pub struct MaxHopsArg {
+    #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
+    max_hops: u32,
+}
+
+impl QueryCommand {
+    /// Whether this query kind has a graph-shaped result renderable as Graphviz DOT.
+    /// Exhaustive match (no `_` arm) so a new variant fails to compile until this is
+    /// answered explicitly, instead of failing at runtime.
+    fn supports_graphviz(&self) -> bool {
+        match self {
             QueryCommand::WhoCan { .. }
-                | QueryCommand::PrivilegeEscalation { .. }
-                | QueryCommand::OrgEscalation { .. }
-        )
-    {
+            | QueryCommand::PrivilegeEscalation { .. }
+            | QueryCommand::OrgEscalation { .. } => true,
+            QueryCommand::EntityPerms { .. }
+            | QueryCommand::InstanceProfilesWith { .. }
+            | QueryCommand::ListSnapshots
+            | QueryCommand::ListAccounts
+            | QueryCommand::Diff { .. }
+            | QueryCommand::DeleteSnapshot { .. } => false,
+        }
+    }
+}
+
+pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
+    if output == OutputFormat::Graphviz && !args.command.supports_graphviz() {
         return Err(CliValidationError::GraphvizUnsupported.into());
     }
 
-    let neo4j_pass = crate::cli::collect::resolve_neo4j_pass(args.neo4j_pass_file.as_deref())?;
-    let client = GraphClient::connect(&args.neo4j_uri, &args.neo4j_user, &neo4j_pass)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to Neo4j at {}",
-                iam_graph::redact_uri(&args.neo4j_uri)
-            )
-        })?;
+    let neo4j_pass =
+        crate::cli::collect::resolve_neo4j_pass(args.connection.neo4j_pass_file.as_deref())?;
+    let client = GraphClient::connect(
+        &args.connection.neo4j_uri,
+        &args.connection.neo4j_user,
+        &neo4j_pass,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to connect to Neo4j at {}",
+            iam_graph::redact_uri(&args.connection.neo4j_uri)
+        )
+    })?;
 
     match args.command {
         QueryCommand::ListSnapshots => {
@@ -567,7 +578,12 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
             // A snapshot listing isn't an access query — it's metadata, and each row
             // already self-reports `is_partial`/`partial_reasons`. No caveats apply.
-            if !emit_json(&snapshots, Vec::new(), &output, args.output_file.as_deref())? {
+            if !emit_json(
+                &snapshots,
+                Vec::new(),
+                &output,
+                args.output.output_file.as_deref(),
+            )? {
                 return Ok(());
             }
 
@@ -595,7 +611,12 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
             // Cross-account discovery, not an access query. Always empty (acceptance
             // criterion: `list-accounts --output json` returns `caveats: []`).
-            if !emit_json(&accounts, Vec::new(), &output, args.output_file.as_deref())? {
+            if !emit_json(
+                &accounts,
+                Vec::new(),
+                &output,
+                args.output.output_file.as_deref(),
+            )? {
                 return Ok(());
             }
 
@@ -624,7 +645,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
         }
 
         QueryCommand::OrgEscalation {
-            max_hops,
+            hops: MaxHopsArg { max_hops },
             org_run_id,
         } => {
             let ctx = resolve_org_context(client.inner(), org_run_id).await?;
@@ -635,7 +656,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
             if output == OutputFormat::Graphviz {
                 let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
-                write_dot_output(&dot, args.output_file.as_deref())?;
+                write_dot_output(&dot, args.output.output_file.as_deref())?;
                 return Ok(());
             }
 
@@ -643,13 +664,13 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             // Only pay for it when the result will actually carry caveats: `--output table`
             // with no `--output-file` never serializes JSON at all.
             let mut caveats = escalation_static_caveats();
-            if output == OutputFormat::Json || args.output_file.is_some() {
+            if output == OutputFormat::Json || args.output.output_file.is_some() {
                 let snapshots = snapshots_for_org_run(client.inner(), &run_id)
                     .await
                     .context("failed to resolve org-run snapshots for caveats")?;
                 caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
             }
-            if !emit_json(&paths, caveats, &output, args.output_file.as_deref())? {
+            if !emit_json(&paths, caveats, &output, args.output.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -724,7 +745,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             // reconciliation, no glob matching, no NotAction logic. Neither approximation
             // caveat applies; only snapshot-derived caveats can.
             let caveats = snapshot_caveats(&[&record_a, &record_b]);
-            if !emit_json(&diff, caveats, &output, args.output_file.as_deref())? {
+            if !emit_json(&diff, caveats, &output, args.output.output_file.as_deref())? {
                 return Ok(());
             }
 
@@ -768,7 +789,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             run_scoped(
                 ScopedOutput {
                     format: &output,
-                    file: args.output_file.as_deref(),
+                    file: args.output.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     caveats: who_can_static_caveats(),
                 },
@@ -821,7 +842,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             run_scoped(
                 ScopedOutput {
                     format: &output,
-                    file: args.output_file.as_deref(),
+                    file: args.output.output_file.as_deref(),
                     // Always single: an ARN names exactly one account, so entity-perms
                     // never fans out (see docs/limitations.md and issue #151).
                     single: true,
@@ -860,7 +881,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             run_scoped(
                 ScopedOutput {
                     format: &output,
-                    file: args.output_file.as_deref(),
+                    file: args.output.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     // instance_profiles_with_action.cypher matches only exact
                     // `effect: 'Allow', action: $action` — no Deny exclusion, no
@@ -895,7 +916,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             .await?;
         }
 
-        QueryCommand::PrivilegeEscalation { max_hops } => {
+        QueryCommand::PrivilegeEscalation {
+            hops: MaxHopsArg { max_hops },
+        } => {
             let scopes = resolve_command_scopes(
                 &client,
                 args.account_id.as_deref(),
@@ -905,7 +928,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             run_scoped(
                 ScopedOutput {
                     format: &output,
-                    file: args.output_file.as_deref(),
+                    file: args.output.output_file.as_deref(),
                     single: args.account_id.is_some(),
                     caveats: escalation_static_caveats(),
                 },
@@ -1016,6 +1039,37 @@ fn short_id(id: &str) -> &str {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn supports_graphviz_true_for_graph_shaped_queries() {
+        assert!(QueryCommand::WhoCan {
+            action: "s3:GetObject".to_string(),
+            resource: None,
+            region: None,
+            mfa: None,
+            principal_tags: Vec::new(),
+        }
+        .supports_graphviz());
+        assert!(QueryCommand::PrivilegeEscalation {
+            hops: MaxHopsArg { max_hops: 5 },
+        }
+        .supports_graphviz());
+        assert!(QueryCommand::OrgEscalation {
+            hops: MaxHopsArg { max_hops: 5 },
+            org_run_id: None,
+        }
+        .supports_graphviz());
+    }
+
+    #[test]
+    fn supports_graphviz_false_for_non_graph_queries() {
+        assert!(!QueryCommand::ListSnapshots.supports_graphviz());
+        assert!(!QueryCommand::ListAccounts.supports_graphviz());
+        assert!(!QueryCommand::EntityPerms {
+            arn: "arn:aws:iam::111111111111:user/alice".to_string(),
+        }
+        .supports_graphviz());
+    }
 
     #[test]
     fn entity_perms_account_derives_from_arn_when_flag_omitted() {
