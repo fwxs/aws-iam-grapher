@@ -37,6 +37,23 @@ pub enum CliValidationError {
          who-can, privilege-escalation, org-escalation"
     )]
     GraphvizUnsupported,
+
+    #[error(
+        "could not determine account from ARN `{arn}`: expected an IAM entity ARN of the \
+         form arn:aws:iam::<account-id>:<resource>"
+    )]
+    EntityPermsArnUnparseable { arn: String },
+
+    #[error(
+        "--account-id {flag_account} conflicts with the account in ARN `{arn}` \
+         ({arn_account}); an entity's account is derived from its ARN and cannot be \
+         overridden"
+    )]
+    EntityPermsAccountConflict {
+        flag_account: String,
+        arn_account: String,
+        arn: String,
+    },
 }
 
 /// The union of typed error sources the CLI classifies into an exit code. Constructed at

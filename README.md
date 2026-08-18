@@ -415,13 +415,18 @@ the `NEO4J_PASSWORD` environment variable (see [Neo4j password and secret mounts
 before). When it's **omitted**, `query` resolves every distinct account with at least one
 snapshot in the graph and runs the query once per account, each correctly scoped to its own
 `(account_id, snapshot_id)` — never merging results across accounts. This applies to
-`who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`, and
-`list-snapshots`. Output (table and JSON) groups results under an `=== Account: ... ===`
-header (table) or an `account_id`/`snapshot_id`/`results` envelope per account, nested inside
-the outer `results` array of the top-level `{results, caveats}` JSON envelope (see below). A
-graph with only one account degrades to a single group. `--snapshot-id` cannot be combined
-with multi-account mode (more than one account resolved) since a snapshot id would be
-ambiguous across accounts — pass `--account-id` to target one account instead.
+`who-can`, `instance-profiles-with`, `privilege-escalation`, and `list-snapshots`. Output
+(table and JSON) groups results under an `=== Account: ... ===` header (table) or an
+`account_id`/`snapshot_id`/`results` envelope per account, nested inside the outer `results`
+array of the top-level `{results, caveats}` JSON envelope (see below). A graph with only one
+account degrades to a single group. `--snapshot-id` cannot be combined with multi-account mode
+(more than one account resolved) since a snapshot id would be ambiguous across accounts —
+pass `--account-id` to target one account instead.
+
+`entity-perms` never fans out: an ARN names exactly one account (segment 4), so the account is
+always derived from the ARN itself, not from `--account-id`. An explicit `--account-id` that
+disagrees with the ARN's account is an error, and an ARN naming an account with no snapshots
+in the graph fails clearly rather than returning an empty result.
 
 `diff` derives the account from its two snapshot ids when `--account-id` is omitted, and
 errors if the two snapshots belong to different accounts.
