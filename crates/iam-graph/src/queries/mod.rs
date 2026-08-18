@@ -45,8 +45,7 @@ where
 
 pub use accounts::{list_accounts, AccountRecord};
 pub use analysis::{
-    entity_permissions, instance_profiles_with_action, risky_instance_profiles, who_can, EntityRef,
-    PermissionRow, RiskyInstanceProfile,
+    entity_permissions, instance_profiles_with_action, who_can, EntityRef, PermissionRow,
 };
 pub use caveats::{Caveat, CaveatCode};
 pub use context::{OrgQueryContext, QueryContext};
