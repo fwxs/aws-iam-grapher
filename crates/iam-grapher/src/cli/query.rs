@@ -2,6 +2,7 @@ use crate::exit_code::CliValidationError;
 use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
 use anyhow::Context as _;
 use clap::{Args, Subcommand};
+use iam_collector::account_id_from_arn;
 use iam_graph::{
     delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
     list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
@@ -484,7 +485,10 @@ enum QueryCommand {
         #[arg(long = "principal-tag")]
         principal_tags: Vec<String>,
     },
-    /// All permissions for a specific entity ARN.
+    /// All permissions for a specific entity ARN. The account is inferred from the ARN's
+    /// own account segment, not from `--account-id` — an ARN can only belong to one
+    /// account, so this command never fans out across accounts. An explicit
+    /// `--account-id` that disagrees with the ARN's account is an error.
     EntityPerms { arn: String },
     /// Instance profiles whose roles grant the given IAM action.
     InstanceProfilesWith { action: String },
@@ -806,17 +810,21 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
         }
 
         QueryCommand::EntityPerms { arn } => {
-            let scopes = resolve_command_scopes(
-                &client,
-                args.account_id.as_deref(),
-                args.snapshot_id.as_deref(),
-            )
-            .await?;
+            let arn_account = entity_perms_account(&arn, args.account_id.as_deref())?;
+
+            let selector = match args.snapshot_id.as_deref() {
+                Some(snapshot_id) => ScopeSelector::snapshot(snapshot_id, Some(arn_account)),
+                None => ScopeSelector::account(arn_account),
+            };
+            let scopes = resolve_scopes(client.inner(), selector).await?;
+
             run_scoped(
                 ScopedOutput {
                     format: &output,
                     file: args.output_file.as_deref(),
-                    single: args.account_id.is_some(),
+                    // Always single: an ARN names exactly one account, so entity-perms
+                    // never fans out (see docs/limitations.md and issue #151).
+                    single: true,
                     // entity_permissions() does no Deny subtraction and no NotAction
                     // handling — it returns every stored Allow/Deny row unfiltered, with
                     // `effective` computed only from permission-boundary capping. Neither
@@ -836,12 +844,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                 },
                 |perms: &Vec<PermissionRow>| entity_perm_rows(perms),
                 None,
-                |sc| match sc {
-                    ScopeCount::Single(_) => format!("Permissions for {arn}"),
-                    ScopeCount::Multi(n) => {
-                        format!("Permissions for {arn} (across {n} account(s))")
-                    }
-                },
+                |_sc| format!("Permissions for {arn}"),
                 "No permissions found.",
             )
             .await?;
@@ -978,6 +981,33 @@ fn diff_account_id_from_records(
     Ok(record_a.account_id.clone())
 }
 
+/// Derive the single account `entity-perms` should query from its ARN argument, validating
+/// it against an optional explicit `--account-id`. An ARN names exactly one account, so
+/// `entity-perms` never fans out across accounts (issue #151) — this replaces the
+/// `resolve_command_scopes` fan-out path used by the other scoped query commands.
+fn entity_perms_account(
+    arn: &str,
+    flag_account: Option<&str>,
+) -> Result<String, CliValidationError> {
+    let arn_account = account_id_from_arn(arn)
+        .filter(|account| account != "aws")
+        .ok_or_else(|| CliValidationError::EntityPermsArnUnparseable {
+            arn: arn.to_string(),
+        })?;
+
+    if let Some(flag_account) = flag_account {
+        if flag_account != arn_account {
+            return Err(CliValidationError::EntityPermsAccountConflict {
+                flag_account: flag_account.to_string(),
+                arn_account,
+                arn: arn.to_string(),
+            });
+        }
+    }
+
+    Ok(arn_account)
+}
+
 fn short_id(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
@@ -986,6 +1016,57 @@ fn short_id(id: &str) -> &str {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn entity_perms_account_derives_from_arn_when_flag_omitted() {
+        let result = entity_perms_account("arn:aws:iam::123456789012:user/alice", None);
+
+        assert_eq!(result.unwrap(), "123456789012");
+    }
+
+    #[test]
+    fn entity_perms_account_matching_flag_succeeds() {
+        let result =
+            entity_perms_account("arn:aws:iam::123456789012:user/alice", Some("123456789012"));
+
+        assert_eq!(result.unwrap(), "123456789012");
+    }
+
+    #[test]
+    fn entity_perms_account_conflicting_flag_errors() {
+        let result =
+            entity_perms_account("arn:aws:iam::123456789012:user/alice", Some("999999999999"));
+
+        assert!(matches!(
+            result,
+            Err(CliValidationError::EntityPermsAccountConflict {
+                flag_account,
+                arn_account,
+                ..
+            }) if flag_account == "999999999999" && arn_account == "123456789012"
+        ));
+    }
+
+    #[test]
+    fn entity_perms_account_unparseable_arn_errors() {
+        let result = entity_perms_account("not-an-arn", None);
+
+        assert!(matches!(
+            result,
+            Err(CliValidationError::EntityPermsArnUnparseable { arn }) if arn == "not-an-arn"
+        ));
+    }
+
+    #[test]
+    fn entity_perms_account_aws_managed_policy_arn_errors() {
+        let result = entity_perms_account("arn:aws:iam::aws:policy/ReadOnlyAccess", None);
+
+        assert!(matches!(
+            result,
+            Err(CliValidationError::EntityPermsArnUnparseable { arn })
+                if arn == "arn:aws:iam::aws:policy/ReadOnlyAccess"
+        ));
+    }
 
     fn scope(account_id: &str, snapshot_id: &str) -> ResolvedScope {
         ResolvedScope {
