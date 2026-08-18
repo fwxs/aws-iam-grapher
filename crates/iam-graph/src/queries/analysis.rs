@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::nodes::uid;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use iam_models::condition::{self, ConditionContext, ConditionOutcome};
@@ -246,17 +247,36 @@ fn boundary_allows(entries: &[BoundaryEntry], action: &str) -> bool {
     })
 }
 
-/// Return all permissions for a specific entity UID. Allow rows carry `effective: false` when
+/// Return all permissions for a specific entity. Allow rows carry `effective: false` when
 /// capped by the entity's Permission Boundary (see limitations.md).
+///
+/// # Errors
+/// Returns [`GraphError::EntityNotFound`] if `entity_arn` has no node in this snapshot.
 pub async fn entity_permissions(
     graph: &Graph,
     ctx: &QueryContext,
-    entity_uid: &str,
+    entity_arn: &str,
 ) -> Result<Vec<PermissionRow>, GraphError> {
+    let entity_uid = uid::entity_uid(&ctx.snapshot_id, entity_arn);
+
+    let mut exists_stream = graph
+        .execute(
+            neo4rs::query("OPTIONAL MATCH (e {uid: $uid}) RETURN e IS NOT NULL AS found")
+                .param("uid", entity_uid.as_str()),
+        )
+        .await?;
+    let found: bool = match exists_stream.next().await? {
+        Some(row) => col(&row, "found")?,
+        None => false,
+    };
+    if !found {
+        return Err(GraphError::entity_not_found(entity_arn));
+    }
+
     let mut boundary_stream = graph
         .execute(
             neo4rs::query(ENTITY_BOUNDARY_ACTIONS_QUERY)
-                .param("uid", entity_uid)
+                .param("uid", entity_uid.as_str())
                 .param("snapshot_id", ctx.snapshot_id.as_str()),
         )
         .await?;
@@ -275,7 +295,7 @@ pub async fn entity_permissions(
     let mut stream = graph
         .execute(
             neo4rs::query(ENTITY_PERMISSIONS_QUERY)
-                .param("uid", entity_uid)
+                .param("uid", entity_uid.as_str())
                 .param("snapshot_id", ctx.snapshot_id.as_str()),
         )
         .await?;
