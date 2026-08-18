@@ -857,8 +857,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                     let arn = arn.clone();
                     let client = &client;
                     async move {
-                        let uid = format!("{}|{}", ctx.snapshot_id, arn);
-                        entity_permissions(client.inner(), &ctx, &uid)
+                        entity_permissions(client.inner(), &ctx, &arn)
                             .await
                             .context("entity-perms query failed")
                     }

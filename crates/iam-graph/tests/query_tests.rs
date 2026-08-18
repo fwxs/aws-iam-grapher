@@ -1,7 +1,8 @@
 mod helpers;
 
 use iam_graph::{
-    entity_permissions, privilege_escalation_paths, who_can, GraphIngester, QueryContext,
+    entity_permissions, privilege_escalation_paths, who_can, GraphError, GraphIngester,
+    QueryContext,
 };
 use iam_models::condition::ConditionContext;
 
@@ -735,8 +736,7 @@ async fn entity_permissions_marks_boundary_capped_action_not_effective() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let uid = format!("{}|{}", snapshot_id, role_arn);
-    let perms = entity_permissions(ingester.client().inner(), &ctx, &uid)
+    let perms = entity_permissions(ingester.client().inner(), &ctx, &role_arn)
         .await
         .expect("entity_permissions must succeed");
 
@@ -756,6 +756,34 @@ async fn entity_permissions_marks_boundary_capped_action_not_effective() {
     assert!(
         effective.effective,
         "s3:GetObject Allow must be marked effective — covered by boundary"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn entity_permissions_unknown_arn_returns_entity_not_found() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000016";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let err = entity_permissions(
+        ingester.client().inner(),
+        &ctx,
+        "arn:aws:iam::900000000016:role/DoesNotExist",
+    )
+    .await
+    .expect_err("unknown entity must error");
+
+    assert!(
+        matches!(err, GraphError::EntityNotFound(_)),
+        "expected EntityNotFound, got: {err:?}"
     );
 }
 

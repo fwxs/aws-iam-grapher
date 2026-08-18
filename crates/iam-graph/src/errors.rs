@@ -38,6 +38,10 @@ pub enum GraphError {
     #[error("snapshot {0} not found")]
     SnapshotNotFound(String),
 
+    /// Requested entity does not exist in this snapshot.
+    #[error("entity {0} not found in snapshot")]
+    EntityNotFound(String),
+
     /// Account has no snapshots in the graph.
     #[error(
         "no snapshots found for account {0}.\n\
@@ -113,6 +117,11 @@ impl GraphError {
     /// Construct a [`GraphError::SnapshotNotFound`] error.
     pub fn snapshot_not_found(snapshot_id: impl Into<String>) -> Self {
         Self::SnapshotNotFound(snapshot_id.into())
+    }
+
+    /// Construct a [`GraphError::EntityNotFound`] error.
+    pub fn entity_not_found(arn: impl Into<String>) -> Self {
+        Self::EntityNotFound(arn.into())
     }
 
     /// Construct a [`GraphError::NoSnapshotsForAccount`] error.

@@ -46,6 +46,8 @@ AWS IAM Permission Boundaries are attached to roles and users and act as a maxim
 
 **Not evaluated:** Deny statements *inside* the boundary policy itself (AWS also evaluates these) and `Condition` keys on boundary statements.
 
+**Not found vs. empty:** `entity-perms` distinguishes an ARN with no matching entity in the snapshot (returns an error) from an entity that exists but has zero permissions (returns an empty result) — the two are no longer indistinguishable.
+
 ### Service Control Policies (SCPs) not supported
 
 AWS Organizations SCPs restrict what IAM entities in member accounts can do, even if the entity's own policies allow the action. An SCP can deny `s3:DeleteBucket` organization-wide regardless of what the IAM policy says.

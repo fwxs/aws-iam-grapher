@@ -1,5 +1,6 @@
 mod helpers;
 
+use iam_graph::nodes::uid::entity_uid;
 use iam_graph::{GraphIngester, IngestConfig};
 use iam_models::{Effect, IamRole, PolicyDocument, PolicyStatement};
 use uuid::Uuid;
@@ -54,7 +55,7 @@ async fn ingest_creates_policy_nodes_with_correct_uid() {
     let (data, policy_arn) = helpers::data_with_policy("111122223333");
     ingester.ingest(&data).await.expect("ingest must succeed");
 
-    let expected_uid = format!("{}|{}", snapshot_id, policy_arn);
+    let expected_uid = entity_uid(&snapshot_id, &policy_arn);
     let rows = ingester
         .client()
         .fetch_all(
@@ -440,7 +441,7 @@ async fn ingest_trust_policy_with_condition_marks_can_assume_conditional() {
                 "MATCH (pr:Principal)-[ca:CAN_ASSUME]->(r:Role {uid: $uid})
                  RETURN ca.conditional AS conditional",
             )
-            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+            .param("uid", entity_uid(&snap_id, role_arn).as_str()),
         )
         .await
         .expect("CAN_ASSUME query must succeed");
@@ -535,7 +536,7 @@ async fn ingest_trust_policy_with_not_principal_excludes_listed_entity() {
                  RETURN pr.id AS id",
             )
             .param("excluded_arn", excluded_arn)
-            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+            .param("uid", entity_uid(&snap_id, role_arn).as_str()),
         )
         .await
         .expect("CAN_ASSUME query must succeed");
@@ -553,7 +554,7 @@ async fn ingest_trust_policy_with_not_principal_excludes_listed_entity() {
                  RETURN excluded.arn AS arn",
             )
             .param("excluded_arn", excluded_arn)
-            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+            .param("uid", entity_uid(&snap_id, role_arn).as_str()),
         )
         .await
         .expect("CAN_ASSUME_ROLE query must succeed");
@@ -570,7 +571,7 @@ async fn ingest_trust_policy_with_not_principal_excludes_listed_entity() {
                 "MATCH (pr:Principal {type: 'Wildcard'})-[ca:CAN_ASSUME]->(r:Role {uid: $uid})
                  RETURN ca.conditional AS conditional",
             )
-            .param("uid", format!("{}|{}", snap_id, role_arn).as_str()),
+            .param("uid", entity_uid(&snap_id, role_arn).as_str()),
         )
         .await
         .expect("Wildcard CAN_ASSUME query must succeed");
