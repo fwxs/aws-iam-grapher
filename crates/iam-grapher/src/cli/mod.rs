@@ -1,5 +1,6 @@
 pub mod collect;
 pub mod collect_org;
+pub mod common;
 pub mod query;
 
 use crate::output::OutputFormat;
@@ -84,7 +85,7 @@ mod tests {
             panic!("expected Collect subcommand");
         };
         assert_eq!(
-            top.account.shared.neo4j_pass_file,
+            top.account.shared.connection.neo4j_pass_file,
             Some(std::path::PathBuf::from("/run/secrets/neo4j_pass"))
         );
     }
@@ -114,12 +115,14 @@ mod tests {
             input_file: None,
             profiles_file: None,
             shared: collect::SharedCollectArgs {
-                neo4j_uri: "bolt://localhost:7687".to_string(),
-                neo4j_user: "neo4j".to_string(),
-                neo4j_pass_file: None,
+                connection: common::ConnectionArgs {
+                    neo4j_uri: "bolt://localhost:7687".to_string(),
+                    neo4j_user: "neo4j".to_string(),
+                    neo4j_pass_file: None,
+                },
                 batch_size: 500,
                 dry_run: false,
-                output_file: None,
+                output: common::OutputArgs { output_file: None },
             },
             account_id: None,
             account_alias: None,
@@ -162,7 +165,7 @@ mod tests {
             panic!("expected Collect subcommand");
         };
         assert_eq!(
-            top.account.shared.output_file,
+            top.account.shared.output.output_file,
             Some(std::path::PathBuf::from("/tmp/out.json"))
         );
     }
@@ -367,5 +370,43 @@ mod tests {
         ])
         .expect("parse must succeed");
         assert!(matches!(cli.command, Commands::Query(_)));
+    }
+
+    #[test]
+    fn query_output_file_after_subcommand_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "list-snapshots",
+            "--output-file",
+            "/tmp/out.json",
+        ])
+        .expect("--output-file is global, must parse after the subcommand");
+        assert!(matches!(cli.command, Commands::Query(_)));
+    }
+
+    #[test]
+    fn query_neo4j_uri_after_subcommand_parses() {
+        let cli = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "list-snapshots",
+            "--neo4j-uri",
+            "bolt://example:7687",
+        ])
+        .expect("--neo4j-uri is global, must parse after the subcommand");
+        assert!(matches!(cli.command, Commands::Query(_)));
+    }
+
+    #[test]
+    fn query_rejects_batch_size() {
+        let result = Cli::try_parse_from([
+            "aws-iam-grapher",
+            "query",
+            "--batch-size",
+            "10",
+            "list-snapshots",
+        ]);
+        assert!(result.is_err());
     }
 }

@@ -1,3 +1,4 @@
+use crate::cli::common::{ConnectionArgs, OutputArgs};
 use crate::exit_code::{CliError, CliValidationError};
 use crate::output::OutputFormat;
 use anyhow::Context as _;
@@ -21,18 +22,8 @@ pub enum CollectMode {
 /// Neo4j connection + output args shared by every `collect` subcommand.
 #[derive(Args)]
 pub struct SharedCollectArgs {
-    /// Neo4j bolt URI.
-    #[arg(long, default_value = "bolt://localhost:7687")]
-    pub neo4j_uri: String,
-
-    /// Neo4j username.
-    #[arg(long, default_value = "neo4j")]
-    pub neo4j_user: String,
-
-    /// Path to a file containing the Neo4j password (e.g. a Docker/Kubernetes secret
-    /// mount). Takes precedence over NEO4J_PASSWORD. A trailing newline is trimmed.
-    #[arg(long)]
-    pub neo4j_pass_file: Option<PathBuf>,
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
 
     /// Batch size for Neo4j writes.
     #[arg(long, default_value = "500")]
@@ -42,11 +33,8 @@ pub struct SharedCollectArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Write the JSON summary to this file. For --output json, stdout is suppressed
-    /// once the file is written; the human-readable summary still prints for
-    /// --output table (default), the only case this has no effect for.
-    #[arg(long)]
-    pub output_file: Option<PathBuf>,
+    #[command(flatten)]
+    pub output: OutputArgs,
 }
 
 #[derive(Args)]
@@ -139,15 +127,19 @@ pub async fn run(args: CollectArgs, output: OutputFormat) -> anyhow::Result<()> 
     }
 
     let snapshot_id = Uuid::new_v4().to_string();
-    let neo4j_pass = resolve_neo4j_pass(args.shared.neo4j_pass_file.as_deref())?;
-    let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to Neo4j at {}",
-                iam_graph::redact_uri(&args.shared.neo4j_uri)
-            )
-        })?;
+    let neo4j_pass = resolve_neo4j_pass(args.shared.connection.neo4j_pass_file.as_deref())?;
+    let client = GraphClient::connect(
+        &args.shared.connection.neo4j_uri,
+        &args.shared.connection.neo4j_user,
+        &neo4j_pass,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to connect to Neo4j at {}",
+            iam_graph::redact_uri(&args.shared.connection.neo4j_uri)
+        )
+    })?;
     client
         .initialize_schema()
         .await
@@ -188,7 +180,7 @@ pub async fn run(args: CollectArgs, output: OutputFormat) -> anyhow::Result<()> 
         &stats,
         duration_secs,
         &output,
-        args.shared.output_file.as_deref(),
+        args.shared.output.output_file.as_deref(),
     )?;
     Ok(())
 }
