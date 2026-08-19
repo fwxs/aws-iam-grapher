@@ -88,6 +88,16 @@ Tests in `crates/iam-graph/tests/` share one Neo4j container per test binary (fo
 - `NotAction` statements are fully evaluated via a sentinel + query-time exclusion model (not merely parsed) — an entity with `Allow NotAction: [...]` correctly appears/is absent from `who_can` results. Remaining approximations: the grant's resource scope isn't intersected with `--resource`, and conditions on `NotAction` statements aren't evaluated. See `docs/limitations.md`.
 - `query ... --output json` attaches a `caveats` array (closed `CaveatCode` enum: `approximate-deny`, `notaction-not-expanded`, `partial-snapshot`, `expansion-degraded`) to every response, describing which of the above approximations apply to that query and snapshot. Always present, empty when none apply. See `docs/caveats.md`.
 
+## Claude Code Skill
+
+A repo-local, read-only skill lives at `.claude/skills/aws-iam-grapher/` (`SKILL.md` +
+`reference.md`), wrapping `query`'s read subcommands only (`who-can`, `entity-perms`,
+`instance-profiles-with`, `privilege-escalation`, `org-escalation`, `diff`, `list-snapshots`,
+`list-accounts`). It never exposes `delete-snapshot` (no confirmation/dry-run gate in the CLI) or
+`collect`/`collect org` (mutates the graph, makes live AWS calls). Keep it in sync with `query.rs`
+and the `CaveatCode` enum when either changes — every flag it documents must match the CLI's
+actual `--help` output exactly.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
