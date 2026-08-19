@@ -170,12 +170,21 @@ pub async fn who_can(
         });
     }
 
-    // Deduplicate by ARN (UNION arms can return the same entity via different paths).
-    // If an entity appears as both specific-action and full-admin, keep is_full_admin: true.
-    // ponytail: an entity is conditional only if every surviving grant for it is conditional
-    // (AND across duplicates, union of keys) — a second, unconditional grant to the same
-    // action makes the entity's access unconditional overall. Refine only if a real case
-    // needs per-grant tracking instead of this per-entity approximation.
+    Ok(merge_entity_grants(raw))
+}
+
+/// Merge multiple surviving grants for the same entity (by `arn`) into one `EntityRef` each.
+///
+/// Policy (see issue #86, `docs/limitations.md`):
+/// - `is_full_admin`: OR across grants.
+/// - `conditional`: AND across grants — a second unconditional grant makes the entity's
+///   access unconditional overall (per-entity approximation, not per-grant tracking).
+/// - `unevaluated_condition_keys`: union while `conditional` stays true; cleared to empty
+///   the moment a merge flips `conditional` to false, since keys on an unconditional grant
+///   are misleading.
+/// - Output is deduplicated by ARN (UNION arms can return the same entity via different
+///   paths) and sorted by `arn` for deterministic ordering.
+fn merge_entity_grants(raw: Vec<EntityRef>) -> Vec<EntityRef> {
     let mut by_arn: std::collections::HashMap<String, EntityRef> = std::collections::HashMap::new();
     for entity in raw {
         by_arn
@@ -185,17 +194,21 @@ pub async fn who_can(
                     entry.is_full_admin = true;
                 }
                 entry.conditional = entry.conditional && entity.conditional;
-                for key in &entity.unevaluated_condition_keys {
-                    if !entry.unevaluated_condition_keys.contains(key) {
-                        entry.unevaluated_condition_keys.push(key.clone());
+                if entry.conditional {
+                    for key in &entity.unevaluated_condition_keys {
+                        if !entry.unevaluated_condition_keys.contains(key) {
+                            entry.unevaluated_condition_keys.push(key.clone());
+                        }
                     }
+                } else {
+                    entry.unevaluated_condition_keys.clear();
                 }
             })
             .or_insert(entity);
     }
     let mut results: Vec<EntityRef> = by_arn.into_values().collect();
     results.sort_by(|a, b| a.arn.cmp(&b.arn));
-    Ok(results)
+    results
 }
 
 /// Evaluate a grant's stored `Condition` JSON against query context.
@@ -357,4 +370,93 @@ async fn collect_instance_profile_refs(
         });
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn entity(arn: &str, conditional: bool, keys: &[&str]) -> EntityRef {
+        EntityRef {
+            arn: arn.to_string(),
+            name: "name".to_string(),
+            entity_type: "Role".to_string(),
+            is_full_admin: false,
+            resource: "*".to_string(),
+            is_bounded: false,
+            conditional,
+            unevaluated_condition_keys: keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn merge_entity_grants_single_grant_passes_through_unchanged() {
+        let raw = vec![entity("arn:a", true, &["aws:SourceIp"])];
+
+        let merged = merge_entity_grants(raw.clone());
+
+        assert_eq!(merged, raw);
+    }
+
+    #[test]
+    fn merge_entity_grants_two_conditional_grants_union_keys() {
+        let raw = vec![
+            entity("arn:a", true, &["aws:SourceIp"]),
+            entity("arn:a", true, &["aws:MultiFactorAuthPresent"]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].conditional);
+        assert_eq!(
+            merged[0].unevaluated_condition_keys,
+            vec![
+                "aws:SourceIp".to_string(),
+                "aws:MultiFactorAuthPresent".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn merge_entity_grants_conditional_and_unconditional_clears_keys() {
+        let raw = vec![
+            entity("arn:a", true, &["aws:SourceIp"]),
+            entity("arn:a", false, &[]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].conditional);
+        assert_eq!(merged[0].unevaluated_condition_keys, Vec::<String>::new());
+    }
+
+    #[test]
+    fn merge_entity_grants_full_admin_or_specific_grant_keeps_full_admin() {
+        let mut full_admin = entity("arn:a", false, &[]);
+        full_admin.is_full_admin = true;
+        let specific = entity("arn:a", false, &[]);
+        let raw = vec![specific, full_admin];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_full_admin);
+    }
+
+    #[test]
+    fn merge_entity_grants_multiple_arns_are_kept_separate_and_sorted() {
+        let raw = vec![
+            entity("arn:c", false, &[]),
+            entity("arn:a", false, &[]),
+            entity("arn:b", false, &[]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        let arns: Vec<&str> = merged.iter().map(|e| e.arn.as_str()).collect();
+        assert_eq!(arns, vec!["arn:a", "arn:b", "arn:c"]);
+    }
 }
