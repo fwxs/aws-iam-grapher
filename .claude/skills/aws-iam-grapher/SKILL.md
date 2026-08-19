@@ -132,5 +132,20 @@ aws-iam-grapher query --account-id 123456789012 --output json \
   privilege-escalation --max-hops 5
 ```
 
+```bash
+aws-iam-grapher query --account-id 123456789012 --output json \
+  instance-profiles-with iam:PassRole
+```
+
+```bash
+aws-iam-grapher query --output json \
+  org-escalation --max-hops 5
+```
+
+`org-escalation` is cross-account by design, like `list-accounts` — never pass `--account-id`.
+It defaults to the most recent `collect org` run; pass `--org-run-id <id>` to target an older one.
+Results carry each hop's `account_id`, so report the full cross-account chain as-is rather than
+trying to split it per account.
+
 All examples above assume `NEO4J_PASSWORD` is already set in the environment, as required by Hard
 rule 2 — never type, echo, or prefix a command with its value.
