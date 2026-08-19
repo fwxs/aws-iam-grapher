@@ -72,7 +72,7 @@ For each grant: if a supported key/operator pair has a matching context value an
 
 **Not evaluated:** any key/operator outside the table above (e.g. `s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks), and conditions on `entity-perms` / `instance-profiles-with` (only `who-can` evaluates and flags conditions in V1).
 
-**Dedup approximation:** when the same entity has multiple grants for a queried action, `conditional` is true only if *every* surviving grant is conditional — an additional unconditional grant makes the entity's access unconditional overall. See `who_can()` in `crates/iam-graph/src/queries/analysis.rs`.
+**Dedup approximation:** when the same entity has multiple grants for a queried action, `conditional` is true only if *every* surviving grant is conditional — an additional unconditional grant makes the entity's access unconditional overall. `unevaluated_condition_keys` is only ever populated while the merged entity stays `conditional: true`; the moment a merge flips it to `false`, the keys are cleared to an empty list, since keys left over from a superseded conditional grant would misleadingly imply the entity is still gated. See `merge_entity_grants()` in `crates/iam-graph/src/queries/analysis.rs`.
 
 **Relationship to trust-policy conditions:** trust policy (`AssumeRole`) conditions are evaluated separately by `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`), which understands only `StringEquals`/`StringEqualsIgnoreCase` on `aws:PrincipalAccount` — see "Trust policy evaluation is approximate" below. The two evaluators are not yet unified; a follow-up should consolidate trust-condition evaluation onto `iam_models::condition::evaluate`.
 
