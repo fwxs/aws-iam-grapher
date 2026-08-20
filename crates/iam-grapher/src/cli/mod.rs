@@ -403,6 +403,32 @@ mod tests {
     }
 
     #[test]
+    fn docs_queries_parses_with_no_name() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "docs", "queries"])
+            .expect("parse must succeed");
+        let Commands::Docs(args) = cli.command else {
+            panic!("expected Docs subcommand");
+        };
+        let Some(docs::DocsVerb::Queries(queries_args)) = args.verb else {
+            panic!("expected Queries verb");
+        };
+        assert_eq!(queries_args.name, None);
+    }
+
+    #[test]
+    fn docs_queries_parses_with_name() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "docs", "queries", "who-can"])
+            .expect("parse must succeed");
+        let Commands::Docs(args) = cli.command else {
+            panic!("expected Docs subcommand");
+        };
+        let Some(docs::DocsVerb::Queries(queries_args)) = args.verb else {
+            panic!("expected Queries verb");
+        };
+        assert_eq!(queries_args.name, Some("who-can".to_string()));
+    }
+
+    #[test]
     fn query_rejects_batch_size() {
         let result = Cli::try_parse_from([
             "aws-iam-grapher",

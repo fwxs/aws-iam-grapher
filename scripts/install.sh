@@ -9,10 +9,11 @@ install_dir="$HOME/.aws-iam-grapher"
 bin_dir="$install_dir/bin"
 docs_dir="$install_dir/docs"
 
-mkdir -p "$bin_dir" "$docs_dir"
+mkdir -p "$bin_dir" "$docs_dir/queries"
 
 echo "Copying docs to $docs_dir..."
 cp "$repo_root"/docs/*.md "$docs_dir/"
+cp "$repo_root"/docs/queries/*.md "$docs_dir/queries/"
 
 echo "Building release binary..."
 (cd "$repo_root" && cargo build --release)
