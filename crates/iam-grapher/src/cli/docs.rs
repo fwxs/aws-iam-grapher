@@ -56,14 +56,22 @@ fn resolve_docs_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("AWS_IAM_GRAPHER_DOCS_DIR") {
         return PathBuf::from(dir);
     }
-    if let Some(home) = dirs_home() {
-        let installed = home.join(".aws-iam-grapher").join("docs");
+    let installed = dirs_home().map(|home| home.join(".aws-iam-grapher").join("docs"));
+    if let Some(installed) = &installed {
         if installed.is_dir() {
-            return installed;
+            return installed.clone();
         }
     }
     // Fallback for `cargo run` from a repo checkout, where no install has happened yet.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs")
+    // Only used if it actually exists — on a machine where the binary was built elsewhere
+    // (e.g. `cargo install`), this compiled-in build path won't exist, so fall through to
+    // the installed-docs path instead and let the caller report a clear "not found" error
+    // against the location a user would actually expect.
+    let repo_checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    if repo_checkout.is_dir() {
+        return repo_checkout;
+    }
+    installed.unwrap_or(repo_checkout)
 }
 
 fn dirs_home() -> Option<PathBuf> {
