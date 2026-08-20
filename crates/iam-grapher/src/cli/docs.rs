@@ -1,4 +1,5 @@
-use anyhow::{bail, Context};
+use crate::exit_code::CliValidationError;
+use anyhow::Context;
 use clap::Args;
 use std::path::{Path, PathBuf};
 
@@ -70,27 +71,35 @@ fn read_doc(dir: &Path, name: &str) -> anyhow::Result<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        bail!("invalid doc name '{name}': only letters, digits, '-' and '_' are allowed");
+        return Err(CliValidationError::DocsInvalidName {
+            name: name.to_string(),
+        }
+        .into());
     }
 
     let path = dir.join(format!("{name}.md"));
     let canonical_dir = std::fs::canonicalize(dir)
         .with_context(|| format!("cannot read docs directory {}", dir.display()))?;
-    let canonical_path = std::fs::canonicalize(&path)
-        .map_err(|_| anyhow::anyhow!(unknown_doc_message(dir, name)))?;
+    let canonical_path =
+        std::fs::canonicalize(&path).map_err(|_| CliValidationError::DocsUnknownName {
+            name: name.to_string(),
+            available: available_docs(dir),
+        })?;
     if !canonical_path.starts_with(&canonical_dir) {
-        bail!("invalid doc name '{name}'");
+        return Err(CliValidationError::DocsInvalidName {
+            name: name.to_string(),
+        }
+        .into());
     }
 
     std::fs::read_to_string(&canonical_path)
         .with_context(|| format!("failed to read {}", canonical_path.display()))
 }
 
-fn unknown_doc_message(dir: &Path, name: &str) -> String {
-    let available = list_docs(dir)
+fn available_docs(dir: &Path) -> String {
+    list_docs(dir)
         .map(|names| names.join(", "))
-        .unwrap_or_default();
-    format!("unknown doc '{name}'. Available docs: {available}")
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

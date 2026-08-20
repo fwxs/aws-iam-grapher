@@ -54,6 +54,12 @@ pub enum CliValidationError {
         arn_account: String,
         arn: String,
     },
+
+    #[error("invalid doc name '{name}': only letters, digits, '-' and '_' are allowed")]
+    DocsInvalidName { name: String },
+
+    #[error("unknown doc '{name}'. Available docs: {available}")]
+    DocsUnknownName { name: String, available: String },
 }
 
 /// The union of typed error sources the CLI classifies into an exit code. Constructed at
@@ -293,6 +299,23 @@ mod tests {
     fn validation_error_classifies_as_usage() {
         let err = CliError::Usage(CliValidationError::OfflineMissingInputFile);
         assert_eq!(err.exit_class(), ExitClass::Usage);
+    }
+
+    #[test]
+    fn docs_invalid_name_classifies_as_usage() {
+        let err = CliValidationError::DocsInvalidName {
+            name: "../etc".into(),
+        };
+        assert_eq!(CliError::Usage(err).exit_class(), ExitClass::Usage);
+    }
+
+    #[test]
+    fn docs_unknown_name_classifies_as_usage() {
+        let err = CliValidationError::DocsUnknownName {
+            name: "nonexistent".into(),
+            available: "caveats, limitations".into(),
+        };
+        assert_eq!(CliError::Usage(err).exit_class(), ExitClass::Usage);
     }
 
     #[test]
