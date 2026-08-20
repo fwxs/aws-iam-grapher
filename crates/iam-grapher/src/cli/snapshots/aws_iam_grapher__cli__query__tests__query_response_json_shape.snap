@@ -1,0 +1,25 @@
+---
+source: crates/iam-grapher/src/cli/query.rs
+expression: response
+---
+{
+  "results": [
+    {
+      "arn": "arn:aws:iam::123456789012:role/Example",
+      "name": "Example",
+      "entity_type": "Role",
+      "is_full_admin": false,
+      "resource": "arn:aws:s3:::example-bucket/*",
+      "is_bounded": false,
+      "conditional": false,
+      "unevaluated_condition_keys": []
+    }
+  ],
+  "caveats": [
+    {
+      "code": "approximate-deny",
+      "message": "Deny subtraction compares wildcard Deny actions against wildcard Allow grants as literal glob patterns, not set containment; a wildcard grant narrowed by a wildcard Deny may be reported as permitted. Group results are not suppressed by Denies on member users.",
+      "doc_anchor": "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository"
+    }
+  ]
+}

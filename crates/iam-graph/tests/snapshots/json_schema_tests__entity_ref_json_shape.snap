@@ -1,0 +1,16 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "arn": "arn:aws:iam::123456789012:role/Example",
+  "name": "Example",
+  "entity_type": "Role",
+  "is_full_admin": false,
+  "resource": "arn:aws:s3:::example-bucket/*",
+  "is_bounded": true,
+  "conditional": false,
+  "unevaluated_condition_keys": [
+    "aws:SourceIp"
+  ]
+}

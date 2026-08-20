@@ -75,4 +75,36 @@ mod tests {
         let roundtripped: Sample = serde_json::from_str(&contents).unwrap();
         assert_eq!(roundtripped, value);
     }
+
+    /// Pins the `{"error": {"code": ..., "message": ...}}` wire shape for each D6
+    /// `ExitClass::json_code()` value. A failing snapshot here is a consumer-visible
+    /// contract change — update the skill (#145) in the same PR. See `CLAUDE.md`.
+    fn error_envelope(code: &str) -> ErrorEnvelope<'_> {
+        ErrorEnvelope {
+            error: ErrorBody {
+                code,
+                message: "example error message".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn error_envelope_usage_json_shape() {
+        insta::assert_json_snapshot!(error_envelope("usage"));
+    }
+
+    #[test]
+    fn error_envelope_credential_json_shape() {
+        insta::assert_json_snapshot!(error_envelope("credential"));
+    }
+
+    #[test]
+    fn error_envelope_scope_not_found_json_shape() {
+        insta::assert_json_snapshot!(error_envelope("scope-not-found"));
+    }
+
+    #[test]
+    fn error_envelope_unexpected_json_shape() {
+        insta::assert_json_snapshot!(error_envelope("unexpected"));
+    }
 }

@@ -23,6 +23,7 @@ iam-models         = { path = "../iam-models" }
 
 [dev-dependencies]
 tempfile               = "3.27.0"
+insta                  = { workspace = true }
 neo4rs                 = { workspace = true }
 tokio                  = { workspace = true }
 testcontainers         = { workspace = true }

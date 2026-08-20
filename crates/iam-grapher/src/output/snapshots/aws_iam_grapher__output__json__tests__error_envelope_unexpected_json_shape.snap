@@ -1,0 +1,10 @@
+---
+source: crates/iam-grapher/src/output/json.rs
+expression: "error_envelope(\"unexpected\")"
+---
+{
+  "error": {
+    "code": "unexpected",
+    "message": "example error message"
+  }
+}

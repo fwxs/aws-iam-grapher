@@ -98,6 +98,13 @@ A repo-local, read-only skill lives at `.claude/skills/aws-iam-grapher/` (`SKILL
 and the `CaveatCode` enum when either changes — every flag it documents must match the CLI's
 actual `--help` output exactly.
 
+The wire shape the skill parses (every query result type, the `caveats` array, and the JSON
+error envelope) is snapshot-tested with `insta` in `crates/iam-graph/tests/json_schema_tests.rs`
+and the `#[cfg(test)]` modules of `crates/iam-grapher/src/cli/query.rs` and
+`crates/iam-grapher/src/output/json.rs`. A failing snapshot means a consumer-visible JSON
+contract change — update the skill in the same PR before accepting the new snapshot with
+`cargo insta review`.
+
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.

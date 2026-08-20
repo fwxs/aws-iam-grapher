@@ -1,0 +1,10 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "action": "s3:GetObject",
+  "effect": "Allow",
+  "resource": "arn:aws:s3:::example-bucket/*",
+  "effective": true
+}

@@ -1,0 +1,10 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "id": "123456789012",
+  "alias": "example-account",
+  "ou_id": "ou-abcd-12345678",
+  "ou_name": "Production"
+}

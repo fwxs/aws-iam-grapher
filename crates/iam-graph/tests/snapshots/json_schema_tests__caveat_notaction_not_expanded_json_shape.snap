@@ -1,0 +1,9 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: "Caveat::notaction_not_expanded()"
+---
+{
+  "code": "notaction-not-expanded",
+  "message": "`NotAction` grants are evaluated by exclusion, but their resource scope is not intersected with --resource and conditions on NotAction statements are not evaluated; results may overstate access.",
+  "doc_anchor": "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository"
+}

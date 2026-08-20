@@ -1,0 +1,21 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "arn": "arn:aws:iam::123456789012:user/Attacker",
+  "name": "Attacker",
+  "entity_type": "User",
+  "account_id": "123456789012",
+  "risky_actions": [
+    "sts:AssumeRole"
+  ],
+  "path": [
+    {
+      "arn": "arn:aws:iam::210987654321:role/Victim",
+      "entity_type": "Role",
+      "account_id": "210987654321"
+    }
+  ],
+  "conditional": true
+}

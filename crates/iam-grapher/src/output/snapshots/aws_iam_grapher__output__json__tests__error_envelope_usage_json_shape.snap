@@ -1,0 +1,10 @@
+---
+source: crates/iam-grapher/src/output/json.rs
+expression: "error_envelope(\"usage\")"
+---
+{
+  "error": {
+    "code": "usage",
+    "message": "example error message"
+  }
+}

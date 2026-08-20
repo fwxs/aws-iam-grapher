@@ -1391,6 +1391,45 @@ mod tests {
         assert!(contents.contains("\"caveats\": []"));
     }
 
+    fn entity_ref_fixture() -> EntityRef {
+        EntityRef {
+            arn: "arn:aws:iam::123456789012:role/Example".to_string(),
+            name: "Example".to_string(),
+            entity_type: "Role".to_string(),
+            is_full_admin: false,
+            resource: "arn:aws:s3:::example-bucket/*".to_string(),
+            is_bounded: false,
+            conditional: false,
+            unevaluated_condition_keys: Vec::new(),
+        }
+    }
+
+    /// Pins the `{"results": ..., "caveats": [...]}` envelope shape for a single-account
+    /// response. A failing snapshot here is a consumer-visible contract change — update the
+    /// skill (#145) in the same PR. See `CLAUDE.md`.
+    #[test]
+    fn query_response_json_shape() {
+        let value = vec![entity_ref_fixture()];
+        let response = QueryResponse {
+            results: &value,
+            caveats: vec![Caveat::approximate_deny()],
+        };
+
+        insta::assert_json_snapshot!(response);
+    }
+
+    /// Pins the multi-account fan-out envelope shape (`--account-id` omitted).
+    #[test]
+    fn account_group_json_shape() {
+        let group = AccountGroup {
+            account_id: "123456789012".to_string(),
+            snapshot_id: "snap-a".to_string(),
+            results: vec![entity_ref_fixture()],
+        };
+
+        insta::assert_json_snapshot!(group);
+    }
+
     #[test]
     fn snapshot_caveats_partial_snapshot_includes_reasons() {
         let snap = snapshot(true, &["instance profiles missing"]);
