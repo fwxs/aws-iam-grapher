@@ -58,7 +58,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             None => collect::run(top.account, output).await,
         },
         Commands::Query(args) => query::run(*args, output).await,
-        Commands::Docs(args) => docs::run(args).await,
+        Commands::Docs(args) => docs::run(args, output).await,
     }
 }
 

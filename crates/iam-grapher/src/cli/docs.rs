@@ -1,6 +1,8 @@
 use crate::exit_code::CliValidationError;
+use crate::output::OutputFormat;
 use anyhow::Context;
 use clap::Args;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Prints bundled docs (`caveats`, `limitations`, ...) from the installed docs directory.
@@ -10,19 +12,41 @@ pub struct DocsArgs {
     pub name: Option<String>,
 }
 
-pub async fn run(args: DocsArgs) -> anyhow::Result<()> {
+#[derive(Serialize)]
+struct DocsList {
+    docs: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DocContent {
+    name: String,
+    content: String,
+}
+
+pub async fn run(args: DocsArgs, output: OutputFormat) -> anyhow::Result<()> {
     let dir = resolve_docs_dir();
     match args.name {
         None => {
             let names = list_docs(&dir)
                 .with_context(|| format!("failed to list docs in {}", dir.display()))?;
-            for name in names {
-                println!("{name}");
+            if output == OutputFormat::Json {
+                crate::output::json::print_json(&DocsList { docs: names })?;
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
             }
         }
         Some(name) => {
             let contents = read_doc(&dir, &name)?;
-            println!("{contents}");
+            if output == OutputFormat::Json {
+                crate::output::json::print_json(&DocContent {
+                    name,
+                    content: contents,
+                })?;
+            } else {
+                println!("{contents}");
+            }
         }
     }
     Ok(())
@@ -80,11 +104,16 @@ fn read_doc(dir: &Path, name: &str) -> anyhow::Result<String> {
     let path = dir.join(format!("{name}.md"));
     let canonical_dir = std::fs::canonicalize(dir)
         .with_context(|| format!("cannot read docs directory {}", dir.display()))?;
-    let canonical_path =
-        std::fs::canonicalize(&path).map_err(|_| CliValidationError::DocsUnknownName {
-            name: name.to_string(),
-            available: available_docs(dir),
-        })?;
+    let canonical_path = match std::fs::canonicalize(&path) {
+        Ok(canonical_path) => canonical_path,
+        Err(_) => {
+            return Err(CliValidationError::DocsUnknownName {
+                name: name.to_string(),
+                available: available_docs(dir)?,
+            }
+            .into());
+        }
+    };
     if !canonical_path.starts_with(&canonical_dir) {
         return Err(CliValidationError::DocsInvalidName {
             name: name.to_string(),
@@ -96,10 +125,8 @@ fn read_doc(dir: &Path, name: &str) -> anyhow::Result<String> {
         .with_context(|| format!("failed to read {}", canonical_path.display()))
 }
 
-fn available_docs(dir: &Path) -> String {
-    list_docs(dir)
-        .map(|names| names.join(", "))
-        .unwrap_or_default()
+fn available_docs(dir: &Path) -> anyhow::Result<String> {
+    list_docs(dir).map(|names| names.join(", "))
 }
 
 #[cfg(test)]
