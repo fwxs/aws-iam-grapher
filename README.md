@@ -18,6 +18,21 @@ Collect AWS IAM permissions into a Neo4j graph and run security analysis queries
 ```bash
 git clone https://github.com/<user>/aws-iam-grapher
 cd aws-iam-grapher
+```
+
+### Install (recommended)
+
+```bash
+./scripts/install.sh
+```
+
+Builds a release binary and installs it to `~/.aws-iam-grapher/bin/aws-iam-grapher`, and
+copies `docs/*.md` to `~/.aws-iam-grapher/docs/`. Prints OS-specific instructions for adding
+`~/.aws-iam-grapher/bin` to your `PATH`.
+
+### Build from source only
+
+```bash
 cargo build --release
 ```
 
