@@ -33,9 +33,39 @@ escalation paths", "diff permissions between two snapshots") by driving `aws-iam
 directly, without a human recalling subcommands, scoping rules, or the approximations documented
 in [`docs/limitations.md`](docs/limitations.md).
 
-**Installation:** none needed beyond having this repository checked out — Claude Code
-auto-discovers skills under `.claude/skills/` in the current working directory. Point Claude Code
-at a checkout of this repo and the skill is available.
+**Installation, from this checkout:** none needed — Claude Code auto-discovers skills under
+`.claude/skills/` in the current working directory. Point Claude Code at a checkout of this repo
+and the skill is available.
+
+**Installation, in another project:** download `aws-iam-grapher-skill.zip` from this repo's
+[Releases](../../releases) page and unzip it into that project's `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills
+unzip aws-iam-grapher-skill.zip -d .claude/skills/
+```
+
+This extracts an `aws-iam-grapher/` folder containing `SKILL.md` and `reference.md`, matching the
+layout in this repository.
+
+**Installation, globally (all projects):** unzip into `~/.claude/skills/` instead of a project's
+`.claude/skills/` — Claude Code also discovers skills there, making the skill available in every
+project regardless of working directory:
+
+```bash
+mkdir -p ~/.claude/skills
+unzip aws-iam-grapher-skill.zip -d ~/.claude/skills/
+```
+
+From a checkout of this repo (no zip needed), the equivalent is copying the folder directly:
+
+```bash
+cp -r .claude/skills/aws-iam-grapher ~/.claude/skills/
+```
+
+In every case, the skill still requires the `aws-iam-grapher` binary on `PATH` (or callable
+another way) and a reachable Neo4j instance with collected data — it only teaches an agent how to
+drive the CLI, it doesn't bundle the CLI itself.
 
 **Scope — read-only by design:**
 - Exposed: `who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`,
