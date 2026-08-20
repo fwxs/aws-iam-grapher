@@ -25,6 +25,67 @@ The compiled binary is located at `target/release/aws-iam-grapher`.
 
 ---
 
+## Claude Code Skill
+
+A repo-local Claude Code skill lives at `.claude/skills/aws-iam-grapher/`. It lets an agent
+answer IAM permission questions ("who can delete objects in this bucket", "find privilege
+escalation paths", "diff permissions between two snapshots") by driving `aws-iam-grapher query`
+directly, without a human recalling subcommands, scoping rules, or the approximations documented
+in [`docs/limitations.md`](docs/limitations.md).
+
+**Installation, from this checkout:** none needed — Claude Code auto-discovers skills under
+`.claude/skills/` in the current working directory. Point Claude Code at a checkout of this repo
+and the skill is available.
+
+**Installation, in another project:** download `aws-iam-grapher-skill.zip` from this repo's
+[Releases](../../releases) page and unzip it into that project's `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills
+unzip aws-iam-grapher-skill.zip -d .claude/skills/
+```
+
+This extracts an `aws-iam-grapher/` folder containing `SKILL.md` and `reference.md`, matching the
+layout in this repository.
+
+**Installation, globally (all projects):** unzip into `~/.claude/skills/` instead of a project's
+`.claude/skills/` — Claude Code also discovers skills there, making the skill available in every
+project regardless of working directory:
+
+```bash
+mkdir -p ~/.claude/skills
+unzip aws-iam-grapher-skill.zip -d ~/.claude/skills/
+```
+
+From a checkout of this repo (no zip needed), the equivalent is copying the folder directly:
+
+```bash
+cp -r .claude/skills/aws-iam-grapher ~/.claude/skills/
+```
+
+In every case, the skill still requires the `aws-iam-grapher` binary on `PATH` (or callable
+another way) and a reachable Neo4j instance with collected data — it only teaches an agent how to
+drive the CLI, it doesn't bundle the CLI itself.
+
+**Scope — read-only by design:**
+- Exposed: `who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`,
+  `org-escalation`, `diff`, `list-snapshots`, `list-accounts`.
+- Never exposed: `delete-snapshot` (no confirmation or `--dry-run` gate in the CLI — stays
+  human-only) and `collect`/`collect org` (mutate the graph, make live AWS calls, cost money).
+
+**Credentials:** the skill never constructs a `--neo4j-pass`-style argument (no such flag exists —
+see [Neo4j password and secret mounts](#neo4j-password-and-secret-mounts)) and never echoes
+`NEO4J_PASSWORD`. It relies on the environment variable already being set before Claude Code (or
+the shell it drives) starts.
+
+**Caveats:** the skill always passes `--output json` and is instructed to restate every entry in
+the response's `caveats` array to the user alongside results — see
+[`docs/caveats.md`](docs/caveats.md).
+
+See `.claude/skills/aws-iam-grapher/SKILL.md` and `reference.md` for the full instruction set.
+
+---
+
 ## Run Neo4j with Docker
 
 A `docker-compose.yml` runs Neo4j only; the `aws-iam-grapher` binary is built
