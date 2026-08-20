@@ -1,6 +1,7 @@
 pub mod collect;
 pub mod collect_org;
 pub mod common;
+pub mod docs;
 pub mod query;
 
 use crate::output::OutputFormat;
@@ -28,6 +29,8 @@ pub enum Commands {
     Collect(Box<CollectTopArgs>),
     /// Run analysis queries against persisted IAM snapshots.
     Query(Box<query::QueryArgs>),
+    /// Print bundled docs (caveats, limitations) from the installed docs directory.
+    Docs(docs::DocsArgs),
 }
 
 /// `collect` with no verb runs single-account collection (today's behavior, unchanged);
@@ -55,6 +58,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             None => collect::run(top.account, output).await,
         },
         Commands::Query(args) => query::run(*args, output).await,
+        Commands::Docs(args) => docs::run(args).await,
     }
 }
 
