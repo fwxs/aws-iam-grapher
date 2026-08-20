@@ -1,0 +1,9 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: "Caveat::expansion_degraded()"
+---
+{
+  "code": "expansion-degraded",
+  "message": "Wildcard action expansion degraded during collection (awsiamactions.io unreachable); some wildcard actions were stored unexpanded and may not match this query.",
+  "doc_anchor": "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository"
+}

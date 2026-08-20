@@ -22,5 +22,6 @@ testcontainers-modules = { workspace = true }
 tokio                  = { workspace = true }
 pretty_assertions      = { workspace = true }
 chrono                 = { workspace = true }
+insta                  = { workspace = true }
 neo4rs                 = { workspace = true }
 uuid                   = { version = "^1.23.3", features = ["v4"] }
