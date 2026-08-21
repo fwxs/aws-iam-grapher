@@ -1,8 +1,8 @@
 mod helpers;
 
 use iam_graph::{
-    entity_permissions, privilege_escalation_paths, who_can, GraphError, GraphIngester,
-    QueryContext,
+    associated_entities, entity_permissions, privilege_escalation_paths, who_can, GraphError,
+    GraphIngester, QueryContext,
 };
 use iam_models::condition::ConditionContext;
 
@@ -854,5 +854,139 @@ async fn who_can_excludes_mfa_gated_grant_when_mfa_false_context_supplied() {
     assert!(
         !entities.iter().any(|e| e.name == "MfaGatedRole"),
         "grant gated by aws:MultiFactorAuthPresent: true must be excluded when --mfa false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_policy_arn_returns_attached_holders() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000017";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let policy_arn = format!("arn:aws:iam::{account_id}:policy/GroupPolicy");
+    let results = associated_entities(ingester.client().inner(), &ctx, &policy_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "Auditors" && e.entity_type == "Group"),
+        "Auditors group must be returned as attached to GroupPolicy: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_group_arn_returns_members_and_own_policy() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000018";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let group_arn = format!("arn:aws:iam::{account_id}:group/Auditors");
+    let results = associated_entities(ingester.client().inner(), &ctx, &group_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "carol" && e.entity_type == "User"),
+        "carol must be returned as a member of Auditors: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "GroupPolicy" && e.entity_type == "Policy"),
+        "GroupPolicy must be returned as the group's own attached policy: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_role_arn_returns_assumers_and_instance_profile() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000019";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_assume_role_chain(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    // ChainA's trust policy names ChainX as the allowed principal, so the materialized
+    // CAN_ASSUME_ROLE edge is ChainX -> ChainA (see helpers::role_with_trust).
+    let role_arn = format!("arn:aws:iam::{account_id}:role/ChainA");
+    let results = associated_entities(ingester.client().inner(), &ctx, &role_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "ChainX" && e.entity_type == "Role"),
+        "ChainX must be returned as able to assume ChainA: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_unknown_arn_returns_entity_not_found() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000020";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let err = associated_entities(
+        ingester.client().inner(),
+        &ctx,
+        "arn:aws:iam::900000000020:role/DoesNotExist",
+    )
+    .await
+    .expect_err("unknown entity must error");
+
+    assert!(
+        matches!(err, GraphError::EntityNotFound(_)),
+        "expected EntityNotFound, got: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_empty_for_unlinked_policy() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000021";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let (data, _) = helpers::data_with_bounded_role(account_id, "s3:Get*");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let boundary_arn = format!("arn:aws:iam::{account_id}:policy/BoundaryPolicy");
+    let results = associated_entities(ingester.client().inner(), &ctx, &boundary_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results.is_empty(),
+        "a boundary policy with no attached/inline holders must return no associated entities: {results:?}"
     );
 }

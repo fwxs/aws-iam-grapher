@@ -1,0 +1,10 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "arn": "arn:aws:iam::123456789012:role/Example",
+  "name": "Example",
+  "entity_type": "Role",
+  "relationship": "CAN_ASSUME"
+}

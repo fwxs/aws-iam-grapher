@@ -10,9 +10,21 @@
 //! fixed literal values, never through the graph.
 
 use iam_graph::queries::{
-    AccountRecord, Caveat, EntityRef, EscalationPath, Hop, OrgEscalationPath, OrgHop,
-    PermissionDiff, PermissionRecord, PermissionRow, SnapshotRecord,
+    AccountRecord, AssociatedEntity, Caveat, EntityRef, EscalationPath, Hop, OrgEscalationPath,
+    OrgHop, PermissionDiff, PermissionRecord, PermissionRow, SnapshotRecord,
 };
+
+#[test]
+fn associated_entity_json_shape() {
+    let value = AssociatedEntity {
+        arn: "arn:aws:iam::123456789012:role/Example".to_string(),
+        name: "Example".to_string(),
+        entity_type: "Role".to_string(),
+        relationship: "CAN_ASSUME".to_string(),
+    };
+
+    insta::assert_json_snapshot!(value);
+}
 
 #[test]
 fn entity_ref_json_shape() {

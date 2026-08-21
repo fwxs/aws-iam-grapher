@@ -330,6 +330,66 @@ pub async fn entity_permissions(
     Ok(results)
 }
 
+const ASSOCIATED_ENTITIES_QUERY: &str = include_str!("../../queries/associated_entities.cypher");
+
+/// An entity structurally linked to a Policy/Role/Group ARN — see
+/// `queries/associated_entities.cypher` for which relationship produces which `relationship`
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AssociatedEntity {
+    pub arn: String,
+    pub name: String,
+    pub entity_type: String,
+    pub relationship: String,
+}
+
+/// Return entities structurally linked to a Policy/Role/Group ARN: attached/inline policy
+/// holders, role assumers, containing instance profiles, or group members, depending on the
+/// target's own type. Pure structural traversal — no Deny/NotAction/permission-level logic.
+///
+/// # Errors
+/// Returns [`GraphError::EntityNotFound`] if `entity_arn` has no node in this snapshot.
+pub async fn associated_entities(
+    graph: &Graph,
+    ctx: &QueryContext,
+    entity_arn: &str,
+) -> Result<Vec<AssociatedEntity>, GraphError> {
+    let entity_uid = uid::entity_uid(&ctx.snapshot_id, entity_arn);
+
+    let mut exists_stream = graph
+        .execute(
+            neo4rs::query("OPTIONAL MATCH (e {uid: $uid}) RETURN e IS NOT NULL AS found")
+                .param("uid", entity_uid.as_str()),
+        )
+        .await?;
+    let found: bool = match exists_stream.next().await? {
+        Some(row) => col(&row, "found")?,
+        None => false,
+    };
+    if !found {
+        return Err(GraphError::entity_not_found(entity_arn));
+    }
+
+    let mut stream = graph
+        .execute(
+            neo4rs::query(ASSOCIATED_ENTITIES_QUERY)
+                .param("uid", entity_uid.as_str())
+                .param("snapshot_id", ctx.snapshot_id.as_str()),
+        )
+        .await?;
+
+    let mut results = Vec::new();
+    while let Some(row) = stream.next().await? {
+        results.push(AssociatedEntity {
+            arn: col(&row, "arn")?,
+            name: col(&row, "name")?,
+            entity_type: col(&row, "entity_type")?,
+            relationship: col(&row, "relationship")?,
+        });
+    }
+    Ok(results)
+}
+
 const INSTANCE_PROFILES_WITH_ACTION_QUERY: &str =
     include_str!("../../queries/instance_profiles_with_action.cypher");
 

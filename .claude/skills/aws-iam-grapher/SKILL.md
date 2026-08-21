@@ -43,6 +43,7 @@ aws-iam-grapher query [--account-id <id>] [--snapshot-id <id>] --output json <SU
 |---|---|---|
 | `who-can <action>` | IAM action, e.g. `s3:DeleteObject` | `--resource <arn>`, `--region <name>`, `--mfa <true\|false>`, `--principal-tag <key=value>` (repeatable) |
 | `entity-perms <arn>` | entity ARN | — |
+| `associated-entities <arn>` | Policy/Role/Group ARN | — |
 | `instance-profiles-with <action>` | IAM action | — |
 | `privilege-escalation` | — | `--max-hops <n>` (default 3, max 10) |
 | `org-escalation` | — | `--max-hops <n>` (default 3, max 10), `--org-run-id <id>` (default: most recent org run) |
@@ -96,6 +97,8 @@ afterward if you still need to see the results/caveats yourself.
   one account. If you need a specific snapshot, also pass `--account-id`.
 - `entity-perms` always derives its account from the ARN argument itself; it never fans out and
   never needs `--account-id` (an explicit one must agree with the ARN's account or the CLI errors).
+- `associated-entities` follows the same rule as `entity-perms`: account derived from the ARN
+  argument, never fans out, never needs `--account-id`.
 - `diff` derives its account from the two snapshot ids when `--account-id` is omitted; both
   snapshots must belong to the same account.
 
@@ -121,6 +124,11 @@ aws-iam-grapher query --account-id 123456789012 --output json \
 ```bash
 aws-iam-grapher query --account-id 123456789012 --output json \
   entity-perms arn:aws:iam::123456789012:role/DataEngineer
+```
+
+```bash
+aws-iam-grapher query --account-id 123456789012 --output json \
+  associated-entities arn:aws:iam::123456789012:policy/DataAccessPolicy
 ```
 
 ```bash

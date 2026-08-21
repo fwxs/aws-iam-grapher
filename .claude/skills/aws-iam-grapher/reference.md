@@ -15,10 +15,13 @@ always present, empty when nothing applies. Each entry is `{"code": ..., "messag
 | `partial-snapshot` | any query, when the queried snapshot(s) are marked partial | Collection was incomplete for at least one queried snapshot; entities/permissions that couldn't be collected are simply absent, not flagged — may understate access. Message includes the recorded reasons. |
 | `expansion-degraded` | any query, when the partial reason is specifically wildcard-expansion fallback | `awsiamactions.io` was unreachable during collection; some wildcard actions were stored unexpanded. A concrete-action query may miss an entity holding only an unexpanded wildcard that covers it. |
 
-`entity-perms` and `instance-profiles-with` never carry `approximate-deny`/`notaction-not-expanded`
-(their Cypher does no Deny subtraction or NotAction exclusion) but can still carry
-`partial-snapshot`/`expansion-degraded` from the snapshot. `diff` is a raw structural diff — same
-restriction. `list-snapshots`/`list-accounts` never carry any caveat (not access queries).
+`entity-perms`, `associated-entities`, and `instance-profiles-with` never carry
+`approximate-deny`/`notaction-not-expanded` (their Cypher does no Deny subtraction or NotAction
+exclusion) but can still carry `partial-snapshot`/`expansion-degraded` from the snapshot.
+`associated-entities` is purely structural (attached/inline policy holders, role assumers,
+containing instance profiles, group members) — it doesn't evaluate permissions at all. `diff` is
+a raw structural diff — same restriction. `list-snapshots`/`list-accounts` never carry any caveat
+(not access queries).
 
 **Always restate every caveat's `message` to the user next to the results it applies to.** A
 `who-can` answer delivered without its Deny/NotAction caveats is a wrong answer on a security tool.
