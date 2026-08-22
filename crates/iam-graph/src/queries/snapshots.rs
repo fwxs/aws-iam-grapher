@@ -51,6 +51,41 @@ pub async fn list_snapshots(
     Ok(results)
 }
 
+const SNAPSHOTS_FOR_ORG_RUN_QUERY: &str =
+    include_str!("../../queries/snapshots_for_org_run.cypher");
+
+/// Return all snapshots belonging to one org collection run, across every member account.
+pub async fn snapshots_for_org_run(
+    graph: &Graph,
+    org_run_id: &str,
+) -> Result<Vec<SnapshotRecord>, GraphError> {
+    let mut stream = graph
+        .execute(neo4rs::query(SNAPSHOTS_FOR_ORG_RUN_QUERY).param("org_run_id", org_run_id))
+        .await?;
+
+    let mut results = Vec::new();
+    while let Some(row) = stream.next().await? {
+        let id: String = col(&row, "id")?;
+        let account_id: String = col(&row, "account_id")?;
+        let collected_at: String = col(&row, "collected_at")?;
+        let is_partial: bool = col(&row, "is_partial")?;
+        // See the matching comment in `list_snapshots`.
+        let partial_reasons: Vec<String> = col(&row, "partial_reasons")?;
+        let org_collection_run_id: Option<String> = col::<String>(&row, "org_collection_run_id")
+            .ok()
+            .filter(|s| !s.is_empty());
+        results.push(SnapshotRecord {
+            id,
+            account_id,
+            collected_at,
+            is_partial,
+            partial_reasons,
+            org_collection_run_id,
+        });
+    }
+    Ok(results)
+}
+
 const LIST_ACCOUNT_IDS_QUERY: &str = include_str!("../../queries/list_account_ids.cypher");
 
 /// Return every distinct account_id that has at least one snapshot in the graph.
@@ -66,30 +101,11 @@ pub async fn list_account_ids(graph: &Graph) -> Result<Vec<String>, GraphError> 
     Ok(results)
 }
 
-const SNAPSHOT_ACCOUNT_ID_QUERY: &str = include_str!("../../queries/snapshot_account_id.cypher");
-
-/// Look up the account_id a snapshot belongs to, or `None` if the snapshot doesn't exist.
-pub async fn snapshot_account_id(
-    graph: &Graph,
-    snapshot_id: &str,
-) -> Result<Option<String>, GraphError> {
-    let mut stream = graph
-        .execute(neo4rs::query(SNAPSHOT_ACCOUNT_ID_QUERY).param("snapshot_id", snapshot_id))
-        .await?;
-
-    if let Some(row) = stream.next().await? {
-        let account_id: String = col(&row, "account_id")?;
-        Ok(Some(account_id))
-    } else {
-        Ok(None)
-    }
-}
-
 const SNAPSHOT_BY_ID_QUERY: &str = include_str!("../../queries/snapshot_by_id.cypher");
 
 /// Look up the full snapshot record for an explicit snapshot id, or `None` if it doesn't
-/// exist. Unlike `snapshot_account_id`, this returns `is_partial`/`partial_reasons` too, so
-/// scope resolution needs exactly one query to both derive the account and know partiality.
+/// exist. Returns `is_partial`/`partial_reasons` alongside the account id, so callers needing
+/// only the account (e.g. scope resolution) still get partiality in the same round trip.
 pub async fn snapshot_record(
     graph: &Graph,
     snapshot_id: &str,

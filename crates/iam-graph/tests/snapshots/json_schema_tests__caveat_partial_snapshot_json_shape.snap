@@ -1,0 +1,9 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: "Caveat::partial_snapshot(&reasons)"
+---
+{
+  "code": "partial-snapshot",
+  "message": "Snapshot is marked partial; collection was incomplete, so results may understate access. Reasons: instance profiles missing",
+  "doc_anchor": "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository"
+}

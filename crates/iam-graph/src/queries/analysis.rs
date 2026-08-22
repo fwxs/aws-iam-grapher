@@ -1,4 +1,5 @@
 use crate::errors::GraphError;
+use crate::nodes::uid;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use iam_models::condition::{self, ConditionContext, ConditionOutcome};
@@ -35,15 +36,6 @@ pub struct PermissionRow {
     /// False when this Allow is capped by the entity's Permission Boundary (the boundary does
     /// not also Allow this action). Always true for Deny rows and for unbounded entities.
     pub effective: bool,
-}
-
-/// An instance profile that has privilege-escalation permissions.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RiskyInstanceProfile {
-    pub arn: String,
-    pub name: String,
-    pub entity_type: String,
-    pub risky_actions: Vec<String>,
 }
 
 const WHO_CAN_QUERY: &str = include_str!("../../queries/who_can.cypher");
@@ -178,12 +170,21 @@ pub async fn who_can(
         });
     }
 
-    // Deduplicate by ARN (UNION arms can return the same entity via different paths).
-    // If an entity appears as both specific-action and full-admin, keep is_full_admin: true.
-    // ponytail: an entity is conditional only if every surviving grant for it is conditional
-    // (AND across duplicates, union of keys) — a second, unconditional grant to the same
-    // action makes the entity's access unconditional overall. Refine only if a real case
-    // needs per-grant tracking instead of this per-entity approximation.
+    Ok(merge_entity_grants(raw))
+}
+
+/// Merge multiple surviving grants for the same entity (by `arn`) into one `EntityRef` each.
+///
+/// Policy (see issue #86, `docs/limitations.md`):
+/// - `is_full_admin`: OR across grants.
+/// - `conditional`: AND across grants — a second unconditional grant makes the entity's
+///   access unconditional overall (per-entity approximation, not per-grant tracking).
+/// - `unevaluated_condition_keys`: union while `conditional` stays true; cleared to empty
+///   the moment a merge flips `conditional` to false, since keys on an unconditional grant
+///   are misleading.
+/// - Output is deduplicated by ARN (UNION arms can return the same entity via different
+///   paths) and sorted by `arn` for deterministic ordering.
+fn merge_entity_grants(raw: Vec<EntityRef>) -> Vec<EntityRef> {
     let mut by_arn: std::collections::HashMap<String, EntityRef> = std::collections::HashMap::new();
     for entity in raw {
         by_arn
@@ -193,17 +194,21 @@ pub async fn who_can(
                     entry.is_full_admin = true;
                 }
                 entry.conditional = entry.conditional && entity.conditional;
-                for key in &entity.unevaluated_condition_keys {
-                    if !entry.unevaluated_condition_keys.contains(key) {
-                        entry.unevaluated_condition_keys.push(key.clone());
+                if entry.conditional {
+                    for key in &entity.unevaluated_condition_keys {
+                        if !entry.unevaluated_condition_keys.contains(key) {
+                            entry.unevaluated_condition_keys.push(key.clone());
+                        }
                     }
+                } else {
+                    entry.unevaluated_condition_keys.clear();
                 }
             })
             .or_insert(entity);
     }
     let mut results: Vec<EntityRef> = by_arn.into_values().collect();
     results.sort_by(|a, b| a.arn.cmp(&b.arn));
-    Ok(results)
+    results
 }
 
 /// Evaluate a grant's stored `Condition` JSON against query context.
@@ -255,17 +260,36 @@ fn boundary_allows(entries: &[BoundaryEntry], action: &str) -> bool {
     })
 }
 
-/// Return all permissions for a specific entity UID. Allow rows carry `effective: false` when
+/// Return all permissions for a specific entity. Allow rows carry `effective: false` when
 /// capped by the entity's Permission Boundary (see limitations.md).
+///
+/// # Errors
+/// Returns [`GraphError::EntityNotFound`] if `entity_arn` has no node in this snapshot.
 pub async fn entity_permissions(
     graph: &Graph,
     ctx: &QueryContext,
-    entity_uid: &str,
+    entity_arn: &str,
 ) -> Result<Vec<PermissionRow>, GraphError> {
+    let entity_uid = uid::entity_uid(&ctx.snapshot_id, entity_arn);
+
+    let mut exists_stream = graph
+        .execute(
+            neo4rs::query("OPTIONAL MATCH (e {uid: $uid}) RETURN e IS NOT NULL AS found")
+                .param("uid", entity_uid.as_str()),
+        )
+        .await?;
+    let found: bool = match exists_stream.next().await? {
+        Some(row) => col(&row, "found")?,
+        None => false,
+    };
+    if !found {
+        return Err(GraphError::entity_not_found(entity_arn));
+    }
+
     let mut boundary_stream = graph
         .execute(
             neo4rs::query(ENTITY_BOUNDARY_ACTIONS_QUERY)
-                .param("uid", entity_uid)
+                .param("uid", entity_uid.as_str())
                 .param("snapshot_id", ctx.snapshot_id.as_str()),
         )
         .await?;
@@ -284,7 +308,7 @@ pub async fn entity_permissions(
     let mut stream = graph
         .execute(
             neo4rs::query(ENTITY_PERMISSIONS_QUERY)
-                .param("uid", entity_uid)
+                .param("uid", entity_uid.as_str())
                 .param("snapshot_id", ctx.snapshot_id.as_str()),
         )
         .await?;
@@ -301,6 +325,66 @@ pub async fn entity_permissions(
             effect,
             resource,
             effective,
+        });
+    }
+    Ok(results)
+}
+
+const ASSOCIATED_ENTITIES_QUERY: &str = include_str!("../../queries/associated_entities.cypher");
+
+/// An entity structurally linked to a Policy/Role/Group ARN — see
+/// `queries/associated_entities.cypher` for which relationship produces which `relationship`
+/// value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AssociatedEntity {
+    pub arn: String,
+    pub name: String,
+    pub entity_type: String,
+    pub relationship: String,
+}
+
+/// Return entities structurally linked to a Policy/Role/Group ARN: attached/inline policy
+/// holders, role assumers, containing instance profiles, or group members, depending on the
+/// target's own type. Pure structural traversal — no Deny/NotAction/permission-level logic.
+///
+/// # Errors
+/// Returns [`GraphError::EntityNotFound`] if `entity_arn` has no node in this snapshot.
+pub async fn associated_entities(
+    graph: &Graph,
+    ctx: &QueryContext,
+    entity_arn: &str,
+) -> Result<Vec<AssociatedEntity>, GraphError> {
+    let entity_uid = uid::entity_uid(&ctx.snapshot_id, entity_arn);
+
+    let mut exists_stream = graph
+        .execute(
+            neo4rs::query("OPTIONAL MATCH (e {uid: $uid}) RETURN e IS NOT NULL AS found")
+                .param("uid", entity_uid.as_str()),
+        )
+        .await?;
+    let found: bool = match exists_stream.next().await? {
+        Some(row) => col(&row, "found")?,
+        None => false,
+    };
+    if !found {
+        return Err(GraphError::entity_not_found(entity_arn));
+    }
+
+    let mut stream = graph
+        .execute(
+            neo4rs::query(ASSOCIATED_ENTITIES_QUERY)
+                .param("uid", entity_uid.as_str())
+                .param("snapshot_id", ctx.snapshot_id.as_str()),
+        )
+        .await?;
+
+    let mut results = Vec::new();
+    while let Some(row) = stream.next().await? {
+        results.push(AssociatedEntity {
+            arn: col(&row, "arn")?,
+            name: col(&row, "name")?,
+            entity_type: col(&row, "entity_type")?,
+            relationship: col(&row, "relationship")?,
         });
     }
     Ok(results)
@@ -325,38 +409,6 @@ pub async fn instance_profiles_with_action(
     .await
 }
 
-const RISKY_INSTANCE_PROFILES_QUERY: &str =
-    include_str!("../../queries/risky_instance_profiles.cypher");
-
-/// Return instance profiles whose roles have privilege-escalation permissions,
-/// including the specific risky actions found.
-pub async fn risky_instance_profiles(
-    graph: &Graph,
-    ctx: &QueryContext,
-) -> Result<Vec<RiskyInstanceProfile>, GraphError> {
-    let mut stream = graph
-        .execute(
-            neo4rs::query(RISKY_INSTANCE_PROFILES_QUERY)
-                .param("account_id", ctx.account_id.as_str())
-                .param("snapshot_id", ctx.snapshot_id.as_str()),
-        )
-        .await?;
-
-    let mut results = Vec::new();
-    while let Some(row) = stream.next().await? {
-        let arn: String = col(&row, "arn")?;
-        let name: String = col(&row, "name")?;
-        let risky_actions: Vec<String> = col(&row, "risky_actions")?;
-        results.push(RiskyInstanceProfile {
-            arn,
-            name,
-            entity_type: "InstanceProfile".to_string(),
-            risky_actions,
-        });
-    }
-    Ok(results)
-}
-
 async fn collect_instance_profile_refs(
     graph: &Graph,
     query: neo4rs::Query,
@@ -378,4 +430,93 @@ async fn collect_instance_profile_refs(
         });
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn entity(arn: &str, conditional: bool, keys: &[&str]) -> EntityRef {
+        EntityRef {
+            arn: arn.to_string(),
+            name: "name".to_string(),
+            entity_type: "Role".to_string(),
+            is_full_admin: false,
+            resource: "*".to_string(),
+            is_bounded: false,
+            conditional,
+            unevaluated_condition_keys: keys.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn merge_entity_grants_single_grant_passes_through_unchanged() {
+        let raw = vec![entity("arn:a", true, &["aws:SourceIp"])];
+
+        let merged = merge_entity_grants(raw.clone());
+
+        assert_eq!(merged, raw);
+    }
+
+    #[test]
+    fn merge_entity_grants_two_conditional_grants_union_keys() {
+        let raw = vec![
+            entity("arn:a", true, &["aws:SourceIp"]),
+            entity("arn:a", true, &["aws:MultiFactorAuthPresent"]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].conditional);
+        assert_eq!(
+            merged[0].unevaluated_condition_keys,
+            vec![
+                "aws:SourceIp".to_string(),
+                "aws:MultiFactorAuthPresent".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn merge_entity_grants_conditional_and_unconditional_clears_keys() {
+        let raw = vec![
+            entity("arn:a", true, &["aws:SourceIp"]),
+            entity("arn:a", false, &[]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(!merged[0].conditional);
+        assert_eq!(merged[0].unevaluated_condition_keys, Vec::<String>::new());
+    }
+
+    #[test]
+    fn merge_entity_grants_full_admin_or_specific_grant_keeps_full_admin() {
+        let mut full_admin = entity("arn:a", false, &[]);
+        full_admin.is_full_admin = true;
+        let specific = entity("arn:a", false, &[]);
+        let raw = vec![specific, full_admin];
+
+        let merged = merge_entity_grants(raw);
+
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].is_full_admin);
+    }
+
+    #[test]
+    fn merge_entity_grants_multiple_arns_are_kept_separate_and_sorted() {
+        let raw = vec![
+            entity("arn:c", false, &[]),
+            entity("arn:a", false, &[]),
+            entity("arn:b", false, &[]),
+        ];
+
+        let merged = merge_entity_grants(raw);
+
+        let arns: Vec<&str> = merged.iter().map(|e| e.arn.as_str()).collect();
+        assert_eq!(arns, vec!["arn:a", "arn:b", "arn:c"]);
+    }
 }

@@ -50,10 +50,6 @@ impl LiveCollector {
 
 #[async_trait::async_trait]
 impl IamDataSource for LiveCollector {
-    fn mode(&self) -> CollectorMode {
-        CollectorMode::Live
-    }
-
     async fn collect(&self) -> Result<CollectedData, CollectorError> {
         info!("starting live IAM collection");
         let mut warnings = Vec::new();

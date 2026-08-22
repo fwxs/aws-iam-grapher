@@ -210,6 +210,22 @@ async fn two_account_a_to_b_cross_account_escalation() {
         !path.conditional,
         "unconditional trust must not be flagged conditional"
     );
+
+    // The terminal (TargetRole, account B) trusts account A's root — trust_principals
+    // enrichment must resolve against TargetRole's own snapshot_id (account B), not the
+    // OrgQueryContext or account A's snapshot, confirming the per-hop snapshot_id self-join
+    // works across account boundaries (issue #188).
+    assert!(
+        path.trust_principals
+            .iter()
+            .any(|tp| tp.id == format!("arn:aws:iam::{}:root", account_a)),
+        "trust_principals on the terminal (TargetRole) must include account A's root: {:?}",
+        path.trust_principals
+    );
+    assert!(
+        path.holders.is_empty(),
+        "holders must be empty for a Role terminal"
+    );
 }
 
 /// Three-account A→B→C chain. A-role assumes B-role, B-role assumes C-role.

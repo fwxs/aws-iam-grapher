@@ -1,4 +1,5 @@
 use crate::cli::collect::SharedCollectArgs;
+use crate::output::OutputFormat;
 use anyhow::Context as _;
 use clap::Args;
 use iam_collector::{CollectorWarning, OrgCollector};
@@ -81,7 +82,7 @@ pub struct OrgArgs {
     pub shared: SharedCollectArgs,
 }
 
-pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
+pub async fn run(args: OrgArgs, output: OutputFormat) -> anyhow::Result<()> {
     let ou_profile_overrides = parse_ou_profile_overrides(&args.ou_profile_overrides)?;
     let ou_role_overrides = parse_ou_role_overrides(&args.ou_role_overrides)?;
 
@@ -135,24 +136,47 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
     }
 
     if args.shared.dry_run {
-        println!("Dry run — no data written to Neo4j.\n");
-        println!("Org collection run id: {}", result.run_id);
-        println!("Accounts collected: {}", result.accounts.len());
+        if output == OutputFormat::Json {
+            let summary = serde_json::json!({
+                "dry_run": true,
+                "org_run_id": result.run_id,
+                "accounts_collected": result.accounts.len(),
+            });
+            crate::output::json::print_json(&summary)?;
+        } else {
+            println!("Dry run — no data written to Neo4j.\n");
+            println!("Org collection run id: {}", result.run_id);
+            println!("Accounts collected: {}", result.accounts.len());
+        }
         return Ok(());
     }
 
-    let neo4j_pass = crate::cli::collect::resolve_neo4j_pass(&args.shared)?;
-    let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
-        .await
-        .with_context(|| format!("failed to connect to Neo4j at {}", args.shared.neo4j_uri))?;
+    let neo4j_pass =
+        crate::cli::collect::resolve_neo4j_pass(args.shared.connection.neo4j_pass_file.as_deref())?;
+    let client = GraphClient::connect(
+        &args.shared.connection.neo4j_uri,
+        &args.shared.connection.neo4j_user,
+        &neo4j_pass,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to connect to Neo4j at {}",
+            iam_graph::redact_uri(&args.shared.connection.neo4j_uri)
+        )
+    })?;
     client
         .initialize_schema()
         .await
         .context("failed to initialize Neo4j schema")?;
 
-    println!("Org collection run id: {}", result.run_id);
+    let json = output == OutputFormat::Json;
+    if !json {
+        println!("Org collection run id: {}", result.run_id);
+    }
 
     let mut client = client;
+    let mut ingested_accounts = Vec::with_capacity(result.accounts.len());
     for data in &result.accounts {
         let account_id = data.account_id.clone().with_context(|| {
             "an org member account produced no entities to derive an account ID from \
@@ -174,22 +198,39 @@ pub async fn run(args: OrgArgs) -> anyhow::Result<()> {
             .with_context(|| format!("ingestion failed for account {account_id}"))?;
         client = ingester.into_client();
 
-        println!(
-            "  account {account_id}: snapshot {snapshot_id} — {} relationships created",
-            stats.relationships_created
-        );
+        if !json {
+            println!(
+                "  account {account_id}: snapshot {snapshot_id} — {} relationships created",
+                stats.relationships_created
+            );
+        }
+        ingested_accounts.push(serde_json::json!({
+            "account_id": account_id,
+            "snapshot_id": snapshot_id,
+            "relationships_created": stats.relationships_created,
+        }));
     }
 
     let edge_count = stitch_cross_account(client.inner(), &result.run_id)
         .await
         .context("cross-account stitch failed")?;
-    println!("  cross-account edges stitched: {edge_count}");
 
-    println!(
-        "Org collection complete: {} accounts ingested, {} warnings",
-        result.accounts.len(),
-        result.warnings.len()
-    );
+    if json {
+        let summary = serde_json::json!({
+            "org_run_id": result.run_id,
+            "accounts": ingested_accounts,
+            "cross_account_edges_stitched": edge_count,
+            "warnings": result.warnings.len(),
+        });
+        crate::output::json::print_json(&summary)?;
+    } else {
+        println!("  cross-account edges stitched: {edge_count}");
+        println!(
+            "Org collection complete: {} accounts ingested, {} warnings",
+            result.accounts.len(),
+            result.warnings.len()
+        );
+    }
     Ok(())
 }
 

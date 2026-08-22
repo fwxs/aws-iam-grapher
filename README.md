@@ -18,10 +18,86 @@ Collect AWS IAM permissions into a Neo4j graph and run security analysis queries
 ```bash
 git clone https://github.com/<user>/aws-iam-grapher
 cd aws-iam-grapher
+```
+
+### Install (recommended)
+
+```bash
+./scripts/install.sh
+```
+
+Builds a release binary and installs it to `~/.aws-iam-grapher/bin/aws-iam-grapher`, and
+copies `docs/*.md` to `~/.aws-iam-grapher/docs/`. Prints OS-specific instructions for adding
+`~/.aws-iam-grapher/bin` to your `PATH`.
+
+### Build from source only
+
+```bash
 cargo build --release
 ```
 
 The compiled binary is located at `target/release/aws-iam-grapher`.
+
+---
+
+## Claude Code Skill
+
+A repo-local Claude Code skill lives at `.claude/skills/aws-iam-grapher/`. It lets an agent
+answer IAM permission questions ("who can delete objects in this bucket", "find privilege
+escalation paths", "diff permissions between two snapshots") by driving `aws-iam-grapher query`
+directly, without a human recalling subcommands, scoping rules, or the approximations documented
+in [`docs/limitations.md`](docs/limitations.md).
+
+**Installation, from this checkout:** none needed — Claude Code auto-discovers skills under
+`.claude/skills/` in the current working directory. Point Claude Code at a checkout of this repo
+and the skill is available.
+
+**Installation, in another project:** download `aws-iam-grapher-skill.zip` from this repo's
+[Releases](../../releases) page and unzip it into that project's `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills
+unzip aws-iam-grapher-skill.zip -d .claude/skills/
+```
+
+This extracts an `aws-iam-grapher/` folder containing `SKILL.md` and `reference.md`, matching the
+layout in this repository.
+
+**Installation, globally (all projects):** unzip into `~/.claude/skills/` instead of a project's
+`.claude/skills/` — Claude Code also discovers skills there, making the skill available in every
+project regardless of working directory:
+
+```bash
+mkdir -p ~/.claude/skills
+unzip aws-iam-grapher-skill.zip -d ~/.claude/skills/
+```
+
+From a checkout of this repo (no zip needed), the equivalent is copying the folder directly:
+
+```bash
+cp -r .claude/skills/aws-iam-grapher ~/.claude/skills/
+```
+
+In every case, the skill still requires the `aws-iam-grapher` binary on `PATH` (or callable
+another way) and a reachable Neo4j instance with collected data — it only teaches an agent how to
+drive the CLI, it doesn't bundle the CLI itself.
+
+**Scope — read-only by design:**
+- Exposed: `who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`,
+  `org-escalation`, `diff`, `list-snapshots`, `list-accounts`.
+- Never exposed: `delete-snapshot` (no confirmation or `--dry-run` gate in the CLI — stays
+  human-only) and `collect`/`collect org` (mutate the graph, make live AWS calls, cost money).
+
+**Credentials:** the skill never constructs a `--neo4j-pass`-style argument (no such flag exists —
+see [Neo4j password and secret mounts](#neo4j-password-and-secret-mounts)) and never echoes
+`NEO4J_PASSWORD`. It relies on the environment variable already being set before Claude Code (or
+the shell it drives) starts.
+
+**Caveats:** the skill always passes `--output json` and is instructed to restate every entry in
+the response's `caveats` array to the user alongside results — see
+[`docs/caveats.md`](docs/caveats.md).
+
+See `.claude/skills/aws-iam-grapher/SKILL.md` and `reference.md` for the full instruction set.
 
 ---
 
@@ -54,6 +130,41 @@ docker compose up -d neo4j   # data from prior collect runs is still there
 docker volume inspect aws-iam-grapher_neo4j_data   # see where Docker stores it
 
 docker compose down -v   # drops the volume — full reset, all snapshots lost
+```
+
+## Neo4j password and secret mounts
+
+The Neo4j password is never accepted as a bare CLI value — it would leak into `ps`
+output, shell history, and process listings. `collect`, `collect org`, and `query` all
+resolve it with this precedence:
+
+1. `--neo4j-pass-file <path>` — reads the password from a file. A trailing newline is
+   trimmed. Use this for container/Kubernetes deployments where the secret is mounted as
+   a file (e.g. `/run/secrets/neo4j_pass`), which avoids exposing it via
+   `/proc/<pid>/environ`, `docker inspect`, or inheritance by child processes — all of
+   which apply to environment variables.
+2. `NEO4J_PASSWORD` environment variable — used if `--neo4j-pass-file` is not given.
+
+If neither is set, the command fails with an error naming both options.
+
+```bash
+# Docker: mount a secret file read-only and point --neo4j-pass-file at it
+docker run --rm \
+  -v ./neo4j_pass.txt:/run/secrets/neo4j_pass:ro \
+  aws-iam-grapher collect --neo4j-pass-file /run/secrets/neo4j_pass ...
+```
+
+```yaml
+# Kubernetes: mount a Secret as a file and reference it the same way
+volumeMounts:
+  - name: neo4j-pass
+    mountPath: /run/secrets
+    readOnly: true
+volumes:
+  - name: neo4j-pass
+    secret:
+      secretName: neo4j-pass
+# then: --neo4j-pass-file /run/secrets/neo4j_pass
 ```
 
 **Backup and restore:**
@@ -197,8 +308,7 @@ them all under one `org_collection_run_id`:
 aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
-  --assume-role-name OrganizationAccountAccessRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --assume-role-name OrganizationAccountAccessRole
 ```
 
 `--exclude-ou-id`/`--exclude-ou-name` and `--include-ou-name` scope which OUs are collected;
@@ -212,8 +322,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole
 ```
 
 All of these flags are repeatable, match against both OU id and display name, and are documented
@@ -244,8 +353,7 @@ export NEO4J_PASSWORD=your-password
 aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
-    --assume-role-name OrganizationAccountAccessRole \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --assume-role-name OrganizationAccountAccessRole
 ```
 
 ### Scoping which accounts are collected
@@ -262,8 +370,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --assume-role-name OrganizationAccountAccessRole \
     --exclude-ou-id ou-root1-sandbox \
-    --include-ou-name Production \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --include-ou-name Production
 ```
 
 ### Mixed-authentication organizations (`--ou-profile-override`)
@@ -287,8 +394,7 @@ aws-iam-grapher collect org \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
     --ou-profile-override Quarantine=legacy-static-creds \
-    --ou-profile-override ThirdParty=vendor-sso \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --ou-profile-override ThirdParty=vendor-sso
 ```
 
 Matching mirrors `--exclude-ou-id`/`--exclude-ou-name`: the key is checked against both the OU's
@@ -313,8 +419,7 @@ aws-iam-grapher collect org \
     --management-profile org-management \
     --jump-from-profile default \
     --assume-role-name OrganizationAccountAccessRole \
-    --concurrency 8 \
-    --neo4j-pass "$NEO4J_PASSWORD"
+    --concurrency 8
 ```
 
 ---
@@ -328,6 +433,32 @@ progress, per-account jump-role assumption, etc.) at `info`/`debug` level via `t
 ```bash
 RUST_LOG=iam_collector=debug aws-iam-grapher collect --mode live --account-alias production
 ```
+
+---
+
+## Exit Codes
+
+Every command exits with a code identifying the failure class, so scripts and the
+`aws-iam-grapher` Claude Code skill can branch on outcome without parsing error text:
+
+| Code | Meaning | Examples |
+|------|---------|----------|
+| `0` | Success, including empty result sets | a `who-can` query that matches nothing |
+| `1` | Unexpected / internal error | ingestion failure, schema init failure, unclassified errors |
+| `2` | Usage or validation error | invalid CLI flags, offline mode without `--input-file`, `--snapshot-id` combined with multi-account fan-out |
+| `3` | Credential or connection failure | Neo4j unreachable, missing/empty Neo4j password, AWS credential resolution failure |
+| `4` | Requested scope not found | unknown snapshot ID, no snapshots for an account, no snapshots in the graph at all |
+
+Under `--output json`, a failure also writes a JSON envelope to **stderr** (stdout is always
+left empty on error, so it can be parsed unconditionally):
+
+```json
+{"error": {"code": "scope-not-found", "message": "snapshot abc123 not found"}}
+```
+
+`message` is the outermost error text only — never the full causal chain — so internal paths
+or connection details aren't leaked to a machine consumer. Set `RUST_LOG` for full diagnostic
+detail (see [Logging](#logging) above).
 
 ---
 
@@ -353,18 +484,30 @@ See [`docs/limitations.md`](docs/limitations.md) for V1 analysis limitations.
 
 ## Query Commands
 
-All query commands require `--neo4j-pass` (or the `NEO4J_PASSWORD` environment variable). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+All query commands require the Neo4j password, resolved via `--neo4j-pass-file <path>` or
+the `NEO4J_PASSWORD` environment variable (see [Neo4j password and secret mounts](#neo4j-password-and-secret-mounts)). If `--snapshot-id` is omitted, the most recent snapshot for the account is used automatically.
+
+`--neo4j-uri`, `--neo4j-user`, `--neo4j-pass-file`, and `--output-file` are global flags and
+may be given before or after the query verb, e.g. both `query who-can s3:GetObject
+--neo4j-pass-file ...` and `query --neo4j-pass-file ... who-can s3:GetObject` work.
+`--account-id` and `--snapshot-id` are query-scoped, not global, and must precede the verb.
 
 `--account-id` is optional. When it's provided, the query scopes to exactly that account (as
 before). When it's **omitted**, `query` resolves every distinct account with at least one
 snapshot in the graph and runs the query once per account, each correctly scoped to its own
 `(account_id, snapshot_id)` — never merging results across accounts. This applies to
-`who-can`, `entity-perms`, `instance-profiles-with`, `privilege-escalation`, and
-`list-snapshots`. Output (table and JSON) groups results under an `=== Account: ... ===`
-header (table) or an `account_id`/`snapshot_id`/`results` envelope per account (JSON). A
-graph with only one account degrades to a single group. `--snapshot-id` cannot be combined
-with multi-account mode (more than one account resolved) since a snapshot id would be
-ambiguous across accounts — pass `--account-id` to target one account instead.
+`who-can`, `instance-profiles-with`, `privilege-escalation`, and `list-snapshots`. Output
+(table and JSON) groups results under an `=== Account: ... ===` header (table) or an
+`account_id`/`snapshot_id`/`results` envelope per account, nested inside the outer `results`
+array of the top-level `{results, caveats}` JSON envelope (see below). A graph with only one
+account degrades to a single group. `--snapshot-id` cannot be combined with multi-account mode
+(more than one account resolved) since a snapshot id would be ambiguous across accounts —
+pass `--account-id` to target one account instead.
+
+`entity-perms` never fans out: an ARN names exactly one account (segment 4), so the account is
+always derived from the ARN itself, not from `--account-id`. An explicit `--account-id` that
+disagrees with the ARN's account is an error, and an ARN naming an account with no snapshots
+in the graph fails clearly rather than returning an empty result.
 
 `diff` derives the account from its two snapshot ids when `--account-id` is omitted, and
 errors if the two snapshots belong to different accounts.
@@ -372,9 +515,10 @@ errors if the two snapshots belong to different accounts.
 `list-accounts` is inherently cross-account and never requires (or uses) `--account-id` — use
 it to discover which accounts exist in the graph before targeting one with `--account-id`.
 
-Add `--output-file <path>` to write the result as JSON to a file, regardless of `--output`. The
-human-readable table still prints to stdout — useful for downstream tooling that wants a clean
-JSON artifact without scraping stdout/stderr:
+Add `--output-file <path>` to write the result as JSON to a file. With `--output table`
+(the default), the table still prints to stdout in addition to the file; with `--output json`,
+stdout is suppressed once the file is written — useful for downstream tooling that wants a
+clean JSON artifact without scraping stdout/stderr:
 
 ```bash
 aws-iam-grapher query \
@@ -384,6 +528,13 @@ aws-iam-grapher query \
 ```
 
 The `collect` subcommand supports the same `--output-file` flag for its summary.
+
+Every JSON query response is an envelope, not a bare array/object:
+`{ "results": ..., "caveats": [...] }`. `results` holds what previously was the entire
+top-level payload; `caveats` is always present (empty when none apply) and lists which
+approximations documented in [`docs/caveats.md`](docs/caveats.md) apply to that
+specific query and snapshot. **This is a breaking change for scripts written against pre-caveats
+JSON output** — `jq '.[0].arn'` on a `who-can` result becomes `jq '.results[0].arn'`.
 
 ### Who can perform an action?
 

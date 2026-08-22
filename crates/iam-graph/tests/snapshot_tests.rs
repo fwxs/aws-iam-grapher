@@ -1,9 +1,6 @@
 mod helpers;
 
-use iam_graph::{
-    delete_snapshot, list_account_ids, list_snapshots, snapshot_account_id, GraphError,
-    GraphIngester,
-};
+use iam_graph::{delete_snapshot, list_account_ids, list_snapshots, GraphError, GraphIngester};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -191,39 +188,6 @@ async fn list_account_ids_returns_every_distinct_account_with_a_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
-async fn snapshot_account_id_resolves_owning_account() {
-    let client = helpers::shared_client().await;
-    let account_id = "910000000003";
-    let config = helpers::test_config(account_id);
-    let snapshot_id = config.snapshot_id.clone();
-
-    let ingester = GraphIngester::new(client, config);
-    ingester
-        .ingest(&helpers::empty_data(account_id))
-        .await
-        .expect("ingest must succeed");
-
-    let resolved = snapshot_account_id(ingester.client().inner(), &snapshot_id)
-        .await
-        .expect("snapshot_account_id must succeed");
-
-    assert_eq!(resolved, Some(account_id.to_string()));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Docker"]
-async fn snapshot_account_id_returns_none_for_unknown_snapshot() {
-    let client = helpers::shared_client().await;
-
-    let resolved = snapshot_account_id(client.inner(), "not-a-real-snapshot-id")
-        .await
-        .expect("snapshot_account_id must succeed");
-
-    assert_eq!(resolved, None);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires Docker"]
 async fn list_snapshots_reports_column_name_on_malformed_row() {
     let client = helpers::shared_client().await;
     let account_id = "910000000004";
@@ -264,13 +228,18 @@ async fn list_snapshots_reports_column_name_on_malformed_row() {
         .await
         .expect("restoring query must succeed");
 
+    assert!(
+        !err.is_connection_error(),
+        "a decode failure must not classify as a connection error"
+    );
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "decode error must preserve its neo4rs source"
+    );
     match err {
-        GraphError::UnexpectedResult(message) => {
-            assert!(
-                message.contains("is_partial"),
-                "error must name the malformed column, got: {message}"
-            );
+        GraphError::RowDecode { column, .. } => {
+            assert_eq!(column, "is_partial", "error must name the malformed column");
         }
-        other => panic!("expected UnexpectedResult, got: {other:?}"),
+        other => panic!("expected RowDecode, got: {other:?}"),
     }
 }

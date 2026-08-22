@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 neo4rs        = { workspace = true }
+url           = "2"
 tokio         = { workspace = true }
 thiserror     = { workspace = true }
 tracing       = { workspace = true }
@@ -16,10 +17,11 @@ iam-collector = { path = "../iam-collector" }
 iam-expander  = { path = "../iam-expander" }
 
 [dev-dependencies]
-testcontainers         = "^0.27.3"
-testcontainers-modules = { version = "^0.15.0", features = ["neo4j"] }
+testcontainers         = { workspace = true }
+testcontainers-modules = { workspace = true }
 tokio                  = { workspace = true }
 pretty_assertions      = { workspace = true }
 chrono                 = { workspace = true }
+insta                  = { workspace = true }
 neo4rs                 = { workspace = true }
 uuid                   = { version = "^1.23.3", features = ["v4"] }

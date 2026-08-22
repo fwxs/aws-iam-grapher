@@ -1,0 +1,10 @@
+---
+source: crates/iam-grapher/src/output/json.rs
+expression: "error_envelope(\"scope-not-found\")"
+---
+{
+  "error": {
+    "code": "scope-not-found",
+    "message": "example error message"
+  }
+}

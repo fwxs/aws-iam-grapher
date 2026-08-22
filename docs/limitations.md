@@ -12,7 +12,7 @@ This document describes known analysis limitations of the V1 release. Understand
 
 Neo4j Community supports exactly one database per instance. All accounts, all collection runs, and all snapshots coexist in this database. There is no physical isolation between tenants.
 
-**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See [QUERIES.md § 1](../QUERIES.md#1-mandatory-filter-context).
+**Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See CLAUDE.md "Key Constraints" below.
 
 **Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
 
@@ -46,6 +46,8 @@ AWS IAM Permission Boundaries are attached to roles and users and act as a maxim
 
 **Not evaluated:** Deny statements *inside* the boundary policy itself (AWS also evaluates these) and `Condition` keys on boundary statements.
 
+**Not found vs. empty:** `entity-perms` distinguishes an ARN with no matching entity in the snapshot (returns an error) from an entity that exists but has zero permissions (returns an empty result) — the two are no longer indistinguishable.
+
 ### Service Control Policies (SCPs) not supported
 
 AWS Organizations SCPs restrict what IAM entities in member accounts can do, even if the entity's own policies allow the action. An SCP can deny `s3:DeleteBucket` organization-wide regardless of what the IAM policy says.
@@ -70,7 +72,7 @@ For each grant: if a supported key/operator pair has a matching context value an
 
 **Not evaluated:** any key/operator outside the table above (e.g. `s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks), and conditions on `entity-perms` / `instance-profiles-with` (only `who-can` evaluates and flags conditions in V1).
 
-**Dedup approximation:** when the same entity has multiple grants for a queried action, `conditional` is true only if *every* surviving grant is conditional — an additional unconditional grant makes the entity's access unconditional overall. See `who_can()` in `crates/iam-graph/src/queries/analysis.rs`.
+**Dedup approximation:** when the same entity has multiple grants for a queried action, `conditional` is true only if *every* surviving grant is conditional — an additional unconditional grant makes the entity's access unconditional overall. `unevaluated_condition_keys` is only ever populated while the merged entity stays `conditional: true`; the moment a merge flips it to `false`, the keys are cleared to an empty list, since keys left over from a superseded conditional grant would misleadingly imply the entity is still gated. See `merge_entity_grants()` in `crates/iam-graph/src/queries/analysis.rs`.
 
 **Relationship to trust-policy conditions:** trust policy (`AssumeRole`) conditions are evaluated separately by `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`), which understands only `StringEquals`/`StringEqualsIgnoreCase` on `aws:PrincipalAccount` — see "Trust policy evaluation is approximate" below. The two evaluators are not yet unified; a follow-up should consolidate trust-condition evaluation onto `iam_models::condition::evaluate`.
 
@@ -98,55 +100,9 @@ Cycles (e.g. A → B → A) are handled by Cypher's default acyclic-relationship
 
 **Caveat:** the entity-to-entity bridge is only created when the trust-policy principal is an `AWS` ARN that resolves to a Role or User node already present in the same snapshot (kind `IamEntity`). `Service`, `Federated`, `CanonicalUser`, `Wildcard`, and cross-account `AssumedRole` principals are recorded on the original `CAN_ASSUME` edge (see above) but do not extend the transitive chain — see "Multi-account" in the V2 roadmap.
 
-### `NotAction` — implemented as allow-all-except (query-time exclusion)
-
-IAM `NotAction` statements (e.g. `Allow NotAction: ["s3:*"]` — allow everything *except* the
-listed actions) are fully supported using a sentinel + query-time exclusion model:
-
-1. **Wildcard expansion:** wildcards *inside* the `NotAction` list (e.g. `s3:*`) are expanded
-   to a concrete, wildcard-free list of excluded actions at collection time, exactly like `Action`
-   wildcards. The excluded list is bounded (service-scoped); the allowed complement is not
-   materialized.
-
-2. **Graph representation:** one `Permission` node is created per resource with `action = '*'` and
-   an `excluded_actions` list property carrying the concrete excluded actions. This node is distinct
-   from a true full-admin `*` node (its UID encodes the excluded set, preventing collisions).
-
-3. **Query evaluation:** `who_can(action)` matches allow-all-except grants and applies
-   `WHERE NOT $action IN excluded_actions` — so an entity with `Allow NotAction: ["s3:*"]` appears
-   in `who_can("ec2:DescribeInstances")` (not excluded) and is absent from `who_can("s3:DeleteObject")`
-   (excluded). True full-admin nodes (no `excluded_actions`) are unchanged — `coalesce([], [])` makes
-   them match every action.
-
-**Remaining approximations:**
-- The resource scope of an allow-all-except grant is not intersected with the queried resource
-  (same approximation as for full-admin `*` grants — see below).
-- Condition evaluation on `NotAction` statements is not implemented (same limitation as all
-  permission nodes — see "Policy conditions not evaluated").
-
-### Deny scope is approximate
-
-Explicit Deny subtraction matches Deny actions against the queried/risky action using IAM glob
-semantics (`iam_expander::glob_match`, reusing the same matcher as wildcard `Action` expansion).
-A Deny with a wildcard action (e.g. `Deny: s3:Delete*`) now correctly suppresses an Allow for
-`s3:DeleteObject`, as does an exact match or a true full-admin Deny (`action: '*'`).
-
-Group-inherited Deny is evaluated: a user's effective Deny set is the union of Deny permissions
-on its own policies and on every group it is `MEMBER_OF`. A Deny from either side suppresses the
-user's Allow, in `who_can` and `privilege_escalation_paths` alike.
-
-`Deny NotAction` (deny-all-except) is now evaluated: a Deny-NotAction sentinel node
-(`action = '*'` Deny with `excluded_actions` set) denies every action except the ones listed.
-`who_can` matches it when `$action NOT IN excluded_actions`; `privilege_escalation_paths` drops
-a risky action from `allowed_actions` unless it appears in every deny-all-except node's
-`excluded_actions` reachable from the terminal entity (own policies and member groups). Both
-queries honor Deny-over-Allow precedence: a deny-all-except node suppresses access even when an
-`Allow *` (full-admin) or allow-all-except (`NotAction`) grant is also present.
-
-**Remaining approximations:**
-- Group results themselves (a `Group` returned directly as `who_can`'s `e`) are not suppressed by
-  a Deny on one of their member users — groups are not IAM principals that take action, so this
-  is out of scope.
+See [`docs/caveats.md`](caveats.md) for approximations surfaced in `query --output json`'s
+`caveats` array (`NotAction` allow-all-except, Deny scope, partial snapshots, wildcard expansion
+degradation, and the `Caveat codes` table).
 
 ### `Action: "*"` resource scope intersection (`--resource`)
 
@@ -228,7 +184,7 @@ These limitations are targeted for resolution in a future major version:
 |---|---|
 | Permission Boundaries — Deny statements inside the boundary, and boundary wildcard-vs-wildcard set containment | Extend boundary intersection to evaluate Deny statements and expand wildcards before comparison |
 | SCPs | Add `iam-collector` mode that collects SCPs via Organizations API; add `SCP` nodes and `RESTRICTED_BY` relationships |
-| Condition evaluation | Parse and partially evaluate common condition keys (`aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `aws:PrincipalTag`) using a condition evaluator library |
+| Remaining condition keys (`s3:prefix`, `aws:SourceIp`, `sts:ExternalId`, date/time checks) and unifying trust-policy condition evaluation onto `iam_models::condition::evaluate` | Extend `evaluate_key()` (`crates/iam-models/src/condition.rs`) with the remaining operators; replace `classify_trust_condition` (`crates/iam-graph/src/ingester.rs`) with the shared evaluator |
 | Multi-account cross-account role chaining | Support cross-account role chaining via `sts:AssumeRole` relationships between accounts in the same collection run |
 
 ## Multi-account (AWS Organizations) collection
@@ -265,8 +221,7 @@ aws-iam-grapher collect org \
   --region us-east-1 \
   --assume-role-name OrganizationAccountAccessRole \
   --exclude-ou-id ou-sandbox-1111 \
-  --exclude-ou-name Legacy \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --exclude-ou-name Legacy
 ```
 
 `--exclude-ou-id` and `--exclude-ou-name` (both repeatable) prune matching OU subtrees before
@@ -300,8 +255,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --include-ou-name Prod \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --include-ou-name Prod
 ```
 
 Omitting `--include-ou-name` collects the full org tree as usual. Repeating it ORs the filter
@@ -331,8 +285,7 @@ aws-iam-grapher collect org \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
   --ou-profile-override Quarantine=legacy-static-creds \
-  --ou-profile-override ThirdParty=vendor-keys \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-profile-override ThirdParty=vendor-keys
 ```
 
 This is not a way to bypass assume-role entirely — the named profile is only ever used to call
@@ -363,8 +316,7 @@ aws-iam-grapher collect org \
   --management-profile org-management \
   --jump-from-profile default \
   --assume-role-name OrganizationAccountAccessRole \
-  --ou-role-override LegacyAcquisition=CrossAccountAuditRole \
-  --neo4j-pass "$NEO4J_PASSWORD"
+  --ou-role-override LegacyAcquisition=CrossAccountAuditRole
 ```
 
 Matching, inheritance, and the fatal-unmatched-key behavior are the same as

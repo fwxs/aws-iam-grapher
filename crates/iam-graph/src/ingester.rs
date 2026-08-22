@@ -131,7 +131,7 @@ impl GraphIngester {
                     "some inline policies not resolved".to_string()
                 }
                 iam_collector::CollectorWarning::WildcardsNotExpanded => {
-                    "some wildcards not expanded".to_string()
+                    crate::queries::caveats::WILDCARDS_NOT_EXPANDED_REASON.to_string()
                 }
                 iam_collector::CollectorWarning::MfaDevicesMissing => {
                     "some users' MFA devices could not be listed".to_string()
@@ -665,14 +665,10 @@ impl GraphIngester {
             let mut txn = graph.start_txn().await?;
             txn.run(neo4rs::query(cypher).param("rows", chunk))
                 .await
-                .map_err(|e| GraphError::Ingestion {
-                    phase,
-                    cause: e.to_string(),
-                })?;
-            txn.commit().await.map_err(|e| GraphError::Ingestion {
-                phase,
-                cause: e.to_string(),
-            })?;
+                .map_err(|e| GraphError::Ingestion { phase, source: e })?;
+            txn.commit()
+                .await
+                .map_err(|e| GraphError::Ingestion { phase, source: e })?;
             debug!(
                 phase,
                 rows = chunk_len,

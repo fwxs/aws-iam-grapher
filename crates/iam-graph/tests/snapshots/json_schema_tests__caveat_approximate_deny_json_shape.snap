@@ -1,0 +1,9 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: "Caveat::approximate_deny()"
+---
+{
+  "code": "approximate-deny",
+  "message": "Deny subtraction compares wildcard Deny actions against wildcard Allow grants as literal glob patterns, not set containment; a wildcard grant narrowed by a wildcard Deny may be reported as permitted. Group results are not suppressed by Denies on member users.",
+  "doc_anchor": "Caveat information is in docs/caveats.md file inside aws-iam-grapher repository"
+}

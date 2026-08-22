@@ -1,0 +1,33 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "arn": "arn:aws:iam::123456789012:user/Attacker",
+  "name": "Attacker",
+  "entity_type": "User",
+  "risky_actions": [
+    "iam:CreatePolicyVersion"
+  ],
+  "path": [
+    {
+      "arn": "arn:aws:iam::123456789012:role/Victim",
+      "entity_type": "Role"
+    }
+  ],
+  "conditional": false,
+  "holders": [],
+  "instance_profiles": [
+    {
+      "arn": "arn:aws:iam::123456789012:instance-profile/VictimProfile",
+      "name": "VictimProfile"
+    }
+  ],
+  "trust_principals": [
+    {
+      "id": "arn:aws:iam::123456789012:user/Attacker",
+      "principal_type": "AWS",
+      "conditional": false
+    }
+  ]
+}

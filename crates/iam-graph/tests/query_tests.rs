@@ -1,7 +1,8 @@
 mod helpers;
 
 use iam_graph::{
-    entity_permissions, privilege_escalation_paths, who_can, GraphIngester, QueryContext,
+    associated_entities, entity_permissions, privilege_escalation_paths, who_can, GraphError,
+    GraphIngester, QueryContext,
 };
 use iam_models::condition::ConditionContext;
 
@@ -149,6 +150,137 @@ async fn privilege_escalation_finds_deep_transitive_chain() {
             format!("arn:aws:iam::{}:role/ChainC", account_id),
         ],
         "full 4-node chain X -> A -> B -> C must be reported in order"
+    );
+
+    // The terminal (ChainC) holds the risky permission; its trust policy grants
+    // sts:AssumeRole to ChainB (see role_with_trust). trust_principals is keyed on the
+    // terminal, not on ChainX (the chain's `arn`), so this must surface ChainB.
+    assert!(
+        chain_x
+            .trust_principals
+            .iter()
+            .any(|tp| tp.id == format!("arn:aws:iam::{}:role/ChainB", account_id)),
+        "trust_principals on the terminal (ChainC) must include ChainB: {:?}",
+        chain_x.trust_principals
+    );
+    assert!(
+        chain_x.holders.is_empty(),
+        "holders must be empty for a Role terminal"
+    );
+    assert!(
+        chain_x.instance_profiles.is_empty(),
+        "instance_profiles must be empty when the terminal has no wrapping InstanceProfile"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_group_terminal_with_holders() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445560";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, group_arn) = helpers::data_with_escalation_group_holders(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let group_path = paths
+        .iter()
+        .find(|p| p.arn == group_arn)
+        .expect("RiskyGroup must be reported as an escalation path");
+
+    assert_eq!(group_path.entity_type, "Group");
+    assert!(
+        group_path
+            .holders
+            .iter()
+            .any(|h| h.name == "erin" && h.entity_type == "User"),
+        "holders must include erin, a member of RiskyGroup: {:?}",
+        group_path.holders
+    );
+    assert!(
+        group_path.instance_profiles.is_empty(),
+        "instance_profiles must be empty for a Group terminal"
+    );
+    assert!(
+        group_path.trust_principals.is_empty(),
+        "trust_principals must be empty for a Group terminal"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_role_terminal_with_instance_profiles() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445561";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_escalation_instance_profile(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let role_path = paths
+        .iter()
+        .find(|p| p.arn == role_arn)
+        .expect("RiskyProfileRole must be reported as an escalation path");
+
+    assert_eq!(role_path.entity_type, "Role");
+    assert!(
+        role_path
+            .instance_profiles
+            .iter()
+            .any(|ip| ip.name == "RiskyProfile"),
+        "instance_profiles must include RiskyProfile, which wraps RiskyProfileRole: {:?}",
+        role_path.instance_profiles
+    );
+    assert!(
+        role_path.holders.is_empty(),
+        "holders must be empty for a Role terminal"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_role_terminal_with_service_trust_principal() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445562";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_escalation_service_trust_principal(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let role_path = paths
+        .iter()
+        .find(|p| p.arn == role_arn)
+        .expect("RiskyServiceTrustRole must be reported as an escalation path");
+
+    assert!(
+        role_path
+            .trust_principals
+            .iter()
+            .any(|tp| tp.id == "ec2.amazonaws.com" && tp.principal_type == "Service"),
+        "trust_principals must surface the Service principal from the trust policy, which \
+         never materializes a CAN_ASSUME_ROLE entity bridge: {:?}",
+        role_path.trust_principals
     );
 }
 
@@ -735,8 +867,7 @@ async fn entity_permissions_marks_boundary_capped_action_not_effective() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let uid = format!("{}|{}", snapshot_id, role_arn);
-    let perms = entity_permissions(ingester.client().inner(), &ctx, &uid)
+    let perms = entity_permissions(ingester.client().inner(), &ctx, &role_arn)
         .await
         .expect("entity_permissions must succeed");
 
@@ -756,6 +887,34 @@ async fn entity_permissions_marks_boundary_capped_action_not_effective() {
     assert!(
         effective.effective,
         "s3:GetObject Allow must be marked effective — covered by boundary"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn entity_permissions_unknown_arn_returns_entity_not_found() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000016";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let err = entity_permissions(
+        ingester.client().inner(),
+        &ctx,
+        "arn:aws:iam::900000000016:role/DoesNotExist",
+    )
+    .await
+    .expect_err("unknown entity must error");
+
+    assert!(
+        matches!(err, GraphError::EntityNotFound(_)),
+        "expected EntityNotFound, got: {err:?}"
     );
 }
 
@@ -826,5 +985,139 @@ async fn who_can_excludes_mfa_gated_grant_when_mfa_false_context_supplied() {
     assert!(
         !entities.iter().any(|e| e.name == "MfaGatedRole"),
         "grant gated by aws:MultiFactorAuthPresent: true must be excluded when --mfa false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_policy_arn_returns_attached_holders() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000017";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let policy_arn = format!("arn:aws:iam::{account_id}:policy/GroupPolicy");
+    let results = associated_entities(ingester.client().inner(), &ctx, &policy_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "Auditors" && e.entity_type == "Group"),
+        "Auditors group must be returned as attached to GroupPolicy: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_group_arn_returns_members_and_own_policy() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000018";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_user_group_and_inline(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let group_arn = format!("arn:aws:iam::{account_id}:group/Auditors");
+    let results = associated_entities(ingester.client().inner(), &ctx, &group_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "carol" && e.entity_type == "User"),
+        "carol must be returned as a member of Auditors: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "GroupPolicy" && e.entity_type == "Policy"),
+        "GroupPolicy must be returned as the group's own attached policy: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_role_arn_returns_assumers_and_instance_profile() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000019";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let data = helpers::data_with_assume_role_chain(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    // ChainA's trust policy names ChainX as the allowed principal, so the materialized
+    // CAN_ASSUME_ROLE edge is ChainX -> ChainA (see helpers::role_with_trust).
+    let role_arn = format!("arn:aws:iam::{account_id}:role/ChainA");
+    let results = associated_entities(ingester.client().inner(), &ctx, &role_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results
+            .iter()
+            .any(|e| e.name == "ChainX" && e.entity_type == "Role"),
+        "ChainX must be returned as able to assume ChainA: {results:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_unknown_arn_returns_entity_not_found() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000020";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&helpers::empty_data(account_id))
+        .await
+        .expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let err = associated_entities(
+        ingester.client().inner(),
+        &ctx,
+        "arn:aws:iam::900000000020:role/DoesNotExist",
+    )
+    .await
+    .expect_err("unknown entity must error");
+
+    assert!(
+        matches!(err, GraphError::EntityNotFound(_)),
+        "expected EntityNotFound, got: {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn associated_entities_empty_for_unlinked_policy() {
+    let client = helpers::shared_client().await;
+    let account_id = "900000000021";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let (data, _) = helpers::data_with_bounded_role(account_id, "s3:Get*");
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let boundary_arn = format!("arn:aws:iam::{account_id}:policy/BoundaryPolicy");
+    let results = associated_entities(ingester.client().inner(), &ctx, &boundary_arn)
+        .await
+        .expect("associated_entities must succeed");
+
+    assert!(
+        results.is_empty(),
+        "a boundary policy with no attached/inline holders must return no associated entities: {results:?}"
     );
 }

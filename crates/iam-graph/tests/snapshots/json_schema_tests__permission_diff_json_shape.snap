@@ -1,0 +1,20 @@
+---
+source: crates/iam-graph/tests/json_schema_tests.rs
+expression: value
+---
+{
+  "added": [
+    {
+      "action": "s3:PutObject",
+      "resource": "arn:aws:s3:::example-bucket/*",
+      "effect": "Allow"
+    }
+  ],
+  "removed": [
+    {
+      "action": "s3:DeleteObject",
+      "resource": "arn:aws:s3:::example-bucket/*",
+      "effect": "Allow"
+    }
+  ]
+}

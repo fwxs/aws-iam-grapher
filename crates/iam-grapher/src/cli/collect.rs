@@ -1,3 +1,5 @@
+use crate::cli::common::{ConnectionArgs, OutputArgs};
+use crate::exit_code::{CliError, CliValidationError};
 use crate::output::OutputFormat;
 use anyhow::Context as _;
 use clap::{Args, ValueEnum};
@@ -20,19 +22,8 @@ pub enum CollectMode {
 /// Neo4j connection + output args shared by every `collect` subcommand.
 #[derive(Args)]
 pub struct SharedCollectArgs {
-    /// Neo4j bolt URI.
-    #[arg(long, default_value = "bolt://localhost:7687")]
-    pub neo4j_uri: String,
-
-    /// Neo4j username.
-    #[arg(long, default_value = "neo4j")]
-    pub neo4j_user: String,
-
-    /// Neo4j password. Required via flag or NEO4J_PASSWORD env var, but not enforced by
-    /// clap directly since this struct is also flattened into the `collect org` parent
-    /// command where it is unused — see `resolve_neo4j_pass`.
-    #[arg(long, env = "NEO4J_PASSWORD")]
-    pub neo4j_pass: Option<String>,
+    #[command(flatten)]
+    pub connection: ConnectionArgs,
 
     /// Batch size for Neo4j writes.
     #[arg(long, default_value = "500")]
@@ -42,14 +33,8 @@ pub struct SharedCollectArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Output format.
-    #[arg(long, value_enum, default_value = "table")]
-    pub output: OutputFormat,
-
-    /// Write JSON summary to this file. Overrides --output to JSON for the file;
-    /// the human-readable summary still prints to stdout.
-    #[arg(long)]
-    pub output_file: Option<PathBuf>,
+    #[command(flatten)]
+    pub output: OutputArgs,
 }
 
 #[derive(Args)]
@@ -96,36 +81,43 @@ pub struct CollectArgs {
 /// Validate argument combinations before making any network calls.
 pub fn validate(args: &CollectArgs) -> anyhow::Result<()> {
     if args.mode == CollectMode::Offline && args.input_file.is_none() {
-        anyhow::bail!(
-            "offline mode requires --input-file.\n\n\
-             Generate the file with:\n\n    \
-             aws iam get-account-authorization-details --output json > account-auth-details.json"
-        );
+        return Err(CliError::from(CliValidationError::OfflineMissingInputFile).into());
     }
     Ok(())
 }
 
-/// Resolve the Neo4j password, erroring with a friendly message if it's missing.
-/// Not enforced by clap directly because `SharedCollectArgs` is also flattened into the
-/// `collect org` parent command, where this particular instance of it goes unused.
-pub fn resolve_neo4j_pass(shared: &SharedCollectArgs) -> anyhow::Result<String> {
-    shared
-        .neo4j_pass
-        .clone()
-        .context("Neo4j password required: pass --neo4j-pass or set the NEO4J_PASSWORD env var")
+/// Resolve the Neo4j password: `--neo4j-pass-file` (if given) → `NEO4J_PASSWORD` env var
+/// → error. The single source of truth for `collect`, `collect org`, and `query` — the
+/// password is never accepted as a bare CLI value, since that would leak it into `ps`
+/// output, shell history, and Claude Code transcripts. A file path is safe in argv
+/// because it isn't the secret itself. File-read failures report the path, never the
+/// file's contents.
+pub fn resolve_neo4j_pass(pass_file: Option<&std::path::Path>) -> anyhow::Result<String> {
+    if let Some(path) = pass_file {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read Neo4j password file {}", path.display()))?;
+        let trimmed = contents.trim();
+        if trimmed.is_empty() {
+            return Err(CliError::MissingNeo4jPassword {
+                detail: "password file is empty or whitespace-only",
+            }
+            .into());
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    std::env::var("NEO4J_PASSWORD").map_err(|_| {
+        CliError::MissingNeo4jPassword {
+            detail: "NEO4J_PASSWORD is not set",
+        }
+        .into()
+    })
 }
 
-pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
+pub async fn run(args: CollectArgs, output: OutputFormat) -> anyhow::Result<()> {
     validate(&args)?;
 
-    let data = match collect_data(&args).await {
-        Ok(d) => d,
-        Err(CollectorError::ManualInterventionRequired { instructions, .. }) => {
-            eprintln!("{instructions}");
-            std::process::exit(1);
-        }
-        Err(e) => return Err(e).context("collection failed"),
-    };
+    let data = collect_data(&args).await?;
 
     print_warnings(&data);
 
@@ -135,10 +127,19 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
     }
 
     let snapshot_id = Uuid::new_v4().to_string();
-    let neo4j_pass = resolve_neo4j_pass(&args.shared)?;
-    let client = GraphClient::connect(&args.shared.neo4j_uri, &args.shared.neo4j_user, &neo4j_pass)
-        .await
-        .with_context(|| format!("failed to connect to Neo4j at {}", args.shared.neo4j_uri))?;
+    let neo4j_pass = resolve_neo4j_pass(args.shared.connection.neo4j_pass_file.as_deref())?;
+    let client = GraphClient::connect(
+        &args.shared.connection.neo4j_uri,
+        &args.shared.connection.neo4j_user,
+        &neo4j_pass,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to connect to Neo4j at {}",
+            iam_graph::redact_uri(&args.shared.connection.neo4j_uri)
+        )
+    })?;
     client
         .initialize_schema()
         .await
@@ -151,12 +152,7 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         .account_id
         .clone()
         .or_else(|| data.account_id.clone())
-        .with_context(|| {
-            "could not determine AWS account ID: no entities were collected and \
-             --account-id was not provided.\n\n\
-             Pass the account ID explicitly:\n\n    \
-             aws-iam-grapher collect --account-id 123456789012 ..."
-        })?;
+        .ok_or(CliValidationError::AccountIdNotResolved)?;
 
     let config = IngestConfig {
         snapshot_id: snapshot_id.clone(),
@@ -183,8 +179,8 @@ pub async fn run(args: CollectArgs) -> anyhow::Result<()> {
         &data,
         &stats,
         duration_secs,
-        &args.shared.output,
-        args.shared.output_file.as_deref(),
+        &output,
+        args.shared.output.output_file.as_deref(),
     )?;
     Ok(())
 }
@@ -224,6 +220,12 @@ async fn collect_data(args: &CollectArgs) -> Result<CollectedData, CollectorErro
     }
 }
 
+/// Always plain text on stderr, regardless of `--output` — these are non-fatal collection
+/// diagnostics, not the fatal-error JSON envelope this issue (#144) adds. Mirrors
+/// `query.rs`'s `print_partial_warning`, an already-accepted instance of the same pattern:
+/// informational stderr lines are fine alongside JSON stdout: only a fatal error's envelope
+/// needs to be machine-parseable. Turning warnings into structured JSON is a separate,
+/// larger change (a caveats-style schema) out of scope here.
 fn print_warnings(data: &CollectedData) {
     for warning in &data.warnings {
         let msg: &str = match warning {
@@ -313,10 +315,13 @@ fn print_collect_summary(
 
     if let Some(path) = output_file {
         crate::output::json::write_json(&summary, path)?;
-    } else if *format == OutputFormat::Json {
-        let json = serde_json::to_string_pretty(&summary)
-            .context("failed to serialize collect summary")?;
-        println!("{json}");
+    }
+    if *format == OutputFormat::Json {
+        if output_file.is_none() {
+            let json = serde_json::to_string_pretty(&summary)
+                .context("failed to serialize collect summary")?;
+            println!("{json}");
+        }
         return Ok(());
     }
 
@@ -338,5 +343,152 @@ fn mode_label(mode: &CollectMode) -> &'static str {
         CollectMode::Live => "live",
         CollectMode::Offline => "offline",
         CollectMode::Hybrid => "hybrid",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `NEO4J_PASSWORD` is process-global; serialize every test here that touches it so
+    /// they don't race under `cargo test`'s default parallel threads.
+    static NEO4J_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn write_pass_file(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+        file.write_all(contents.as_bytes())
+            .expect("write temp file");
+        file
+    }
+
+    fn summary_args(
+        format: OutputFormat,
+        output_file: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        print_collect_summary(
+            "snap-1",
+            "offline",
+            &CollectedData::default(),
+            &IngestStats::default(),
+            0.5,
+            &format,
+            output_file,
+        )
+    }
+
+    #[test]
+    fn print_collect_summary_table_no_file_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Table, None).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_json_no_file_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Json, None).unwrap();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_table_with_file_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Table, Some(&path)).unwrap();
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn print_collect_summary_json_with_file_writes_valid_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+
+        summary_args(OutputFormat::Json, Some(&path)).unwrap();
+
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed["snapshot_id"], "snap-1");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_file_wins_over_env_var() {
+        let _guard = NEO4J_ENV_LOCK.lock().expect("lock poisoned");
+        std::env::set_var("NEO4J_PASSWORD", "env-pass");
+        let file = write_pass_file("file-pass\n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        std::env::remove_var("NEO4J_PASSWORD");
+        assert_eq!(result.expect("resolve must succeed"), "file-pass");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_trims_trailing_newline() {
+        let file = write_pass_file("secret\n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        assert_eq!(result.expect("resolve must succeed"), "secret");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_trims_leading_whitespace() {
+        let file = write_pass_file("\nsecret\n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        assert_eq!(result.expect("resolve must succeed"), "secret");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_empty_file_is_distinct_error() {
+        let file = write_pass_file("   \n");
+
+        let result = resolve_neo4j_pass(Some(file.path()));
+
+        let err = result.expect_err("empty file must error");
+        assert!(err.to_string().contains("empty or whitespace-only"));
+        assert!(err.downcast_ref::<CliError>().is_some());
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_missing_file_names_path() {
+        let path = std::path::Path::new("/nonexistent/neo4j-pass-file-for-test");
+
+        let result = resolve_neo4j_pass(Some(path));
+
+        let err = result.expect_err("missing file must error");
+        assert!(err.to_string().contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_falls_back_to_env_var() {
+        let _guard = NEO4J_ENV_LOCK.lock().expect("lock poisoned");
+        std::env::set_var("NEO4J_PASSWORD", "env-only-pass");
+
+        let result = resolve_neo4j_pass(None);
+
+        std::env::remove_var("NEO4J_PASSWORD");
+        assert_eq!(result.expect("resolve must succeed"), "env-only-pass");
+    }
+
+    #[test]
+    fn resolve_neo4j_pass_errors_when_nothing_set() {
+        let _guard = NEO4J_ENV_LOCK.lock().expect("lock poisoned");
+        std::env::remove_var("NEO4J_PASSWORD");
+
+        let result = resolve_neo4j_pass(None);
+
+        assert!(result.is_err());
     }
 }
