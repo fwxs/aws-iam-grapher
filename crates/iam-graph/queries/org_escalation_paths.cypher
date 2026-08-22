@@ -65,5 +65,6 @@ WITH start, p, terminal,
 RETURN start.arn AS arn, start.name AS name, labels(start)[0] AS entity_type,
        start.account_id AS account_id,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
-       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0], account_id: n.account_id}] AS path,
+       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0], account_id: n.account_id,
+                          snapshot_id: n.snapshot_id}] AS path,
        any(rel IN relationships(p) WHERE rel.conditional) AS conditional

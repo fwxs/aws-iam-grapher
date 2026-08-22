@@ -151,6 +151,137 @@ async fn privilege_escalation_finds_deep_transitive_chain() {
         ],
         "full 4-node chain X -> A -> B -> C must be reported in order"
     );
+
+    // The terminal (ChainC) holds the risky permission; its trust policy grants
+    // sts:AssumeRole to ChainB (see role_with_trust). trust_principals is keyed on the
+    // terminal, not on ChainX (the chain's `arn`), so this must surface ChainB.
+    assert!(
+        chain_x
+            .trust_principals
+            .iter()
+            .any(|tp| tp.id == format!("arn:aws:iam::{}:role/ChainB", account_id)),
+        "trust_principals on the terminal (ChainC) must include ChainB: {:?}",
+        chain_x.trust_principals
+    );
+    assert!(
+        chain_x.holders.is_empty(),
+        "holders must be empty for a Role terminal"
+    );
+    assert!(
+        chain_x.instance_profiles.is_empty(),
+        "instance_profiles must be empty when the terminal has no wrapping InstanceProfile"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_group_terminal_with_holders() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445560";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, group_arn) = helpers::data_with_escalation_group_holders(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let group_path = paths
+        .iter()
+        .find(|p| p.arn == group_arn)
+        .expect("RiskyGroup must be reported as an escalation path");
+
+    assert_eq!(group_path.entity_type, "Group");
+    assert!(
+        group_path
+            .holders
+            .iter()
+            .any(|h| h.name == "erin" && h.entity_type == "User"),
+        "holders must include erin, a member of RiskyGroup: {:?}",
+        group_path.holders
+    );
+    assert!(
+        group_path.instance_profiles.is_empty(),
+        "instance_profiles must be empty for a Group terminal"
+    );
+    assert!(
+        group_path.trust_principals.is_empty(),
+        "trust_principals must be empty for a Group terminal"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_role_terminal_with_instance_profiles() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445561";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_escalation_instance_profile(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let role_path = paths
+        .iter()
+        .find(|p| p.arn == role_arn)
+        .expect("RiskyProfileRole must be reported as an escalation path");
+
+    assert_eq!(role_path.entity_type, "Role");
+    assert!(
+        role_path
+            .instance_profiles
+            .iter()
+            .any(|ip| ip.name == "RiskyProfile"),
+        "instance_profiles must include RiskyProfile, which wraps RiskyProfileRole: {:?}",
+        role_path.instance_profiles
+    );
+    assert!(
+        role_path.holders.is_empty(),
+        "holders must be empty for a Role terminal"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_role_terminal_with_service_trust_principal() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445562";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_escalation_service_trust_principal(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+        .await
+        .expect("escalation query must succeed");
+
+    let role_path = paths
+        .iter()
+        .find(|p| p.arn == role_arn)
+        .expect("RiskyServiceTrustRole must be reported as an escalation path");
+
+    assert!(
+        role_path
+            .trust_principals
+            .iter()
+            .any(|tp| tp.id == "ec2.amazonaws.com" && tp.principal_type == "Service"),
+        "trust_principals must surface the Service principal from the trust policy, which \
+         never materializes a CAN_ASSUME_ROLE entity bridge: {:?}",
+        role_path.trust_principals
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

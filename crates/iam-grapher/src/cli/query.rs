@@ -231,12 +231,23 @@ fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
                 p.arn.clone(),
                 path_str,
                 p.risky_actions.join(", "),
+                p.holders.len().to_string(),
+                p.instance_profiles.len().to_string(),
+                p.trust_principals.len().to_string(),
                 if p.conditional { "yes" } else { "no" }.to_string(),
             ]
         })
         .collect();
     RenderSpec {
-        headers: &["ENTITY", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+        headers: &[
+            "ENTITY",
+            "PATH",
+            "RISKY ACTIONS",
+            "HOLDERS",
+            "INSTANCE PROFILES",
+            "TRUST PRINCIPALS",
+            "CONDITIONAL",
+        ],
         rows,
     }
 }
@@ -717,6 +728,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                         ep.account_id.clone(),
                         path_str,
                         ep.risky_actions.join(", "),
+                        ep.holders.len().to_string(),
+                        ep.instance_profiles.len().to_string(),
+                        ep.trust_principals.len().to_string(),
                         if ep.conditional { "yes" } else { "no" }.to_string(),
                     ]
                 })
@@ -724,7 +738,16 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             print!(
                 "{}",
                 table::format_table(
-                    &["ENTITY", "ACCOUNT", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+                    &[
+                        "ENTITY",
+                        "ACCOUNT",
+                        "PATH",
+                        "RISKY ACTIONS",
+                        "HOLDERS",
+                        "INSTANCE PROFILES",
+                        "TRUST PRINCIPALS",
+                        "CONDITIONAL"
+                    ],
                     &rows
                 )
             );

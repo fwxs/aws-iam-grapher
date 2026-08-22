@@ -32,7 +32,8 @@ pub use queries::{
     instance_profiles_with_action, latest_org_run_id, list_account_ids, list_accounts,
     list_snapshots, org_escalation_paths, privilege_escalation_paths, resolve_org_context,
     resolve_scopes, snapshot_record, snapshots_for_org_run, stitch_cross_account, who_can,
-    AccountRecord, AssociatedEntity, Caveat, CaveatCode, EntityRef, EscalationPath, Hop,
-    OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff, PermissionRecord, PermissionRow,
-    QueryContext, ResolvedScope, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+    AccountRecord, AssociatedEntity, Caveat, CaveatCode, EntityRef, EscalationPath, Holder, Hop,
+    InstanceProfileRef, OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff,
+    PermissionRecord, PermissionRow, QueryContext, ResolvedScope, ScopeSelector, SnapshotRecord,
+    TrustPrincipal, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };

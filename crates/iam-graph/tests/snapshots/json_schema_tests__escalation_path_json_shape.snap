@@ -1,5 +1,6 @@
 ---
 source: crates/iam-graph/tests/json_schema_tests.rs
+assertion_line: 70
 expression: value
 ---
 {
@@ -15,5 +16,19 @@ expression: value
       "entity_type": "Role"
     }
   ],
-  "conditional": false
+  "conditional": false,
+  "holders": [],
+  "instance_profiles": [
+    {
+      "arn": "arn:aws:iam::123456789012:instance-profile/VictimProfile",
+      "name": "VictimProfile"
+    }
+  ],
+  "trust_principals": [
+    {
+      "id": "arn:aws:iam::123456789012:user/Attacker",
+      "principal_type": "AWS",
+      "conditional": false
+    }
+  ]
 }

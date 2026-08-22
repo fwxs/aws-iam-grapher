@@ -3,6 +3,7 @@ pub mod analysis;
 pub mod caveats;
 pub mod context;
 pub mod escalation;
+pub mod escalation_enrichment;
 pub mod org_escalation;
 pub mod scope;
 pub mod snapshots;
@@ -51,6 +52,7 @@ pub use analysis::{
 pub use caveats::{Caveat, CaveatCode};
 pub use context::{OrgQueryContext, QueryContext};
 pub use escalation::{privilege_escalation_paths, EscalationPath, Hop};
+pub use escalation_enrichment::{Holder, InstanceProfileRef, TrustPrincipal};
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
 pub use scope::{resolve_org_context, resolve_scopes, ResolvedScope, ScopeSelector};
 pub use snapshots::{

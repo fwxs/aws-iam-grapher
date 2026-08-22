@@ -1,6 +1,10 @@
 use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
+use crate::queries::escalation_enrichment::{
+    fetch_holders, fetch_instance_profiles, fetch_trust_principals, Holder, InstanceProfileRef,
+    TrustPrincipal,
+};
 use crate::queries::render_hop_bound;
 use neo4rs::Graph;
 use std::collections::HashMap;
@@ -26,6 +30,15 @@ pub struct EscalationPath {
     /// `true` if any `CAN_ASSUME_ROLE` hop on `path` carries an unevaluated
     /// runtime trust condition — the path may not hold at runtime.
     pub conditional: bool,
+    /// Users who inherit `risky_actions` via `MEMBER_OF`, populated only when
+    /// `entity_type == "Group"`.
+    pub holders: Vec<Holder>,
+    /// InstanceProfiles that wrap this entity via `CONTAINS_ROLE`, populated only when
+    /// `entity_type == "Role"`.
+    pub instance_profiles: Vec<InstanceProfileRef>,
+    /// Trust-policy principals that can assume this entity via `CAN_ASSUME`, populated only
+    /// when `entity_type == "Role"`.
+    pub trust_principals: Vec<TrustPrincipal>,
 }
 
 const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
@@ -90,34 +103,80 @@ pub async fn privilege_escalation_paths(
         }
     }
 
-    let mut results = Vec::new();
+    let mut kept: Vec<(String, Candidate, Vec<String>)> = Vec::new();
     for (arn, candidate) in by_arn {
         // Wildcard- and group-Deny-aware suppression: drop any allowed action covered by
         // a Deny (exact, wildcard, or full-admin) on the terminal entity's own or a member
         // group's policies.
         let risky_actions: Vec<String> = candidate
             .allowed_actions
-            .into_iter()
+            .iter()
             .filter(|action| {
                 !candidate
                     .deny_actions
                     .iter()
                     .any(|deny| iam_expander::glob_match(deny, action))
             })
+            .cloned()
             .collect();
 
         if risky_actions.is_empty() {
             continue;
         }
 
-        results.push(EscalationPath {
-            arn,
-            name: candidate.name,
-            entity_type: candidate.entity_type,
-            risky_actions,
-            path: candidate.path,
-            conditional: candidate.conditional,
-        });
+        kept.push((arn, candidate, risky_actions));
     }
+
+    // Enrichment is keyed on the terminal entity (the actual permission holder, the last
+    // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
+    // *reach* the risky action, while `path.last()` is the entity that holds it directly.
+    let group_terminals: Vec<String> = kept
+        .iter()
+        .filter(|(_, c, _)| c.path.last().is_some_and(|h| h.entity_type == "Group"))
+        .map(|(_, c, _)| c.path.last().expect("checked above").arn.clone())
+        .collect();
+    let role_terminals: Vec<String> = kept
+        .iter()
+        .filter(|(_, c, _)| c.path.last().is_some_and(|h| h.entity_type == "Role"))
+        .map(|(_, c, _)| c.path.last().expect("checked above").arn.clone())
+        .collect();
+
+    let holders_by_terminal = fetch_holders(graph, ctx, &group_terminals).await?;
+    let profiles_by_terminal = fetch_instance_profiles(graph, ctx, &role_terminals).await?;
+    let trust_by_terminal = fetch_trust_principals(graph, ctx, &role_terminals).await?;
+
+    let results = kept
+        .into_iter()
+        .map(|(arn, candidate, risky_actions)| {
+            let terminal_arn = candidate
+                .path
+                .last()
+                .map(|h| h.arn.as_str())
+                .unwrap_or(arn.as_str());
+            let holders = holders_by_terminal
+                .get(terminal_arn)
+                .cloned()
+                .unwrap_or_default();
+            let instance_profiles = profiles_by_terminal
+                .get(terminal_arn)
+                .cloned()
+                .unwrap_or_default();
+            let trust_principals = trust_by_terminal
+                .get(terminal_arn)
+                .cloned()
+                .unwrap_or_default();
+            EscalationPath {
+                arn,
+                name: candidate.name,
+                entity_type: candidate.entity_type,
+                risky_actions,
+                path: candidate.path,
+                conditional: candidate.conditional,
+                holders,
+                instance_profiles,
+                trust_principals,
+            }
+        })
+        .collect();
     Ok(results)
 }

@@ -33,6 +33,10 @@ struct EscalationNode<'a> {
     /// `Some` for org-wide paths, labeled `[account_id]`; `None` for single-account paths.
     account_id: Option<&'a str>,
     risky_actions: Option<String>,
+    /// Enrichment count summary (holders/instance_profiles/trust_principals) — a property of
+    /// the terminal entity itself, not of any one path, so it's set once rather than merged
+    /// like `risky_actions`.
+    enrichment: Option<String>,
 }
 
 /// Shared renderer behind [`escalation_paths_to_dot`] and [`org_escalation_paths_to_dot`]:
@@ -66,11 +70,15 @@ fn render_escalation_dot(
         }
         let mut attrs = format!("label={}", quoted(&label));
         if let Some(actions) = &node.risky_actions {
+            let tooltip = match &node.enrichment {
+                Some(enrichment) => format!("{actions}\\n{enrichment}"),
+                None => actions.clone(),
+            };
             write!(
                 attrs,
                 ", fillcolor={}, tooltip={}",
                 quoted(RISK_FILL),
-                quoted(actions)
+                quoted(&tooltip)
             )
             .unwrap();
         }
@@ -92,6 +100,14 @@ fn merge_risky_actions(existing: Option<String>, actions: String) -> Option<Stri
     }
 }
 
+/// Format the enrichment count summary appended to a terminal node's tooltip — counts only
+/// (holders/instance_profiles/trust_principals), full detail is available via `--output json`.
+fn enrichment_summary(holders: usize, instance_profiles: usize, trust_principals: usize) -> String {
+    format!(
+        "holders: {holders}, instance_profiles: {instance_profiles}, trust_principals: {trust_principals}"
+    )
+}
+
 /// Render privilege-escalation paths as a DOT digraph. See [`render_escalation_dot`].
 pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> String {
     let mut nodes: BTreeMap<&str, EscalationNode> = BTreeMap::new();
@@ -104,10 +120,18 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
                 entity_type: &hop.entity_type,
                 account_id: None,
                 risky_actions: None,
+                enrichment: None,
             });
             if hop.arn == terminal_arn {
                 node.risky_actions =
                     merge_risky_actions(node.risky_actions.take(), p.risky_actions.join(", "));
+                node.enrichment.get_or_insert_with(|| {
+                    enrichment_summary(
+                        p.holders.len(),
+                        p.instance_profiles.len(),
+                        p.trust_principals.len(),
+                    )
+                });
             }
         }
         for window in p.path.windows(2) {
@@ -132,10 +156,18 @@ pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]
                 entity_type: &hop.entity_type,
                 account_id: Some(&hop.account_id),
                 risky_actions: None,
+                enrichment: None,
             });
             if hop.arn == terminal_arn {
                 node.risky_actions =
                     merge_risky_actions(node.risky_actions.take(), p.risky_actions.join(", "));
+                node.enrichment.get_or_insert_with(|| {
+                    enrichment_summary(
+                        p.holders.len(),
+                        p.instance_profiles.len(),
+                        p.trust_principals.len(),
+                    )
+                });
             }
         }
         for window in p.path.windows(2) {
@@ -253,6 +285,9 @@ mod tests {
             risky_actions: vec!["iam:PutUserPolicy".to_string()],
             path: vec![hop("arn:aws:iam::111111111111:user/alice", "User")],
             conditional: false,
+            holders: vec![],
+            instance_profiles: vec![],
+            trust_principals: vec![],
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -275,6 +310,9 @@ mod tests {
                 hop("arn:aws:iam::111111111111:role/C", "Role"),
             ],
             conditional: true,
+            holders: vec![],
+            instance_profiles: vec![],
+            trust_principals: vec![],
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -299,6 +337,9 @@ mod tests {
                     hop("arn:aws:iam::111111111111:role/C", "Role"),
                 ],
                 conditional: false,
+                holders: vec![],
+                instance_profiles: vec![],
+                trust_principals: vec![],
             },
             EscalationPath {
                 arn: "arn:aws:iam::111111111111:role/B".to_string(),
@@ -310,6 +351,9 @@ mod tests {
                     hop("arn:aws:iam::111111111111:role/C", "Role"),
                 ],
                 conditional: false,
+                holders: vec![],
+                instance_profiles: vec![],
+                trust_principals: vec![],
             },
         ];
 
@@ -390,14 +434,19 @@ mod tests {
                     arn: "arn:aws:iam::111111111111:role/A".to_string(),
                     entity_type: "Role".to_string(),
                     account_id: "111111111111".to_string(),
+                    snapshot_id: "snap-1".to_string(),
                 },
                 iam_graph::OrgHop {
                     arn: "arn:aws:iam::222222222222:role/B".to_string(),
                     entity_type: "Role".to_string(),
                     account_id: "222222222222".to_string(),
+                    snapshot_id: "snap-2".to_string(),
                 },
             ],
             conditional: false,
+            holders: vec![],
+            instance_profiles: vec![],
+            trust_principals: vec![],
         }];
 
         let dot = org_escalation_paths_to_dot("org_escalation", &paths);
