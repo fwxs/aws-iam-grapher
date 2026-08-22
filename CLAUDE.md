@@ -25,6 +25,10 @@ DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock" \
 
 All four commands must pass before any task is considered complete.
 
+## Release Process
+
+Every `release/<version>` branch must add a new entry to `CHANGELOG.md` for that version before merging.
+
 ## Architecture
 
 Five crates in a Cargo workspace with a strict dependency direction:
