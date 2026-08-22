@@ -7,8 +7,10 @@ the ingester materializes. Which UNION arms produce rows depends on the target's
 
 - **Policy** → entities with `HAS_ATTACHED_POLICY`/`HAS_INLINE_POLICY` into it
 - **Role** → entities with `CAN_ASSUME_ROLE` into it, `InstanceProfile`s via `CONTAINS_ROLE`,
-  plus the role's own attached/inline policies and `BOUNDED_BY` boundary
-- **Group** → member `User`s via `MEMBER_OF`, plus the group's own attached/inline policies
+  its own attached/inline policies (shared UNION arm with Group, below), and `BOUNDED_BY`
+  boundary
+- **Group** → member `User`s via `MEMBER_OF`, plus its own attached/inline policies (same
+  shared arm as Role)
 
 No permission-level (`GRANTS`) traversal — this is a structural "what's linked to this entity"
 query, not a "what can this entity do" query (see [`entity_permissions`](entity-permissions.md)
@@ -47,7 +49,7 @@ RETURN profile.arn AS arn, profile.name AS name, labels(profile)[0] AS entity_ty
 UNION
 
 MATCH (e {uid: $uid})
-WHERE e:Role
+WHERE e:Role OR e:Group
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY]->(pol)
 RETURN pol.arn AS arn, pol.name AS name, labels(pol)[0] AS entity_type,
        'HAS_ATTACHED_POLICY_OR_INLINE_OWN' AS relationship
@@ -67,14 +69,6 @@ WHERE e:Group
 MATCH (member:User)-[:MEMBER_OF]->(e)
 RETURN member.arn AS arn, member.name AS name, labels(member)[0] AS entity_type,
        'MEMBER_OF' AS relationship
-
-UNION
-
-MATCH (e {uid: $uid})
-WHERE e:Group
-MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY]->(pol)
-RETURN pol.arn AS arn, pol.name AS name, labels(pol)[0] AS entity_type,
-       'HAS_ATTACHED_POLICY_OR_INLINE_OWN' AS relationship
 ```
 
 ## Rust binding

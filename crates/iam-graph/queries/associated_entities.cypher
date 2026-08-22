@@ -5,8 +5,10 @@
 //   dispatched in Rust, since a node's label set is already available in Cypher:
 //     Policy  -> entities with HAS_ATTACHED_POLICY/HAS_INLINE_POLICY into it
 //     Role    -> entities with CAN_ASSUME_ROLE into it, InstanceProfiles via CONTAINS_ROLE,
-//                plus the role's own attached/inline policies and BOUNDED_BY boundary
-//     Group   -> member Users via MEMBER_OF, plus the group's own attached/inline policies
+//                its own attached/inline policies (shared arm with Group, below), and
+//                BOUNDED_BY boundary
+//     Group   -> member Users via MEMBER_OF, plus its own attached/inline policies (same
+//                shared arm as Role, guarded by `e:Role OR e:Group`)
 //   No permission-level (GRANTS) traversal — this is a structural "what's linked to this
 //   entity" query, not a "what can this entity do" query (see entity_permissions.cypher for
 //   that). See limitations.md.
@@ -38,7 +40,7 @@ RETURN profile.arn AS arn, profile.name AS name, labels(profile)[0] AS entity_ty
 UNION
 
 MATCH (e {uid: $uid})
-WHERE e:Role
+WHERE e:Role OR e:Group
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY]->(pol)
 RETURN pol.arn AS arn, pol.name AS name, labels(pol)[0] AS entity_type,
        'HAS_ATTACHED_POLICY_OR_INLINE_OWN' AS relationship
@@ -58,11 +60,3 @@ WHERE e:Group
 MATCH (member:User)-[:MEMBER_OF]->(e)
 RETURN member.arn AS arn, member.name AS name, labels(member)[0] AS entity_type,
        'MEMBER_OF' AS relationship
-
-UNION
-
-MATCH (e {uid: $uid})
-WHERE e:Group
-MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY]->(pol)
-RETURN pol.arn AS arn, pol.name AS name, labels(pol)[0] AS entity_type,
-       'HAS_ATTACHED_POLICY_OR_INLINE_OWN' AS relationship
