@@ -7,7 +7,7 @@ use crate::queries::escalation_enrichment::{
 };
 use crate::queries::render_hop_bound;
 use neo4rs::Graph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One hop in an escalation path — the ARN and entity-type label of a node on the chain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -130,20 +130,30 @@ pub async fn privilege_escalation_paths(
     // Enrichment is keyed on the terminal entity (the actual permission holder, the last
     // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
     // *reach* the risky action, while `path.last()` is the entity that holds it directly.
-    let group_terminals: Vec<String> = kept
+    // Multiple distinct start entities can share the same terminal via different chains, so
+    // dedupe via HashSet before UNWINDing — otherwise the enrichment query re-executes its
+    // MATCH once per duplicate and every path sharing that terminal reports doubled results.
+    let terminal_hops: Vec<&Hop> = kept.iter().filter_map(|(_, c, _)| c.path.last()).collect();
+    let group_terminals: Vec<String> = terminal_hops
         .iter()
-        .filter(|(_, c, _)| c.path.last().is_some_and(|h| h.entity_type == "Group"))
-        .map(|(_, c, _)| c.path.last().expect("checked above").arn.clone())
+        .filter(|h| h.entity_type == "Group")
+        .map(|h| h.arn.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
-    let role_terminals: Vec<String> = kept
+    let role_terminals: Vec<String> = terminal_hops
         .iter()
-        .filter(|(_, c, _)| c.path.last().is_some_and(|h| h.entity_type == "Role"))
-        .map(|(_, c, _)| c.path.last().expect("checked above").arn.clone())
+        .filter(|h| h.entity_type == "Role")
+        .map(|h| h.arn.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
 
-    let holders_by_terminal = fetch_holders(graph, ctx, &group_terminals).await?;
-    let profiles_by_terminal = fetch_instance_profiles(graph, ctx, &role_terminals).await?;
-    let trust_by_terminal = fetch_trust_principals(graph, ctx, &role_terminals).await?;
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+        fetch_holders(graph, ctx, &group_terminals),
+        fetch_instance_profiles(graph, ctx, &role_terminals),
+        fetch_trust_principals(graph, ctx, &role_terminals),
+    )?;
 
     let results = kept
         .into_iter()

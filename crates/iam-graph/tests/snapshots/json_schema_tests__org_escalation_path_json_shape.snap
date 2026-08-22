@@ -1,6 +1,5 @@
 ---
 source: crates/iam-graph/tests/json_schema_tests.rs
-assertion_line: 97
 expression: value
 ---
 {

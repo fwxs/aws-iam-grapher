@@ -7,7 +7,7 @@ use crate::queries::escalation_enrichment::{
 };
 use crate::queries::render_hop_bound;
 use neo4rs::Graph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// One hop in a cross-account escalation path — includes `account_id` for account labeling.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -128,29 +128,37 @@ pub async fn org_escalation_paths(
     // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
     // *reach* the risky action, while `path.last()` is the entity that holds it directly.
     // Org terminals may span different account snapshots, so each carries its own
-    // `snapshot_id` from the hop rather than a single bound `QueryContext`.
-    let group_terminals: Vec<OrgTerminal> = kept
+    // `snapshot_id` from the hop rather than a single bound `QueryContext`. Multiple distinct
+    // start entities can share the same terminal via different chains, so dedupe via HashSet
+    // before UNWINDing — otherwise the enrichment query re-executes its MATCH once per
+    // duplicate and every path sharing that terminal reports doubled results.
+    let terminal_hops: Vec<&OrgHop> = kept.iter().filter_map(|(_, c, _)| c.path.last()).collect();
+    let group_terminals: Vec<OrgTerminal> = terminal_hops
         .iter()
-        .filter_map(|(_, c, _)| c.path.last())
         .filter(|h| h.entity_type == "Group")
         .map(|h| OrgTerminal {
             arn: h.arn.clone(),
             snapshot_id: h.snapshot_id.clone(),
         })
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
-    let role_terminals: Vec<OrgTerminal> = kept
+    let role_terminals: Vec<OrgTerminal> = terminal_hops
         .iter()
-        .filter_map(|(_, c, _)| c.path.last())
         .filter(|h| h.entity_type == "Role")
         .map(|h| OrgTerminal {
             arn: h.arn.clone(),
             snapshot_id: h.snapshot_id.clone(),
         })
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
 
-    let holders_by_terminal = fetch_org_holders(graph, &group_terminals).await?;
-    let profiles_by_terminal = fetch_org_instance_profiles(graph, &role_terminals).await?;
-    let trust_by_terminal = fetch_org_trust_principals(graph, &role_terminals).await?;
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+        fetch_org_holders(graph, &group_terminals),
+        fetch_org_instance_profiles(graph, &role_terminals),
+        fetch_org_trust_principals(graph, &role_terminals),
+    )?;
 
     let results = kept
         .into_iter()
