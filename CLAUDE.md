@@ -29,6 +29,13 @@ All four commands must pass before any task is considered complete.
 
 Every `release/<version>` branch must add a new entry to `CHANGELOG.md` for that version before merging.
 
+After pushing changes, suggest whether they warrant a new release version, per [Semantic Versioning](https://semver.org/):
+- **MAJOR** — breaking change (CLI flag/subcommand removed or renamed, output format changed incompatibly, public API of a library crate broken).
+- **MINOR** — new backward-compatible functionality (new subcommand, new flag, new query, new output format).
+- **PATCH** — backward-compatible bug fix, docs, or internal refactor with no behavior change.
+
+State the suggested bump and one-line reasoning; do not create the `release/<version>` branch or bump versions without explicit user confirmation.
+
 ## Architecture
 
 Five crates in a Cargo workspace with a strict dependency direction:
