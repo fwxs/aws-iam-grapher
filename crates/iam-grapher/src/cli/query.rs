@@ -5,11 +5,12 @@ use anyhow::Context as _;
 use clap::{Args, Subcommand};
 use iam_collector::account_id_from_arn;
 use iam_graph::{
-    delete_snapshot, diff_permissions, entity_permissions, instance_profiles_with_action,
-    list_account_ids, list_accounts, list_snapshots, org_escalation_paths,
-    privilege_escalation_paths, resolve_org_context, resolve_scopes, snapshot_record,
-    snapshots_for_org_run, who_can, Caveat, EntityRef, EscalationPath, GraphClient, GraphError,
-    PermissionRow, QueryContext, ResolvedScope, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
+    associated_entities, delete_snapshot, diff_permissions, entity_permissions,
+    instance_profiles_with_action, list_account_ids, list_accounts, list_snapshots,
+    org_escalation_paths, privilege_escalation_paths, resolve_org_context, resolve_scopes,
+    snapshot_record, snapshots_for_org_run, who_can, AssociatedEntity, Caveat, EntityRef,
+    EscalationPath, GraphClient, GraphError, PermissionRow, QueryContext, ResolvedScope,
+    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -194,6 +195,17 @@ fn entity_perm_rows(perms: &[PermissionRow]) -> RenderSpec {
     }
 }
 
+fn associated_entities_rows(results: &[AssociatedEntity]) -> RenderSpec {
+    let rows = results
+        .iter()
+        .map(|e| vec![e.entity_type.clone(), e.arn.clone(), e.relationship.clone()])
+        .collect();
+    RenderSpec {
+        headers: &["TYPE", "ARN", "RELATIONSHIP"],
+        rows,
+    }
+}
+
 fn instance_profile_rows(results: &[EntityRef]) -> RenderSpec {
     let rows = results
         .iter()
@@ -219,12 +231,23 @@ fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
                 p.arn.clone(),
                 path_str,
                 p.risky_actions.join(", "),
+                p.holders.len().to_string(),
+                p.instance_profiles.len().to_string(),
+                p.trust_principals.len().to_string(),
                 if p.conditional { "yes" } else { "no" }.to_string(),
             ]
         })
         .collect();
     RenderSpec {
-        headers: &["ENTITY", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+        headers: &[
+            "ENTITY",
+            "PATH",
+            "RISKY ACTIONS",
+            "HOLDERS",
+            "INSTANCE PROFILES",
+            "TRUST PRINCIPALS",
+            "CONDITIONAL",
+        ],
         rows,
     }
 }
@@ -478,6 +501,11 @@ enum QueryCommand {
     /// account, so this command never fans out across accounts. An explicit
     /// `--account-id` that disagrees with the ARN's account is an error.
     EntityPerms { arn: String },
+    /// Entities structurally linked to a Policy/Role/Group ARN: attached/inline policy
+    /// holders, role assumers, containing instance profiles, or group members, depending on
+    /// the target's type. The account is inferred from the ARN's own account segment, same
+    /// as `entity-perms` — this command never fans out across accounts either.
+    AssociatedEntities { arn: String },
     /// Instance profiles whose roles grant the given IAM action.
     InstanceProfilesWith { action: String },
     /// Entities with privilege-escalation permissions, directly or via a transitive
@@ -527,6 +555,7 @@ impl QueryCommand {
             | QueryCommand::PrivilegeEscalation { .. }
             | QueryCommand::OrgEscalation { .. } => true,
             QueryCommand::EntityPerms { .. }
+            | QueryCommand::AssociatedEntities { .. }
             | QueryCommand::InstanceProfilesWith { .. }
             | QueryCommand::ListSnapshots
             | QueryCommand::ListAccounts
@@ -699,6 +728,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                         ep.account_id.clone(),
                         path_str,
                         ep.risky_actions.join(", "),
+                        ep.holders.len().to_string(),
+                        ep.instance_profiles.len().to_string(),
+                        ep.trust_principals.len().to_string(),
                         if ep.conditional { "yes" } else { "no" }.to_string(),
                     ]
                 })
@@ -706,7 +738,16 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             print!(
                 "{}",
                 table::format_table(
-                    &["ENTITY", "ACCOUNT", "PATH", "RISKY ACTIONS", "CONDITIONAL"],
+                    &[
+                        "ENTITY",
+                        "ACCOUNT",
+                        "PATH",
+                        "RISKY ACTIONS",
+                        "HOLDERS",
+                        "INSTANCE PROFILES",
+                        "TRUST PRINCIPALS",
+                        "CONDITIONAL"
+                    ],
                     &rows
                 )
             );
@@ -866,6 +907,47 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                 None,
                 |_sc| format!("Permissions for {arn}"),
                 "No permissions found.",
+            )
+            .await?;
+        }
+
+        QueryCommand::AssociatedEntities { arn } => {
+            let arn_account = entity_perms_account(&arn, args.account_id.as_deref())?;
+
+            let selector = match args.snapshot_id.as_deref() {
+                Some(snapshot_id) => ScopeSelector::snapshot(snapshot_id, Some(arn_account)),
+                None => ScopeSelector::account(arn_account),
+            };
+            let scopes = resolve_scopes(client.inner(), selector).await?;
+
+            run_scoped(
+                ScopedOutput {
+                    format: &output,
+                    file: args.output.output_file.as_deref(),
+                    // Always single: an ARN names exactly one account, so
+                    // associated-entities never fans out, same as entity-perms (see
+                    // docs/limitations.md and issue #151).
+                    single: true,
+                    // associated_entities() is a pure structural relationship traversal —
+                    // no Deny subtraction, no NotAction, no permission-level GRANTS logic —
+                    // so neither caveat applies; see
+                    // crates/iam-graph/src/queries/analysis.rs.
+                    caveats: Vec::new(),
+                },
+                scopes,
+                |ctx| {
+                    let arn = arn.clone();
+                    let client = &client;
+                    async move {
+                        associated_entities(client.inner(), &ctx, &arn)
+                            .await
+                            .context("associated-entities query failed")
+                    }
+                },
+                |results: &Vec<AssociatedEntity>| associated_entities_rows(results),
+                None,
+                |_sc| format!("Entities associated with {arn}"),
+                "No associated entities found.",
             )
             .await?;
         }
@@ -1066,6 +1148,10 @@ mod tests {
         assert!(!QueryCommand::ListAccounts.supports_graphviz());
         assert!(!QueryCommand::EntityPerms {
             arn: "arn:aws:iam::111111111111:user/alice".to_string(),
+        }
+        .supports_graphviz());
+        assert!(!QueryCommand::AssociatedEntities {
+            arn: "arn:aws:iam::111111111111:policy/example".to_string(),
         }
         .supports_graphviz());
     }

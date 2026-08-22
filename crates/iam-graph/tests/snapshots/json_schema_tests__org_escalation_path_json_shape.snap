@@ -14,8 +14,18 @@ expression: value
     {
       "arn": "arn:aws:iam::210987654321:role/Victim",
       "entity_type": "Role",
-      "account_id": "210987654321"
+      "account_id": "210987654321",
+      "snapshot_id": "20260101T000000Z"
     }
   ],
-  "conditional": true
+  "conditional": true,
+  "holders": [
+    {
+      "arn": "arn:aws:iam::210987654321:user/Member",
+      "name": "Member",
+      "entity_type": "User"
+    }
+  ],
+  "instance_profiles": [],
+  "trust_principals": []
 }

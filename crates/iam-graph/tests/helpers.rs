@@ -1317,3 +1317,232 @@ pub fn data_with_bounded_role(account_id: &str, boundary_action: &str) -> (Colle
     };
     (data, role_arn)
 }
+
+/// Build a Group with a risky permission (`iam:PutUserPolicy`) directly attached, plus one
+/// User (`erin`) who is a member. Used to verify `privilege_escalation_paths`'s `holders`
+/// enrichment surfaces group members for a `Group` terminal (issue #188).
+pub fn data_with_escalation_group_holders(account_id: &str) -> (CollectedData, String) {
+    use iam_models::{
+        Effect, IamGroup, IamPolicy, IamUser, PolicyDocument, PolicyRef, PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let policy_arn = format!("arn:aws:iam::{}:policy/RiskyGroupPolicy", account_id);
+    let group_arn = format!("arn:aws:iam::{}:group/RiskyGroup", account_id);
+    let erin_arn = format!("arn:aws:iam::{}:user/erin", account_id);
+
+    let risky_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec!["iam:PutUserPolicy".to_string()],
+            not_action: vec![],
+            resource: vec!["*".to_string()],
+            not_resource: vec![],
+            principal: None,
+            not_principal: None,
+            condition: None,
+        }],
+    };
+
+    let managed_policy = IamPolicy {
+        arn: policy_arn.clone(),
+        policy_id: "ANPARISKYGROUP".to_string(),
+        policy_name: "RiskyGroupPolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 1,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(risky_doc),
+        tags: HashMap::new(),
+    };
+
+    let group = IamGroup {
+        arn: group_arn.clone(),
+        group_id: "AGPARISKYGROUP".to_string(),
+        group_name: "RiskyGroup".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![PolicyRef {
+            policy_arn: policy_arn.clone(),
+            policy_name: "RiskyGroupPolicy".to_string(),
+        }],
+        inline_policies: vec![],
+    };
+
+    let erin = IamUser {
+        arn: erin_arn,
+        user_id: "AIDAERIN".to_string(),
+        user_name: "erin".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![],
+        inline_policies: vec![],
+        group_list: vec!["RiskyGroup".to_string()],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        policies: vec![managed_policy],
+        groups: vec![group],
+        users: vec![erin],
+        ..Default::default()
+    };
+    (data, group_arn)
+}
+
+/// Build a Role with a risky permission (`iam:PassRole`) directly attached, wrapped by one
+/// InstanceProfile. Used to verify `privilege_escalation_paths`'s `instance_profiles`
+/// enrichment surfaces the wrapping profile for a `Role` terminal (issue #188).
+pub fn data_with_escalation_instance_profile(account_id: &str) -> (CollectedData, String) {
+    use iam_models::{
+        Effect, IamInlinePolicy, IamInstanceProfile, IamRole, PolicyDocument, PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/RiskyProfileRole", account_id);
+    let profile_arn = format!("arn:aws:iam::{}:instance-profile/RiskyProfile", account_id);
+
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROARISKYPROFILE".to_string(),
+        role_name: "RiskyProfileRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: None,
+        attached_managed_policies: vec![],
+        inline_policies: vec![risky_inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    let profile = IamInstanceProfile {
+        arn: profile_arn.clone(),
+        instance_profile_id: "AIPRISKYPROFILE".to_string(),
+        instance_profile_name: "RiskyProfile".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        roles: vec![role.clone()],
+        is_aws_managed: false,
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        instance_profiles: vec![profile],
+        ..Default::default()
+    };
+    (data, role_arn)
+}
+
+/// Build a Role with a risky permission (`iam:PassRole`) directly attached, whose trust
+/// policy grants `sts:AssumeRole` to the `ec2.amazonaws.com` service principal (not an
+/// in-graph Role/User ARN). Used to verify `privilege_escalation_paths`'s `trust_principals`
+/// enrichment surfaces the full trust-policy principal set — including `Service` principals
+/// that never materialize a `CAN_ASSUME_ROLE` entity bridge — for a `Role` terminal
+/// (issue #188).
+pub fn data_with_escalation_service_trust_principal(account_id: &str) -> (CollectedData, String) {
+    use iam_models::{Effect, IamInlinePolicy, IamRole, PolicyDocument, PolicyStatement};
+    use std::collections::HashMap;
+
+    let role_arn = format!("arn:aws:iam::{}:role/RiskyServiceTrustRole", account_id);
+
+    let risky_inline = IamInlinePolicy {
+        policy_name: "RiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PassRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let assume_doc = PolicyDocument {
+        version: Some("2012-10-17".to_string()),
+        statement: vec![PolicyStatement {
+            sid: None,
+            effect: Effect::Allow,
+            action: vec!["sts:AssumeRole".to_string()],
+            not_action: vec![],
+            resource: vec![],
+            not_resource: vec![],
+            principal: Some(serde_json::json!({"Service": "ec2.amazonaws.com"})),
+            not_principal: None,
+            condition: None,
+        }],
+    };
+
+    let role = IamRole {
+        arn: role_arn.clone(),
+        role_id: "AROARISKYSVCTRUST".to_string(),
+        role_name: "RiskyServiceTrustRole".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        assume_role_policy_document: Some(assume_doc),
+        attached_managed_policies: vec![],
+        inline_policies: vec![risky_inline],
+        permissions_boundary: None,
+        role_last_used: None,
+        description: None,
+        max_session_duration: None,
+        is_aws_managed: false,
+        tags: HashMap::new(),
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![role],
+        ..Default::default()
+    };
+    (data, role_arn)
+}

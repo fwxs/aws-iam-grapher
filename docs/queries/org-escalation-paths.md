@@ -73,24 +73,63 @@ WITH start, p, terminal,
 RETURN start.arn AS arn, start.name AS name, labels(start)[0] AS entity_type,
        start.account_id AS account_id,
        allowed_actions, own_deny_actions + group_deny_actions AS deny_actions,
-       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0], account_id: n.account_id}] AS path,
+       [n IN nodes(p) | {arn: n.arn, entity_type: labels(n)[0], account_id: n.account_id,
+                          snapshot_id: n.snapshot_id}] AS path,
        any(rel IN relationships(p) WHERE rel.conditional) AS conditional
 ```
+
+After the path-finding query above and its Rust-side dedup/risky-action filtering, three
+further batched enrichment queries run once per call, keyed on `(arn, snapshot_id)` pairs for
+the deduped set of terminal (permission-holding) hops — `path.last()`, not the top-level
+`arn`. Org terminals may belong to different account snapshots within the same org run, so
+each pair carries its own `snapshot_id` rather than one bound parameter:
+
+```cypher
+-- org_escalation_holders.cypher (Group terminals only)
+UNWIND $pairs AS pair
+MATCH (g:Group {arn: pair.arn, snapshot_id: pair.snapshot_id})
+MATCH (u:User)-[:MEMBER_OF]->(g)
+RETURN pair.arn AS terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
+
+-- org_escalation_instance_profiles.cypher (Role terminals only)
+UNWIND $pairs AS pair
+MATCH (r:Role {arn: pair.arn, snapshot_id: pair.snapshot_id})
+MATCH (ip:InstanceProfile)-[:CONTAINS_ROLE]->(r)
+RETURN pair.arn AS terminal_arn, ip.arn AS arn, ip.name AS name
+
+-- org_escalation_trust_principals.cypher (Role terminals only)
+UNWIND $pairs AS pair
+MATCH (r:Role {arn: pair.arn, snapshot_id: pair.snapshot_id})
+MATCH (pr:Principal)-[rel:CAN_ASSUME]->(r)
+RETURN pair.arn AS terminal_arn, pr.id AS id, pr.type AS principal_type, rel.conditional AS conditional
+```
+
+Each is skipped entirely (no round trip) when its terminal batch is empty.
 
 ## Rust binding
 
 `crates/iam-graph/src/queries/org_escalation.rs` — `ORG_ESCALATION_QUERY`, used in
 `org_escalation_paths(graph: &Graph, ctx: &OrgQueryContext, max_hops: u32) -> Result<Vec<OrgEscalationPath>, GraphError>`.
 Uses `render_hop_bound(ORG_ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}`; the only
-real bound parameter is `$org_run_id`.
+real bound parameter is `$org_run_id`. Enrichment queries live in
+`crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_org_holders`,
+`fetch_org_instance_profiles`, `fetch_org_trust_principals`), shared with `escalation.rs`.
 
 ## Returns
 
-`Vec<OrgEscalationPath>` where `OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, path: Vec<OrgHop>, conditional }`
-and `OrgHop { arn, entity_type, account_id }` — `OrgHop` carries `account_id` per node so a
-caller can render the cross-account path. Rust post-processing dedupes by arn keeping the
+`Vec<OrgEscalationPath>` where
+`OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, path: Vec<OrgHop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`
+and `OrgHop { arn, entity_type, account_id, snapshot_id }` — `OrgHop` carries `account_id` and
+`snapshot_id` per node so a caller can render the cross-account path and enrichment queries
+can resolve each hop against its own snapshot. Rust post-processing dedupes by arn keeping the
 shortest path, applies wildcard Deny suppression via `iam_expander::glob_match`, and drops
-entities with an empty `risky_actions` set.
+entities with an empty `risky_actions` set — the enrichment queries then run against the
+surviving terminal set.
+
+`holders` is populated only when the terminal's `entity_type == "Group"`;
+`instance_profiles`/`trust_principals` only when `entity_type == "Role"`. All three are empty
+otherwise. These are exact graph traversals, not glob-match approximations, so no new
+`CaveatCode` variant applies to them.
 
 ## Notes
 

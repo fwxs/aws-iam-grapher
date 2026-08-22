@@ -10,9 +10,22 @@
 //! fixed literal values, never through the graph.
 
 use iam_graph::queries::{
-    AccountRecord, Caveat, EntityRef, EscalationPath, Hop, OrgEscalationPath, OrgHop,
-    PermissionDiff, PermissionRecord, PermissionRow, SnapshotRecord,
+    AccountRecord, AssociatedEntity, Caveat, EntityRef, EscalationPath, Holder, Hop,
+    InstanceProfileRef, OrgEscalationPath, OrgHop, PermissionDiff, PermissionRecord, PermissionRow,
+    SnapshotRecord, TrustPrincipal,
 };
+
+#[test]
+fn associated_entity_json_shape() {
+    let value = AssociatedEntity {
+        arn: "arn:aws:iam::123456789012:role/Example".to_string(),
+        name: "Example".to_string(),
+        entity_type: "Role".to_string(),
+        relationship: "CAN_ASSUME".to_string(),
+    };
+
+    insta::assert_json_snapshot!(value);
+}
 
 #[test]
 fn entity_ref_json_shape() {
@@ -54,6 +67,16 @@ fn escalation_path_json_shape() {
             entity_type: "Role".to_string(),
         }],
         conditional: false,
+        holders: vec![],
+        instance_profiles: vec![InstanceProfileRef {
+            arn: "arn:aws:iam::123456789012:instance-profile/VictimProfile".to_string(),
+            name: "VictimProfile".to_string(),
+        }],
+        trust_principals: vec![TrustPrincipal {
+            id: "arn:aws:iam::123456789012:user/Attacker".to_string(),
+            principal_type: "AWS".to_string(),
+            conditional: false,
+        }],
     };
 
     insta::assert_json_snapshot!(value);
@@ -71,8 +94,16 @@ fn org_escalation_path_json_shape() {
             arn: "arn:aws:iam::210987654321:role/Victim".to_string(),
             entity_type: "Role".to_string(),
             account_id: "210987654321".to_string(),
+            snapshot_id: "20260101T000000Z".to_string(),
         }],
         conditional: true,
+        holders: vec![Holder {
+            arn: "arn:aws:iam::210987654321:user/Member".to_string(),
+            name: "Member".to_string(),
+            entity_type: "User".to_string(),
+        }],
+        instance_profiles: vec![],
+        trust_principals: vec![],
     };
 
     insta::assert_json_snapshot!(value);

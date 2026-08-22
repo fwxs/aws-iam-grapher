@@ -112,19 +112,58 @@ RETURN start.arn AS arn, start.name AS name, labels(start)[0] AS entity_type,
        any(rel IN relationships(p) WHERE rel.conditional) AS conditional
 ```
 
+After the path-finding query above and its Rust-side dedup/risky-action filtering, three
+further batched enrichment queries run once per call, keyed on the deduped set of terminal
+(permission-holding) ARNs — `path.last()`, not the top-level `arn` — to avoid inlining
+`OPTIONAL MATCH` clauses into the UNION above and risking a Cartesian blowup on rows later
+discarded by dedup:
+
+```cypher
+-- escalation_holders.cypher (Group terminals only)
+UNWIND $arns AS terminal_arn
+MATCH (g:Group {arn: terminal_arn, account_id: $account_id, snapshot_id: $snapshot_id})
+MATCH (u:User)-[:MEMBER_OF]->(g)
+RETURN terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
+
+-- escalation_instance_profiles.cypher (Role terminals only)
+UNWIND $arns AS terminal_arn
+MATCH (r:Role {arn: terminal_arn, account_id: $account_id, snapshot_id: $snapshot_id})
+MATCH (ip:InstanceProfile)-[:CONTAINS_ROLE]->(r)
+RETURN terminal_arn, ip.arn AS arn, ip.name AS name
+
+-- escalation_trust_principals.cypher (Role terminals only)
+UNWIND $arns AS terminal_arn
+MATCH (r:Role {arn: terminal_arn, account_id: $account_id, snapshot_id: $snapshot_id})
+MATCH (pr:Principal)-[rel:CAN_ASSUME]->(r)
+RETURN terminal_arn, pr.id AS id, pr.type AS principal_type, rel.conditional AS conditional
+```
+
+Each is skipped entirely (no round trip) when its ARN batch is empty.
+
 ## Rust binding
 
 `crates/iam-graph/src/queries/escalation.rs` — `ESCALATION_QUERY`, used in
 `privilege_escalation_paths(graph: &Graph, ctx: &QueryContext, max_hops: u32) -> Result<Vec<EscalationPath>, GraphError>`.
 Uses `render_hop_bound(ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}` before
-execution.
+execution. Enrichment queries live in
+`crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_holders`,
+`fetch_instance_profiles`, `fetch_trust_principals`), shared with `org_escalation.rs`.
 
 ## Returns
 
-`Vec<EscalationPath>` where `EscalationPath { arn, name, entity_type, risky_actions, path: Vec<Hop>, conditional }`
-and `Hop { arn, entity_type }`. Rust post-processing dedupes by arn (shortest path wins),
-applies wildcard-aware Deny suppression via `iam_expander::glob_match`, and drops entities
-with an empty `risky_actions` set.
+`Vec<EscalationPath>` where
+`EscalationPath { arn, name, entity_type, risky_actions, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`,
+`Hop { arn, entity_type }`, `Holder { arn, name, entity_type }`,
+`InstanceProfileRef { arn, name }`, and `TrustPrincipal { id, principal_type, conditional }`.
+Rust post-processing dedupes by arn (shortest path wins), applies wildcard-aware Deny
+suppression via `iam_expander::glob_match`, and drops entities with an empty `risky_actions`
+set — the enrichment queries then run against the surviving terminal set.
+
+`holders` is populated only when the terminal's `entity_type == "Group"` (member Users via
+`MEMBER_OF`); `instance_profiles` and `trust_principals` only when the terminal's
+`entity_type == "Role"` (via `CONTAINS_ROLE` and `CAN_ASSUME` respectively). All three are
+empty otherwise. These are exact graph traversals, not glob-match approximations, so no new
+`CaveatCode` variant applies to them.
 
 ## Notes
 
