@@ -1,0 +1,6 @@
+- name: combo
+  description: test fixture — 3-action AND group
+  actions:
+    - iam:PutRolePolicy
+    - iam:PutUserPolicy
+    - iam:PassRole

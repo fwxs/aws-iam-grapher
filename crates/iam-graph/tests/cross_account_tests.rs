@@ -188,7 +188,8 @@ async fn two_account_a_to_b_cross_account_escalation() {
     );
 
     let ctx = OrgQueryContext::new(&org_run_id);
-    let paths = org_escalation_paths(client.inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = org_escalation_paths(client.inner(), &ctx, 3, &groups)
         .await
         .expect("org_escalation_paths must succeed");
 
@@ -308,7 +309,8 @@ async fn three_account_a_to_b_to_c_chain() {
         .expect("stitch must succeed");
 
     let ctx = OrgQueryContext::new(&org_run_id);
-    let paths = org_escalation_paths(client.inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = org_escalation_paths(client.inner(), &ctx, 3, &groups)
         .await
         .expect("org_escalation_paths must succeed");
 
@@ -398,7 +400,8 @@ async fn conditional_trust_flags_path_conditional() {
         .expect("stitch must succeed");
 
     let ctx = OrgQueryContext::new(&org_run_id);
-    let paths = org_escalation_paths(client.inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = org_escalation_paths(client.inner(), &ctx, 3, &groups)
         .await
         .expect("org_escalation_paths must succeed");
 
@@ -485,7 +488,8 @@ async fn no_sts_grant_means_no_cross_account_edge() {
     );
 
     let ctx = OrgQueryContext::new(&org_run_id);
-    let paths = org_escalation_paths(client.inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = org_escalation_paths(client.inner(), &ctx, 3, &groups)
         .await
         .expect("org_escalation_paths must succeed");
 

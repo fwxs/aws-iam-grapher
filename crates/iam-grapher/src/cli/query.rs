@@ -10,13 +10,13 @@ use iam_graph::{
     org_escalation_paths, privilege_escalation_paths, resolve_org_context, resolve_scopes,
     snapshot_record, snapshots_for_org_run, who_can, AssociatedEntity, Caveat, EntityRef,
     EscalationPath, GraphClient, GraphError, PermissionRow, QueryContext, ResolvedScope,
-    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
+    RiskyActionGroups, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct QueryArgs {
@@ -231,6 +231,7 @@ fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
                 p.arn.clone(),
                 path_str,
                 p.risky_actions.join(", "),
+                p.matched_paths.join(", "),
                 p.holders.len().to_string(),
                 p.instance_profiles.len().to_string(),
                 p.trust_principals.len().to_string(),
@@ -243,6 +244,7 @@ fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
             "ENTITY",
             "PATH",
             "RISKY ACTIONS",
+            "MATCHED PATHS",
             "HOLDERS",
             "INSTANCE PROFILES",
             "TRUST PRINCIPALS",
@@ -513,6 +515,8 @@ enum QueryCommand {
     PrivilegeEscalation {
         #[command(flatten)]
         hops: MaxHopsArg,
+        #[command(flatten)]
+        risky_actions: RiskyActionsArg,
     },
     /// List available snapshots for the account.
     ListSnapshots,
@@ -530,6 +534,8 @@ enum QueryCommand {
     OrgEscalation {
         #[command(flatten)]
         hops: MaxHopsArg,
+        #[command(flatten)]
+        risky_actions: RiskyActionsArg,
         /// Org collection run id (default: most recent org run).
         #[arg(long)]
         org_run_id: Option<String>,
@@ -543,6 +549,26 @@ enum QueryCommand {
 pub struct MaxHopsArg {
     #[arg(long, default_value_t = DEFAULT_MAX_HOPS)]
     max_hops: u32,
+}
+
+/// Path to the risky-actions config, or fall back to the installed default. Shared by
+/// `PrivilegeEscalation` and `OrgEscalation`.
+#[derive(Args)]
+pub struct RiskyActionsArg {
+    /// Path to a risky-actions YAML config. If omitted, falls back to
+    /// ~/.aws-iam-grapher/config/risky-actions.yaml (fatal if neither is found).
+    #[arg(long)]
+    risky_actions: Option<PathBuf>,
+}
+
+/// Resolve the risky-actions config per the two-step rule: `explicit` (fatal if missing)
+/// else `~/.aws-iam-grapher/config/risky-actions.yaml` (fatal if missing or `$HOME`
+/// unset). Shared by `PrivilegeEscalation` and `OrgEscalation` — the only two commands
+/// that consume a risky-actions config. `config check` resolves its own path separately
+/// since it needs the multi-error `from_yaml` path, not this single-error one.
+fn resolve_risky_actions(explicit: Option<&Path>) -> anyhow::Result<RiskyActionGroups> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    RiskyActionGroups::resolve(explicit, home.as_deref()).map_err(anyhow::Error::from)
 }
 
 impl QueryCommand {
@@ -675,11 +701,13 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
         QueryCommand::OrgEscalation {
             hops: MaxHopsArg { max_hops },
+            risky_actions,
             org_run_id,
         } => {
+            let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let ctx = resolve_org_context(client.inner(), org_run_id).await?;
             let run_id = ctx.org_run_id.clone();
-            let paths = org_escalation_paths(client.inner(), &ctx, max_hops)
+            let paths = org_escalation_paths(client.inner(), &ctx, max_hops, &groups)
                 .await
                 .context("org-escalation query failed")?;
 
@@ -728,6 +756,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                         ep.account_id.clone(),
                         path_str,
                         ep.risky_actions.join(", "),
+                        ep.matched_paths.join(", "),
                         ep.holders.len().to_string(),
                         ep.instance_profiles.len().to_string(),
                         ep.trust_principals.len().to_string(),
@@ -743,6 +772,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                         "ACCOUNT",
                         "PATH",
                         "RISKY ACTIONS",
+                        "MATCHED PATHS",
                         "HOLDERS",
                         "INSTANCE PROFILES",
                         "TRUST PRINCIPALS",
@@ -999,7 +1029,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
         QueryCommand::PrivilegeEscalation {
             hops: MaxHopsArg { max_hops },
+            risky_actions,
         } => {
+            let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let scopes = resolve_command_scopes(
                 &client,
                 args.account_id.as_deref(),
@@ -1016,8 +1048,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                 scopes,
                 |ctx| {
                     let client = &client;
+                    let groups = &groups;
                     async move {
-                        privilege_escalation_paths(client.inner(), &ctx, max_hops)
+                        privilege_escalation_paths(client.inner(), &ctx, max_hops, groups)
                             .await
                             .context("privilege-escalation query failed")
                     }
@@ -1133,10 +1166,16 @@ mod tests {
         .supports_graphviz());
         assert!(QueryCommand::PrivilegeEscalation {
             hops: MaxHopsArg { max_hops: 5 },
+            risky_actions: RiskyActionsArg {
+                risky_actions: None
+            },
         }
         .supports_graphviz());
         assert!(QueryCommand::OrgEscalation {
             hops: MaxHopsArg { max_hops: 5 },
+            risky_actions: RiskyActionsArg {
+                risky_actions: None
+            },
             org_run_id: None,
         }
         .supports_graphviz());

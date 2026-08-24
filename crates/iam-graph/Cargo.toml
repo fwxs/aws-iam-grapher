@@ -11,6 +11,7 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
+serde_norway  = { workspace = true }
 uuid          = { version = "^1.23.3", features = ["v4"] }
 iam-models    = { path = "../iam-models" }
 iam-collector = { path = "../iam-collector" }
@@ -24,4 +25,5 @@ pretty_assertions      = { workspace = true }
 chrono                 = { workspace = true }
 insta                  = { workspace = true }
 neo4rs                 = { workspace = true }
+tempfile               = { workspace = true }
 uuid                   = { version = "^1.23.3", features = ["v4"] }

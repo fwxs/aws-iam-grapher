@@ -1,0 +1,4 @@
+- name: pass-role
+  description: test fixture
+  actions:
+    - iam:PassRole

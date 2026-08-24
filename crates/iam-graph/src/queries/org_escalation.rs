@@ -6,6 +6,7 @@ use crate::queries::escalation_enrichment::{
     InstanceProfileRef, OrgTerminal, TrustPrincipal,
 };
 use crate::queries::render_hop_bound;
+use crate::queries::risky_actions::RiskyActionGroups;
 use neo4rs::Graph;
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +30,9 @@ pub struct OrgEscalationPath {
     pub entity_type: String,
     pub account_id: String,
     pub risky_actions: Vec<String>,
+    /// Names of the risky-action groups this entity's post-Deny `risky_actions` fully
+    /// satisfies (see `RiskyActionGroups::finalize_actions`).
+    pub matched_paths: Vec<String>,
     /// Ordered chain from `arn` to the entity holding `risky_actions`, with per-hop account ids.
     pub path: Vec<OrgHop>,
     /// `true` if any `CAN_ASSUME_ROLE` hop carries an unevaluated runtime trust condition.
@@ -55,11 +59,16 @@ pub async fn org_escalation_paths(
     graph: &Graph,
     ctx: &OrgQueryContext,
     max_hops: u32,
+    groups: &RiskyActionGroups,
 ) -> Result<Vec<OrgEscalationPath>, GraphError> {
     let cypher = render_hop_bound(ORG_ESCALATION_QUERY, max_hops);
 
     let mut stream = graph
-        .execute(neo4rs::query(&cypher).param("org_run_id", ctx.org_run_id.as_str()))
+        .execute(
+            neo4rs::query(&cypher)
+                .param("org_run_id", ctx.org_run_id.as_str())
+                .param("risky_actions", groups.all_actions()),
+        )
         .await?;
 
     struct Candidate {
@@ -103,7 +112,7 @@ pub async fn org_escalation_paths(
         }
     }
 
-    let mut kept: Vec<(String, Candidate, Vec<String>)> = Vec::new();
+    let mut kept: Vec<(String, Candidate, Vec<String>, Vec<String>)> = Vec::new();
     for (arn, candidate) in by_arn {
         let risky_actions: Vec<String> = candidate
             .allowed_actions
@@ -117,11 +126,15 @@ pub async fn org_escalation_paths(
             .cloned()
             .collect();
 
-        if risky_actions.is_empty() {
+        // Group AND-matching MUST run on the post-Deny risky_actions computed above,
+        // never on candidate.allowed_actions directly — evaluating groups before Deny
+        // subtraction would let a group falsely "match" on an action an explicit Deny
+        // actually suppresses, a false positive on a security query.
+        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
             continue;
-        }
+        };
 
-        kept.push((arn, candidate, risky_actions));
+        kept.push((arn, candidate, risky_actions, matched_paths));
     }
 
     // Enrichment is keyed on the terminal entity (the actual permission holder, the last
@@ -132,7 +145,10 @@ pub async fn org_escalation_paths(
     // start entities can share the same terminal via different chains, so dedupe via HashSet
     // before UNWINDing — otherwise the enrichment query re-executes its MATCH once per
     // duplicate and every path sharing that terminal reports doubled results.
-    let terminal_hops: Vec<&OrgHop> = kept.iter().filter_map(|(_, c, _)| c.path.last()).collect();
+    let terminal_hops: Vec<&OrgHop> = kept
+        .iter()
+        .filter_map(|(_, c, _, _)| c.path.last())
+        .collect();
     let group_terminals: Vec<OrgTerminal> = terminal_hops
         .iter()
         .filter(|h| h.entity_type == "Group")
@@ -162,7 +178,7 @@ pub async fn org_escalation_paths(
 
     let results = kept
         .into_iter()
-        .map(|(arn, candidate, risky_actions)| {
+        .map(|(arn, candidate, risky_actions, matched_paths)| {
             let terminal_arn = candidate
                 .path
                 .last()
@@ -186,6 +202,7 @@ pub async fn org_escalation_paths(
                 entity_type: candidate.entity_type,
                 account_id: candidate.account_id,
                 risky_actions,
+                matched_paths,
                 path: candidate.path,
                 conditional: candidate.conditional,
                 holders,

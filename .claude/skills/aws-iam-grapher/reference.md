@@ -50,12 +50,20 @@ a raw structural diff — same restriction. `list-snapshots`/`list-accounts` nev
   per path.
 - **`privilege-escalation`/`org-escalation` are bounded by `--max-hops`** (default 3, cap 10) —
   longer assume-role chains are not detected unless the flag is raised.
+- **`privilege-escalation`/`org-escalation` risky actions are user-configurable** via a YAML config
+  (`--risky-actions <path>`, else `~/.aws-iam-grapher/config/risky-actions.yaml`, fatal if neither
+  resolves — no repo-checkout fallback). Match semantics: AND within a named group's `actions`, OR
+  across groups — an entity is reported only if it fully satisfies at least one group. The installed
+  default reproduces the tool's original 9-action list as 9 single-action groups.
 - **`privilege-escalation`/`org-escalation` results carry `holders`/`instance_profiles`/
-  `trust_principals`** for the terminal (permission-holding) entity of each path: `holders`
-  (member Users, `Group` terminals only), `instance_profiles` (wrapping InstanceProfiles,
+  `trust_principals`/`matched_paths`** for the terminal (permission-holding) entity of each path:
+  `holders` (member Users, `Group` terminals only), `instance_profiles` (wrapping InstanceProfiles,
   `Role` terminals only), `trust_principals` (trust-policy principals that can assume it, `Role`
-  terminals only). Table output shows counts; `--output json` carries full detail. These are
-  exact graph traversals, not glob-match approximations — no `caveats` entry applies to them.
+  terminals only), `matched_paths` (names of the risky-action groups the entity's actions satisfy,
+  evaluated after Deny subtraction). Table output shows counts for holders/instance_profiles/
+  trust_principals and the group name list for matched_paths; `--output json` carries full detail.
+  These are exact graph traversals/exact-match evaluations, not glob-match approximations — no
+  `caveats` entry applies to them.
 - **Offline-collected snapshots never populate user security attributes** (`has_mfa`, `mfa_method`,
   `console_login_enabled`, `last_activity_date`) — these default to `false`/`None` and the snapshot
   is marked partial (`UserSecurityAttributesNotCollected`). Never state "this user lacks MFA" from
