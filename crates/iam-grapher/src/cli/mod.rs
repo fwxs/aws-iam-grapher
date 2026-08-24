@@ -62,7 +62,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         },
         Commands::Query(args) => query::run(*args, output).await,
         Commands::Docs(args) => docs::run(args, output).await,
-        Commands::Config(args) => config::run(args).await,
+        Commands::Config(args) => config::run(args, output).await,
     }
 }
 

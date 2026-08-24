@@ -1,6 +1,8 @@
 use crate::exit_code::CliValidationError;
+use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
 use iam_graph::RiskyActionGroups;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Validate or inspect risky-actions config.
@@ -20,30 +22,27 @@ pub enum ConfigVerb {
     },
 }
 
-pub async fn run(args: ConfigArgs) -> anyhow::Result<()> {
+#[derive(Serialize)]
+struct CheckResult {
+    path: String,
+    valid: bool,
+    groups: Option<usize>,
+    distinct_actions: Option<usize>,
+    errors: Vec<String>,
+}
+
+pub async fn run(args: ConfigArgs, output: OutputFormat) -> anyhow::Result<()> {
     match args.verb {
-        ConfigVerb::Check { path } => check(path.as_deref()),
+        ConfigVerb::Check { path } => check(path.as_deref(), output),
     }
 }
 
-fn check(explicit: Option<&Path>) -> anyhow::Result<()> {
-    let path: PathBuf = match explicit {
-        Some(p) => p.to_path_buf(),
-        None => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or(iam_graph::RiskyActionsError::NoHome)?;
-            home.join(".aws-iam-grapher/config/risky-actions.yaml")
-        }
-    };
+fn check(explicit: Option<&Path>, output: OutputFormat) -> anyhow::Result<()> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = RiskyActionGroups::resolve_path(explicit, home.as_deref())?;
 
-    println!("checking {}", path.display());
-
-    if !path.is_file() {
-        return Err(iam_graph::RiskyActionsError::NotFound {
-            path: path.display().to_string(),
-        }
-        .into());
+    if output != OutputFormat::Json {
+        println!("checking {}", path.display());
     }
 
     let text =
@@ -55,19 +54,37 @@ fn check(explicit: Option<&Path>) -> anyhow::Result<()> {
     match RiskyActionGroups::from_yaml(&text) {
         Ok(groups) => {
             let action_count = groups.all_actions().len();
-            println!(
-                "ok — {} groups, {} distinct actions",
-                groups.groups().len(),
-                action_count
-            );
+            let group_count = groups.groups().len();
+            if output == OutputFormat::Json {
+                crate::output::json::print_json(&CheckResult {
+                    path: path.display().to_string(),
+                    valid: true,
+                    groups: Some(group_count),
+                    distinct_actions: Some(action_count),
+                    errors: Vec::new(),
+                })?;
+            } else {
+                println!("ok — {group_count} groups, {action_count} distinct actions");
+            }
             Ok(())
         }
         Err(errors) => {
-            for error in &errors {
-                println!("  error: {error}");
+            let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            let count = messages.len();
+            if output == OutputFormat::Json {
+                crate::output::json::print_json(&CheckResult {
+                    path: path.display().to_string(),
+                    valid: false,
+                    groups: None,
+                    distinct_actions: None,
+                    errors: messages,
+                })?;
+            } else {
+                for message in &messages {
+                    println!("  error: {message}");
+                }
+                println!("{count} problem(s) found");
             }
-            let count = errors.len();
-            println!("{count} problem(s) found");
             Err(CliValidationError::ConfigCheckFailed { count }.into())
         }
     }

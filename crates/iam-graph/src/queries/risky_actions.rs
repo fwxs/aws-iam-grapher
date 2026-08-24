@@ -111,15 +111,20 @@ impl RiskyActionGroups {
         })
     }
 
-    /// Resolve and load per the two-step path-resolution rule: `explicit` (fatal if
+    /// Resolve the risky-actions config path per the two-step rule: `explicit` (fatal if
     /// missing) else `~/.aws-iam-grapher/config/risky-actions.yaml` (fatal if missing,
     /// fatal if `home` is `None`). `home` is injected rather than read from
     /// `std::env::var` internally, so tests never mutate process-global `$HOME` and stay
     /// parallel-safe. Deliberately no repo-checkout fallback — see issue #190.
-    pub fn resolve(
+    ///
+    /// Shared by [`Self::resolve`] (the query path, single-error) and the `config check`
+    /// CLI subcommand (multi-error, via [`Self::from_yaml`] on the resolved path's
+    /// contents) — both must resolve the identical path, or `config check` could validate
+    /// a different file than what a query actually loads.
+    pub fn resolve_path(
         explicit: Option<&Path>,
         home: Option<&Path>,
-    ) -> Result<Self, RiskyActionsError> {
+    ) -> Result<PathBuf, RiskyActionsError> {
         let path: PathBuf = match explicit {
             Some(p) => p.to_path_buf(),
             None => {
@@ -132,6 +137,15 @@ impl RiskyActionGroups {
                 path: path.display().to_string(),
             });
         }
+        Ok(path)
+    }
+
+    /// Resolve and load per the two-step path-resolution rule — see [`Self::resolve_path`].
+    pub fn resolve(
+        explicit: Option<&Path>,
+        home: Option<&Path>,
+    ) -> Result<Self, RiskyActionsError> {
+        let path = Self::resolve_path(explicit, home)?;
         Self::load(&path)
     }
 
