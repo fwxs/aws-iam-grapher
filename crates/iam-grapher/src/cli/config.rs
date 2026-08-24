@@ -25,7 +25,6 @@ pub enum ConfigVerb {
 #[derive(Serialize)]
 struct CheckResult {
     path: String,
-    valid: bool,
     groups: Option<usize>,
     distinct_actions: Option<usize>,
     errors: Vec<String>,
@@ -58,7 +57,6 @@ fn check(explicit: Option<&Path>, output: OutputFormat) -> anyhow::Result<()> {
             if output == OutputFormat::Json {
                 crate::output::json::print_json(&CheckResult {
                     path: path.display().to_string(),
-                    valid: true,
                     groups: Some(group_count),
                     distinct_actions: Some(action_count),
                     errors: Vec::new(),
@@ -74,7 +72,6 @@ fn check(explicit: Option<&Path>, output: OutputFormat) -> anyhow::Result<()> {
             if output == OutputFormat::Json {
                 crate::output::json::print_json(&CheckResult {
                     path: path.display().to_string(),
-                    valid: false,
                     groups: None,
                     distinct_actions: None,
                     errors: messages,
