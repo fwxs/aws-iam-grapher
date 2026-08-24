@@ -1,6 +1,7 @@
 pub mod collect;
 pub mod collect_org;
 pub mod common;
+pub mod config;
 pub mod docs;
 pub mod query;
 
@@ -31,6 +32,8 @@ pub enum Commands {
     Query(Box<query::QueryArgs>),
     /// Print bundled docs (caveats, limitations) from the installed docs directory.
     Docs(docs::DocsArgs),
+    /// Validate or inspect risky-actions config.
+    Config(config::ConfigArgs),
 }
 
 /// `collect` with no verb runs single-account collection (today's behavior, unchanged);
@@ -59,6 +62,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         },
         Commands::Query(args) => query::run(*args, output).await,
         Commands::Docs(args) => docs::run(args, output).await,
+        Commands::Config(args) => config::run(args).await,
     }
 }
 
@@ -426,6 +430,28 @@ mod tests {
             panic!("expected Queries verb");
         };
         assert_eq!(queries_args.name, Some("who-can".to_string()));
+    }
+
+    #[test]
+    fn config_check_parses_with_no_path() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "config", "check"])
+            .expect("parse must succeed");
+        let Commands::Config(args) = cli.command else {
+            panic!("expected Config subcommand");
+        };
+        let config::ConfigVerb::Check { path } = args.verb;
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn config_check_parses_with_path() {
+        let cli = Cli::try_parse_from(["aws-iam-grapher", "config", "check", "./my.yaml"])
+            .expect("parse must succeed");
+        let Commands::Config(args) = cli.command else {
+            panic!("expected Config subcommand");
+        };
+        let config::ConfigVerb::Check { path } = args.verb;
+        assert_eq!(path, Some(std::path::PathBuf::from("./my.yaml")));
     }
 
     #[test]

@@ -9,6 +9,9 @@ expression: value
   "risky_actions": [
     "iam:CreatePolicyVersion"
   ],
+  "matched_paths": [
+    "create-policy-version"
+  ],
   "path": [
     {
       "arn": "arn:aws:iam::123456789012:role/Victim",

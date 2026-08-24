@@ -2,14 +2,20 @@
 
 ## Purpose
 
-Entities with at least one of the 9 risky IAM actions, reachable either directly (own
-attached/inline policy) or transitively via 1..N `CAN_ASSUME_ROLE` hops
-(entity → role-A → role-B → ... → terminal).
+Entities holding permissions from a configured risky-action group (`config/risky-actions.yaml`),
+reachable either directly (own attached/inline policy) or transitively via 1..N
+`CAN_ASSUME_ROLE` hops (entity → role-A → role-B → ... → terminal).
 
 ## Parameters
 
 - `$account_id` — account scope for tenant isolation
 - `$snapshot_id` — snapshot scope
+- `$risky_actions` — flat, deduplicated union of every action across every configured
+  risky-action group (`RiskyActionGroups::all_actions`). Filters which `Permission` nodes are
+  pulled back as `allowed_actions`; it does **not** by itself express the
+  AND-within-group/OR-across-group semantics — that evaluation happens in Rust afterward,
+  post-Deny-subtraction, via `RiskyActionGroups::finalize_actions`. See
+  `crates/iam-graph/src/queries/risky_actions.rs`.
 - `{max_hops}` — **not a real Cypher parameter.** A validated literal integer interpolated
   into the query text at build time via `render_hop_bound()`, clamped to `[1, 10]` (default
   `3`), because Cypher cannot parameterize a variable-length relationship pattern's bound.
@@ -20,17 +26,7 @@ attached/inline policy) or transitively via 1..N `CAN_ASSUME_ROLE` hops
 MATCH (e {account_id: $account_id, snapshot_id: $snapshot_id})
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
       -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-WHERE perm.action IN [
-    'iam:CreatePolicyVersion',
-    'iam:SetDefaultPolicyVersion',
-    'iam:AttachRolePolicy',
-    'iam:AttachUserPolicy',
-    'iam:PassRole',
-    'iam:PutRolePolicy',
-    'iam:PutUserPolicy',
-    'iam:CreateAccessKey',
-    'iam:CreateLoginProfile'
-]
+WHERE perm.action IN $risky_actions
 WITH e, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
@@ -70,17 +66,7 @@ ORDER BY length(p) ASC
 WITH start, terminal, collect(p)[0] AS p
 MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
                 -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-WHERE perm.action IN [
-    'iam:CreatePolicyVersion',
-    'iam:SetDefaultPolicyVersion',
-    'iam:AttachRolePolicy',
-    'iam:AttachUserPolicy',
-    'iam:PassRole',
-    'iam:PutRolePolicy',
-    'iam:PutUserPolicy',
-    'iam:CreateAccessKey',
-    'iam:CreateLoginProfile'
-]
+WHERE perm.action IN $risky_actions
 WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
@@ -143,27 +129,34 @@ Each is skipped entirely (no round trip) when its ARN batch is empty.
 ## Rust binding
 
 `crates/iam-graph/src/queries/escalation.rs` — `ESCALATION_QUERY`, used in
-`privilege_escalation_paths(graph: &Graph, ctx: &QueryContext, max_hops: u32) -> Result<Vec<EscalationPath>, GraphError>`.
+`privilege_escalation_paths(graph: &Graph, ctx: &QueryContext, max_hops: u32, groups: &RiskyActionGroups) -> Result<Vec<EscalationPath>, GraphError>`.
 Uses `render_hop_bound(ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}` before
-execution. Enrichment queries live in
+execution; `$risky_actions` (`groups.all_actions()`) is bound alongside `$account_id`/
+`$snapshot_id`. Enrichment queries live in
 `crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_holders`,
 `fetch_instance_profiles`, `fetch_trust_principals`), shared with `org_escalation.rs`.
 
 ## Returns
 
 `Vec<EscalationPath>` where
-`EscalationPath { arn, name, entity_type, risky_actions, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`,
+`EscalationPath { arn, name, entity_type, risky_actions, matched_paths, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`,
 `Hop { arn, entity_type }`, `Holder { arn, name, entity_type }`,
 `InstanceProfileRef { arn, name }`, and `TrustPrincipal { id, principal_type, conditional }`.
 Rust post-processing dedupes by arn (shortest path wins), applies wildcard-aware Deny
-suppression via `iam_expander::glob_match`, and drops entities with an empty `risky_actions`
-set — the enrichment queries then run against the surviving terminal set.
+suppression via `iam_expander::glob_match`, then evaluates AND-within-group/OR-across-group
+matching via `RiskyActionGroups::finalize_actions` on the post-Deny action set — group matching
+must run after Deny subtraction, never before, or a Deny-suppressed action could make a group
+falsely appear satisfied. Entities that satisfy no group are dropped. `risky_actions` is the
+deduplicated union of actions belonging to every matched group; `matched_paths` names the
+matched groups (from the user-configurable `config/risky-actions.yaml` — see
+`crates/iam-graph/src/queries/risky_actions.rs`). The enrichment queries then run against the
+surviving terminal set.
 
 `holders` is populated only when the terminal's `entity_type == "Group"` (member Users via
 `MEMBER_OF`); `instance_profiles` and `trust_principals` only when the terminal's
 `entity_type == "Role"` (via `CONTAINS_ROLE` and `CAN_ASSUME` respectively). All three are
-empty otherwise. These are exact graph traversals, not glob-match approximations, so no new
-`CaveatCode` variant applies to them.
+empty otherwise. These, and `matched_paths`, are exact graph traversals/exact-match
+evaluations, not glob-match approximations, so no new `CaveatCode` variant applies to them.
 
 ## Notes
 

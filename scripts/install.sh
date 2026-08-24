@@ -16,6 +16,7 @@ install_dir="$HOME/.aws-iam-grapher"
 bin_dir="$install_dir/bin"
 docs_dir="$install_dir/docs"
 scripts_dir="$install_dir/scripts"
+config_dir="$install_dir/config"
 
 repo_root=""
 tmp_clone=""
@@ -38,7 +39,7 @@ if [[ -z "$repo_root" ]]; then
   repo_root="$tmp_clone"
 fi
 
-mkdir -p "$bin_dir" "$docs_dir/queries" "$scripts_dir"
+mkdir -p "$bin_dir" "$docs_dir/queries" "$scripts_dir" "$config_dir"
 
 echo "Copying docs to $docs_dir..."
 cp "$repo_root"/docs/*.md "$docs_dir/"
@@ -47,6 +48,14 @@ cp "$repo_root"/docs/queries/*.md "$docs_dir/queries/"
 echo "Copying neo4j backup/restore scripts to $scripts_dir..."
 cp "$repo_root/scripts/neo4j-backup.sh" "$repo_root/scripts/neo4j-restore.sh" "$scripts_dir/"
 chmod +x "$scripts_dir/neo4j-backup.sh" "$scripts_dir/neo4j-restore.sh"
+
+if [[ ! -f "$config_dir/risky-actions.yaml" ]]; then
+  echo "Installing default risky-actions config to $config_dir..."
+  cp "$repo_root/config/risky-actions.yaml" "$config_dir/risky-actions.yaml"
+else
+  echo "risky-actions.yaml already exists at $config_dir, not overwriting."
+  echo "  Repo's shipped copy for comparison: $repo_root/config/risky-actions.yaml"
+fi
 
 echo "Building release binary..."
 (cd "$repo_root" && cargo build --release)
@@ -58,6 +67,7 @@ echo
 echo "Installed: $bin_dir/aws-iam-grapher"
 echo "Docs bundled at: $docs_dir"
 echo "Neo4j backup/restore scripts at: $scripts_dir"
+echo "Risky-actions config at: $config_dir/risky-actions.yaml"
 echo
 
 case "$(uname -s)" in

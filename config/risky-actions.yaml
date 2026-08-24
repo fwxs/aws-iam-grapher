@@ -1,0 +1,60 @@
+# Risky-action groups for `aws-iam-grapher query privilege-escalation` /
+# `org-escalation`. Match semantics: AND within a group's `actions`, OR across groups —
+# an entity is reported only if it holds every action in at least one group.
+#
+# This shipped file reproduces the tool's original hardcoded 9-action list as 9
+# single-action groups, so results with this config are identical to earlier releases
+# (behavior-preserving-by-default). Add your own groups, or edit these, to tune
+# detections to your threat model — this file is yours once installed; reinstalling
+# via scripts/install.sh never overwrites it.
+#
+# Wildcards are not supported in `actions` — use exact `service:Action` strings.
+
+- name: create-policy-version
+  description: >-
+    Create a new default version of a managed policy, with attacker-controlled content.
+  actions:
+    - iam:CreatePolicyVersion
+- name: set-default-policy-version
+  description: >-
+    Roll a managed policy back or forward to an attacker-controlled prior version.
+  actions:
+    - iam:SetDefaultPolicyVersion
+- name: attach-role-policy
+  description: Attach an existing, possibly permissive, managed policy to a role.
+  actions:
+    - iam:AttachRolePolicy
+- name: attach-user-policy
+  description: Attach an existing, possibly permissive, managed policy to a user.
+  actions:
+    - iam:AttachUserPolicy
+- name: pass-role
+  description: Pass an IAM role to a service, potentially escalating to that role's permissions.
+  actions:
+    - iam:PassRole
+- name: put-role-policy
+  description: Attach an attacker-authored inline policy to a role.
+  actions:
+    - iam:PutRolePolicy
+- name: put-user-policy
+  description: Attach an attacker-authored inline policy to a user.
+  actions:
+    - iam:PutUserPolicy
+- name: create-access-key
+  description: Create long-lived programmatic credentials for another IAM user.
+  actions:
+    - iam:CreateAccessKey
+- name: create-login-profile
+  description: Create console-login credentials for another IAM user.
+  actions:
+    - iam:CreateLoginProfile
+
+# Example multi-action technique — uncomment and customize to opt into AND-of-actions
+# detection. Disabled by default to keep results identical to earlier releases.
+# - name: policy-version-rollback-combo
+#   description: >-
+#     Create a malicious policy version and set it as the default version in one
+#     coherent technique, rather than reporting each permission independently.
+#   actions:
+#     - iam:CreatePolicyVersion
+#     - iam:SetDefaultPolicyVersion

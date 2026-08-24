@@ -60,6 +60,9 @@ pub enum CliValidationError {
 
     #[error("unknown doc '{name}'. Available docs: {available}")]
     DocsUnknownName { name: String, available: String },
+
+    #[error("{count} problem(s) found")]
+    ConfigCheckFailed { count: usize },
 }
 
 /// The union of typed error sources the CLI classifies into an exit code. Constructed at
@@ -76,6 +79,9 @@ pub enum CliError {
 
     #[error(transparent)]
     Usage(#[from] CliValidationError),
+
+    #[error(transparent)]
+    RiskyActions(#[from] iam_graph::RiskyActionsError),
 
     #[error(
         "Neo4j password required: pass --neo4j-pass-file <path> or set the \
@@ -120,6 +126,7 @@ impl CliError {
             Self::Graph(e) => graph_exit_class(e),
             Self::Collector(e) => collector_exit_class(e),
             Self::Usage(_) => ExitClass::Usage,
+            Self::RiskyActions(_) => ExitClass::Usage,
             Self::MissingNeo4jPassword { .. } => ExitClass::Credential,
         }
     }
@@ -173,6 +180,12 @@ fn classify(err: &anyhow::Error) -> ExitClass {
         }
         if let Some(e) = cause.downcast_ref::<iam_collector::CollectorError>() {
             return collector_exit_class(e);
+        }
+        if cause
+            .downcast_ref::<iam_graph::RiskyActionsError>()
+            .is_some()
+        {
+            return ExitClass::Usage;
         }
     }
     ExitClass::Unexpected
@@ -316,6 +329,23 @@ mod tests {
             available: "caveats, limitations".into(),
         };
         assert_eq!(CliError::Usage(err).exit_class(), ExitClass::Usage);
+    }
+
+    #[test]
+    fn risky_actions_error_classifies_as_usage() {
+        let err = CliError::RiskyActions(iam_graph::RiskyActionsError::NoHome);
+        assert_eq!(err.exit_class(), ExitClass::Usage);
+    }
+
+    #[test]
+    fn classify_recovers_bare_risky_actions_error_propagated_via_context() {
+        let err: anyhow::Error = iam_graph::RiskyActionsError::NotFound {
+            path: "/tmp/risky-actions.yaml".into(),
+        }
+        .into();
+        let wrapped = err.context("privilege-escalation query failed");
+
+        assert_eq!(classify(&wrapped), ExitClass::Usage);
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub use queries::{
     resolve_scopes, snapshot_record, snapshots_for_org_run, stitch_cross_account, who_can,
     AccountRecord, AssociatedEntity, Caveat, CaveatCode, EntityRef, EscalationPath, Holder, Hop,
     InstanceProfileRef, OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff,
-    PermissionRecord, PermissionRow, QueryContext, ResolvedScope, ScopeSelector, SnapshotRecord,
-    TrustPrincipal, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+    PermissionRecord, PermissionRow, QueryContext, ResolvedScope, RiskyActionGroup,
+    RiskyActionGroups, RiskyActionsError, ScopeSelector, SnapshotRecord, TrustPrincipal,
+    DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };

@@ -96,10 +96,15 @@ async fn privilege_escalation_finds_iam_passrole() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, &account_id);
-    let paths =
-        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
-            .await
-            .expect("escalation query must succeed");
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(
+        ingester.client().inner(),
+        &ctx,
+        iam_graph::DEFAULT_MAX_HOPS,
+        &groups,
+    )
+    .await
+    .expect("escalation query must succeed");
 
     assert!(
         !paths.is_empty(),
@@ -126,7 +131,8 @@ async fn privilege_escalation_finds_deep_transitive_chain() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
         .await
         .expect("escalation query must succeed");
 
@@ -186,7 +192,8 @@ async fn privilege_escalation_enriches_group_terminal_with_holders() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
         .await
         .expect("escalation query must succeed");
 
@@ -227,7 +234,8 @@ async fn privilege_escalation_enriches_role_terminal_with_instance_profiles() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
         .await
         .expect("escalation query must succeed");
 
@@ -264,7 +272,8 @@ async fn privilege_escalation_enriches_role_terminal_with_service_trust_principa
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
         .await
         .expect("escalation query must succeed");
 
@@ -297,7 +306,8 @@ async fn privilege_escalation_cyclic_assume_role_terminates_without_duplicates()
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 5)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 5, &groups)
         .await
         .expect("escalation query must terminate on a cyclic CAN_ASSUME_ROLE graph");
 
@@ -347,7 +357,8 @@ async fn privilege_escalation_flags_path_gated_by_runtime_trust_condition() {
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3)
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
         .await
         .expect("escalation query must succeed");
 
@@ -630,10 +641,15 @@ async fn who_can_group_inherited_deny_overrides_own_allow() {
         "GroupDeniedUser must not appear — group-inherited Deny overrides the user's own Allow"
     );
 
-    let paths =
-        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
-            .await
-            .expect("escalation query must succeed");
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(
+        ingester.client().inner(),
+        &ctx,
+        iam_graph::DEFAULT_MAX_HOPS,
+        &groups,
+    )
+    .await
+    .expect("escalation query must succeed");
 
     assert!(
         !paths.iter().any(|p| p.name == "GroupDeniedUser"),
@@ -758,10 +774,15 @@ async fn privilege_escalation_paths_suppresses_action_covered_by_deny_not_action
     ingester.ingest(&data).await.expect("ingest must succeed");
 
     let ctx = QueryContext::new(&snapshot_id, account_id);
-    let paths =
-        privilege_escalation_paths(ingester.client().inner(), &ctx, iam_graph::DEFAULT_MAX_HOPS)
-            .await
-            .expect("escalation query must succeed");
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(
+        ingester.client().inner(),
+        &ctx,
+        iam_graph::DEFAULT_MAX_HOPS,
+        &groups,
+    )
+    .await
+    .expect("escalation query must succeed");
 
     assert!(
         !paths

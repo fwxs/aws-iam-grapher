@@ -104,6 +104,28 @@ See [`docs/caveats.md`](caveats.md) for approximations surfaced in `query --outp
 `caveats` array (`NotAction` allow-all-except, Deny scope, partial snapshots, wildcard expansion
 degradation, and the `Caveat codes` table).
 
+### Risky-action groups are user-configurable, exact-match only, and don't cover full-admin
+
+`privilege-escalation`/`org-escalation` detect entities holding permissions from a named
+risky-action group defined in a YAML config (`config/risky-actions.yaml`, resolved via
+`--risky-actions <path>` or `~/.aws-iam-grapher/config/risky-actions.yaml`, fatal if neither is
+found — no repo-checkout fallback, deliberately, so a scan never silently runs against a
+different technique list than the operator's installed one). Match semantics are AND within a
+group's `actions`, OR across groups. Two gaps to know about:
+
+- **`Action: "*"` (unqualified full-admin) is not detected as risky.** Escalation queries filter
+  `Permission` nodes via `WHERE perm.action IN $risky_actions`, an exact membership test — a
+  literal `'*'` node never satisfies it. This is a pre-existing gap (not introduced by the
+  YAML-config change): full-admin entities were already invisible to `privilege-escalation`
+  under the previous hardcoded 9-action list, for the same reason. `who_can` has a dedicated
+  UNION arm and `is_full_admin` flag for this case; the escalation queries do not. Tracked as a
+  follow-up, out of scope for this change.
+- **Group `actions` do not support wildcards.** `$risky_actions` uses exact Cypher `IN`
+  membership, so a config entry like `iam:Put*` would match nothing and silently produce zero
+  results for that group — a config typo that quietly disables a detection. `RiskyActionGroups`
+  validation rejects any action containing `*` at load time (`config check` reports it as an
+  `invalid action` error naming the fix), so this fails loudly instead of silently.
+
 ### `Action: "*"` resource scope intersection (`--resource`)
 
 `who_can` accepts an optional `--resource <arn>`. When supplied, it intersects the queried

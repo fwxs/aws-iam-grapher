@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use iam_collector::{CollectedData, CollectorMode};
-use iam_graph::{GraphClient, IngestConfig};
+use iam_graph::{GraphClient, IngestConfig, RiskyActionGroups};
 use std::sync::OnceLock;
 use std::time::Duration;
 use testcontainers_modules::{
@@ -23,6 +23,46 @@ struct ContainerInfo {
 }
 
 static NEO4J_CONTAINER: OnceLock<ContainerInfo> = OnceLock::new();
+
+/// Risky-action groups matching the shipped `config/risky-actions.yaml` — 9 single-action
+/// groups, so existing escalation tests written against the legacy hardcoded-list
+/// behavior still pass unchanged (each group is OR-equivalent to a flat list entry).
+pub fn test_risky_action_groups() -> RiskyActionGroups {
+    let yaml = r#"
+- name: create-policy-version
+  actions: [iam:CreatePolicyVersion]
+- name: set-default-policy-version
+  actions: [iam:SetDefaultPolicyVersion]
+- name: attach-role-policy
+  actions: [iam:AttachRolePolicy]
+- name: attach-user-policy
+  actions: [iam:AttachUserPolicy]
+- name: pass-role
+  actions: [iam:PassRole]
+- name: put-role-policy
+  actions: [iam:PutRolePolicy]
+- name: put-user-policy
+  actions: [iam:PutUserPolicy]
+- name: create-access-key
+  actions: [iam:CreateAccessKey]
+- name: create-login-profile
+  actions: [iam:CreateLoginProfile]
+"#;
+    RiskyActionGroups::from_yaml(yaml).expect("test risky-action groups must be valid")
+}
+
+/// A single 3-action AND-group, `combo`, for tests exercising multi-action group
+/// matching (2-of-3 not reported, all-3 reported, Deny-on-one-member suppresses match).
+pub fn test_multi_action_risky_group() -> RiskyActionGroups {
+    let yaml = r#"
+- name: combo
+  actions:
+    - iam:PutRolePolicy
+    - iam:PutUserPolicy
+    - iam:PassRole
+"#;
+    RiskyActionGroups::from_yaml(yaml).expect("test multi-action group must be valid")
+}
 
 fn init_container() -> &'static ContainerInfo {
     NEO4J_CONTAINER.get_or_init(|| {

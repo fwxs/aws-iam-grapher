@@ -1,0 +1,4 @@
+- name: wild
+  description: test fixture
+  actions:
+    - iam:Put*

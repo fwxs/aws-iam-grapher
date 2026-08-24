@@ -62,6 +62,7 @@ fn escalation_path_json_shape() {
         name: "Attacker".to_string(),
         entity_type: "User".to_string(),
         risky_actions: vec!["iam:CreatePolicyVersion".to_string()],
+        matched_paths: vec!["create-policy-version".to_string()],
         path: vec![Hop {
             arn: "arn:aws:iam::123456789012:role/Victim".to_string(),
             entity_type: "Role".to_string(),
@@ -90,6 +91,7 @@ fn org_escalation_path_json_shape() {
         entity_type: "User".to_string(),
         account_id: "123456789012".to_string(),
         risky_actions: vec!["sts:AssumeRole".to_string()],
+        matched_paths: vec!["assume-role".to_string()],
         path: vec![OrgHop {
             arn: "arn:aws:iam::210987654321:role/Victim".to_string(),
             entity_type: "Role".to_string(),

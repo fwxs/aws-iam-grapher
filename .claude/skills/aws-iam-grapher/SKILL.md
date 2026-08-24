@@ -45,8 +45,8 @@ aws-iam-grapher query [--account-id <id>] [--snapshot-id <id>] --output json <SU
 | `entity-perms <arn>` | entity ARN | — |
 | `associated-entities <arn>` | Policy/Role/Group ARN | — |
 | `instance-profiles-with <action>` | IAM action | — |
-| `privilege-escalation` | — | `--max-hops <n>` (default 3, max 10) |
-| `org-escalation` | — | `--max-hops <n>` (default 3, max 10), `--org-run-id <id>` (default: most recent org run) |
+| `privilege-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config) |
+| `org-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config), `--org-run-id <id>` (default: most recent org run) |
 | `diff <snapshot_a> <snapshot_b>` | two snapshot ids | — |
 | `list-snapshots` | — | — |
 | `list-accounts` | — | — |

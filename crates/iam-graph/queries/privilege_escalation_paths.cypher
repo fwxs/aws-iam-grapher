@@ -1,9 +1,10 @@
 // name: privilege_escalation_paths
-// description: Entities with at least one of the 9 risky IAM actions, reachable either
-//   directly (own attached/inline policy) or transitively via 1..N `CAN_ASSUME_ROLE` hops
-//   (entity -> role-A -> role-B -> ... -> terminal). The {max_hops} bound is interpolated
-//   as a validated literal integer at query-build time — Cypher does not allow
-//   parameterizing a variable-length relationship pattern's bound.
+// description: Entities holding permissions from a configured risky-action group,
+//   reachable either directly (own attached/inline policy) or transitively via 1..N
+//   `CAN_ASSUME_ROLE` hops (entity -> role-A -> role-B -> ... -> terminal). The
+//   {max_hops} bound is interpolated as a validated literal integer at query-build
+//   time — Cypher does not allow parameterizing a variable-length relationship
+//   pattern's bound.
 //   Arm 1 covers the zero-hop case (own risky permissions); arm 2 covers transitive chains,
 //   deduped to the shortest path per (start, terminal) pair before computing risky actions.
 //   Allowed/Deny suppression mirrors the original single-entity logic, evaluated at the
@@ -19,21 +20,16 @@
 //   flags the path as uncertain rather than asserting the chain unconditionally.
 // param $account_id: account scope for tenant isolation
 // param $snapshot_id: snapshot scope
+// param $risky_actions: flat, deduplicated union of every action across every configured
+//   risky-action group (RiskyActionGroups::all_actions) — used only to filter which
+//   Permission nodes are pulled back as allowed_actions. AND-within-group/OR-across-group
+//   semantics are not expressible in Cypher and are evaluated in Rust afterward, on the
+//   post-Deny-subtraction action set (RiskyActionGroups::finalize_actions).
 
 MATCH (e {account_id: $account_id, snapshot_id: $snapshot_id})
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
       -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-WHERE perm.action IN [
-    'iam:CreatePolicyVersion',
-    'iam:SetDefaultPolicyVersion',
-    'iam:AttachRolePolicy',
-    'iam:AttachUserPolicy',
-    'iam:PassRole',
-    'iam:PutRolePolicy',
-    'iam:PutUserPolicy',
-    'iam:CreateAccessKey',
-    'iam:CreateLoginProfile'
-]
+WHERE perm.action IN $risky_actions
 WITH e, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
@@ -73,17 +69,7 @@ ORDER BY length(p) ASC
 WITH start, terminal, collect(p)[0] AS p
 MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
                 -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-WHERE perm.action IN [
-    'iam:CreatePolicyVersion',
-    'iam:SetDefaultPolicyVersion',
-    'iam:AttachRolePolicy',
-    'iam:AttachUserPolicy',
-    'iam:PassRole',
-    'iam:PutRolePolicy',
-    'iam:PutUserPolicy',
-    'iam:CreateAccessKey',
-    'iam:CreateLoginProfile'
-]
+WHERE perm.action IN $risky_actions
 WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
                -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
