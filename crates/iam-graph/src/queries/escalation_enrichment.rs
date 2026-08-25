@@ -5,12 +5,34 @@ use crate::queries::context::QueryContext;
 use neo4rs::Graph;
 use std::collections::HashMap;
 
+/// Security posture of a `User` appearing in an escalation result — either the escalating
+/// entity itself, or a `Holder` who inherits risky permissions via `MEMBER_OF`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UserAttributes {
+    pub user_id: String,
+    pub has_mfa: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfa_method: Option<String>,
+    pub console_login_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_last_used: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_date: Option<String>,
+    pub create_date: String,
+    pub access_key_count: u32,
+    pub active_access_key_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_active_key_date: Option<String>,
+    pub access_key_ids: Vec<String>,
+}
+
 /// A `User` that inherits a terminal `Group`'s risky permissions via `MEMBER_OF`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Holder {
     pub arn: String,
     pub name: String,
     pub entity_type: String,
+    pub attributes: UserAttributes,
 }
 
 /// An `InstanceProfile` that wraps a terminal `Role` via `CONTAINS_ROLE`.
@@ -36,12 +58,15 @@ const INSTANCE_PROFILES_QUERY: &str =
     include_str!("../../queries/escalation_instance_profiles.cypher");
 const TRUST_PRINCIPALS_QUERY: &str =
     include_str!("../../queries/escalation_trust_principals.cypher");
+const USER_ATTRIBUTES_QUERY: &str = include_str!("../../queries/escalation_user_attributes.cypher");
 
 const ORG_HOLDERS_QUERY: &str = include_str!("../../queries/org_escalation_holders.cypher");
 const ORG_INSTANCE_PROFILES_QUERY: &str =
     include_str!("../../queries/org_escalation_instance_profiles.cypher");
 const ORG_TRUST_PRINCIPALS_QUERY: &str =
     include_str!("../../queries/org_escalation_trust_principals.cypher");
+const ORG_USER_ATTRIBUTES_QUERY: &str =
+    include_str!("../../queries/org_escalation_user_attributes.cypher");
 
 /// Run `query`, decoding each row via `row_mapper` into a `(terminal_arn, value)` pair and
 /// accumulating values per terminal ARN. Shared by every `fetch_*`/`fetch_org_*` function
@@ -61,19 +86,67 @@ async fn fetch_rows<T>(
     Ok(by_terminal)
 }
 
+/// Node properties are written as `""` rather than absent when a `DateTime`/enum field is
+/// `None` (see `nodes/user.rs::user_row`) — decode that convention back to `None` here
+/// rather than repeating the check at every call site.
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn decode_user_attributes(row: &neo4rs::Row) -> Result<UserAttributes, GraphError> {
+    let user_id: String = col(row, "user_id")?;
+    let has_mfa: bool = col(row, "has_mfa")?;
+    let mfa_method: String = col(row, "mfa_method")?;
+    let console_login_enabled: bool = col(row, "console_login_enabled")?;
+    let password_last_used: String = col(row, "password_last_used")?;
+    let last_activity_date: String = col(row, "last_activity_date")?;
+    let create_date: String = col(row, "create_date")?;
+    let access_key_count: i64 = col(row, "access_key_count")?;
+    let active_access_key_count: i64 = col(row, "active_access_key_count")?;
+    let oldest_active_key_date: String = col(row, "oldest_active_key_date")?;
+    let access_key_ids: Vec<String> = col(row, "access_key_ids")?;
+    Ok(UserAttributes {
+        user_id,
+        has_mfa,
+        mfa_method: non_empty(mfa_method),
+        console_login_enabled,
+        password_last_used: non_empty(password_last_used),
+        last_activity_date: non_empty(last_activity_date),
+        create_date,
+        access_key_count: access_key_count as u32,
+        active_access_key_count: active_access_key_count as u32,
+        oldest_active_key_date: non_empty(oldest_active_key_date),
+        access_key_ids,
+    })
+}
+
 fn decode_holder(row: &neo4rs::Row) -> Result<(String, Holder), GraphError> {
     let terminal_arn: String = col(row, "terminal_arn")?;
     let arn: String = col(row, "arn")?;
     let name: String = col(row, "name")?;
     let entity_type: String = col(row, "entity_type")?;
+    let attributes = decode_user_attributes(row)?;
     Ok((
         terminal_arn,
         Holder {
             arn,
             name,
             entity_type,
+            attributes,
         },
     ))
+}
+
+fn decode_entity_user_attributes(
+    row: &neo4rs::Row,
+) -> Result<(String, UserAttributes), GraphError> {
+    let entity_arn: String = col(row, "entity_arn")?;
+    let attributes = decode_user_attributes(row)?;
+    Ok((entity_arn, attributes))
 }
 
 fn decode_instance_profile_ref(
@@ -154,6 +227,32 @@ pub(crate) async fn fetch_trust_principals(
     fetch_rows(graph, query, decode_trust_principal).await
 }
 
+/// Fetch `UserAttributes` for a batch of escalating-entity ARNs that are Users.
+///
+/// Returns an empty map without a round trip when `arns` is empty. An ARN that isn't a
+/// User in this scope simply produces no row and is absent from the result map.
+pub(crate) async fn fetch_user_attributes(
+    graph: &Graph,
+    ctx: &QueryContext,
+    arns: &[String],
+) -> Result<HashMap<String, UserAttributes>, GraphError> {
+    if arns.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = neo4rs::query(USER_ATTRIBUTES_QUERY)
+        .param("arns", arns.to_vec())
+        .param("account_id", ctx.account_id.as_str())
+        .param("snapshot_id", ctx.snapshot_id.as_str());
+
+    let mut stream = graph.execute(query).await?;
+    let mut by_arn = HashMap::new();
+    while let Some(row) = stream.next().await? {
+        let (arn, attributes) = decode_entity_user_attributes(&row)?;
+        by_arn.insert(arn, attributes);
+    }
+    Ok(by_arn)
+}
+
 /// `(arn, snapshot_id)` pair identifying one org-escalation terminal — org terminals may
 /// belong to different account snapshots within the same org collection run, so each pair
 /// carries its own `snapshot_id` rather than relying on one bound `QueryContext`.
@@ -209,4 +308,23 @@ pub(crate) async fn fetch_org_trust_principals(
     }
     let query = neo4rs::query(ORG_TRUST_PRINCIPALS_QUERY).param("pairs", org_pairs(terminals));
     fetch_rows(graph, query, decode_trust_principal).await
+}
+
+/// Org-scoped variant of [`fetch_user_attributes`] — see [`OrgTerminal`].
+pub(crate) async fn fetch_org_user_attributes(
+    graph: &Graph,
+    terminals: &[OrgTerminal],
+) -> Result<HashMap<String, UserAttributes>, GraphError> {
+    if terminals.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = neo4rs::query(ORG_USER_ATTRIBUTES_QUERY).param("pairs", org_pairs(terminals));
+
+    let mut stream = graph.execute(query).await?;
+    let mut by_arn = HashMap::new();
+    while let Some(row) = stream.next().await? {
+        let (arn, attributes) = decode_entity_user_attributes(&row)?;
+        by_arn.insert(arn, attributes);
+    }
+    Ok(by_arn)
 }

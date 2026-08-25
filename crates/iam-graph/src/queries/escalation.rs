@@ -2,8 +2,8 @@ use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use crate::queries::escalation_enrichment::{
-    fetch_holders, fetch_instance_profiles, fetch_trust_principals, Holder, InstanceProfileRef,
-    TrustPrincipal,
+    fetch_holders, fetch_instance_profiles, fetch_trust_principals, fetch_user_attributes, Holder,
+    InstanceProfileRef, TrustPrincipal, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
@@ -43,6 +43,9 @@ pub struct EscalationPath {
     /// Trust-policy principals that can assume this entity via `CAN_ASSUME`, populated only
     /// when `entity_type == "Role"`.
     pub trust_principals: Vec<TrustPrincipal>,
+    /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_attributes: Option<UserAttributes>,
 }
 
 const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
@@ -161,11 +164,21 @@ pub async fn privilege_escalation_paths(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    // Keyed on the escalating entity's own arn (not the terminal) — the User whose
+    // posture matters is the one who'd actually be attacked, at the start of the chain.
+    let user_arns: Vec<String> = kept
+        .iter()
+        .filter(|(_, c, _, _)| c.entity_type == "User")
+        .map(|(arn, _, _, _)| arn.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
         fetch_holders(graph, ctx, &group_terminals),
         fetch_instance_profiles(graph, ctx, &role_terminals),
         fetch_trust_principals(graph, ctx, &role_terminals),
+        fetch_user_attributes(graph, ctx, &user_arns),
     )?;
 
     let results = kept
@@ -188,6 +201,7 @@ pub async fn privilege_escalation_paths(
                 .get(terminal_arn)
                 .cloned()
                 .unwrap_or_default();
+            let user_attributes = user_attrs_by_arn.get(&arn).cloned();
             EscalationPath {
                 arn,
                 name: candidate.name,
@@ -199,6 +213,7 @@ pub async fn privilege_escalation_paths(
                 holders,
                 instance_profiles,
                 trust_principals,
+                user_attributes,
             }
         })
         .collect();

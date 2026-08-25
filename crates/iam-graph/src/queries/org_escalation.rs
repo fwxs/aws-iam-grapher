@@ -2,8 +2,9 @@ use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
 use crate::queries::escalation_enrichment::{
-    fetch_org_holders, fetch_org_instance_profiles, fetch_org_trust_principals, Holder,
-    InstanceProfileRef, OrgTerminal, TrustPrincipal,
+    fetch_org_holders, fetch_org_instance_profiles, fetch_org_trust_principals,
+    fetch_org_user_attributes, Holder, InstanceProfileRef, OrgTerminal, TrustPrincipal,
+    UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
@@ -46,6 +47,9 @@ pub struct OrgEscalationPath {
     /// Trust-policy principals that can assume this entity via `CAN_ASSUME`, populated only
     /// when `entity_type == "Role"`.
     pub trust_principals: Vec<TrustPrincipal>,
+    /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_attributes: Option<UserAttributes>,
 }
 
 const ORG_ESCALATION_QUERY: &str = include_str!("../../queries/org_escalation_paths.cypher");
@@ -169,11 +173,27 @@ pub async fn org_escalation_paths(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    // Keyed on the escalating entity's own (arn, snapshot_id) — the first node of `path`
+    // is always `start` (see org_escalation_paths.cypher), so its snapshot_id travels with
+    // the path even though `Candidate` doesn't separately track it.
+    let user_arns: Vec<OrgTerminal> = kept
+        .iter()
+        .filter(|(_, c, _, _)| c.entity_type == "User")
+        .filter_map(|(arn, c, _, _)| {
+            c.path.first().map(|start_hop| OrgTerminal {
+                arn: arn.clone(),
+                snapshot_id: start_hop.snapshot_id.clone(),
+            })
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
         fetch_org_holders(graph, &group_terminals),
         fetch_org_instance_profiles(graph, &role_terminals),
         fetch_org_trust_principals(graph, &role_terminals),
+        fetch_org_user_attributes(graph, &user_arns),
     )?;
 
     let results = kept
@@ -196,6 +216,7 @@ pub async fn org_escalation_paths(
                 .get(terminal_arn)
                 .cloned()
                 .unwrap_or_default();
+            let user_attributes = user_attrs_by_arn.get(&arn).cloned();
             OrgEscalationPath {
                 arn,
                 name: candidate.name,
@@ -208,6 +229,7 @@ pub async fn org_escalation_paths(
                 holders,
                 instance_profiles,
                 trust_principals,
+                user_attributes,
             }
         })
         .collect();
