@@ -283,6 +283,7 @@ mod tests {
             name: "alice".to_string(),
             entity_type: "User".to_string(),
             risky_actions: vec!["iam:PutUserPolicy".to_string()],
+            matched_paths: vec!["put-user-policy".to_string()],
             path: vec![hop("arn:aws:iam::111111111111:user/alice", "User")],
             conditional: false,
             holders: vec![],
@@ -304,6 +305,7 @@ mod tests {
             name: "A".to_string(),
             entity_type: "Role".to_string(),
             risky_actions: vec!["iam:CreateAccessKey".to_string()],
+            matched_paths: vec!["create-access-key".to_string()],
             path: vec![
                 hop("arn:aws:iam::111111111111:role/A", "Role"),
                 hop("arn:aws:iam::111111111111:role/B", "Role"),
@@ -332,6 +334,7 @@ mod tests {
                 name: "A".to_string(),
                 entity_type: "Role".to_string(),
                 risky_actions: vec!["iam:PutUserPolicy".to_string()],
+                matched_paths: vec!["put-user-policy".to_string()],
                 path: vec![
                     hop("arn:aws:iam::111111111111:role/A", "Role"),
                     hop("arn:aws:iam::111111111111:role/C", "Role"),
@@ -346,6 +349,7 @@ mod tests {
                 name: "B".to_string(),
                 entity_type: "Role".to_string(),
                 risky_actions: vec!["iam:CreateAccessKey".to_string()],
+                matched_paths: vec!["create-access-key".to_string()],
                 path: vec![
                     hop("arn:aws:iam::111111111111:role/B", "Role"),
                     hop("arn:aws:iam::111111111111:role/C", "Role"),
@@ -429,6 +433,7 @@ mod tests {
             entity_type: "Role".to_string(),
             account_id: "111111111111".to_string(),
             risky_actions: vec!["iam:PassRole".to_string()],
+            matched_paths: vec!["pass-role".to_string()],
             path: vec![
                 iam_graph::OrgHop {
                     arn: "arn:aws:iam::111111111111:role/A".to_string(),

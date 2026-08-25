@@ -5,6 +5,7 @@ pub mod context;
 pub mod escalation;
 pub mod escalation_enrichment;
 pub mod org_escalation;
+pub mod risky_actions;
 pub mod scope;
 pub mod snapshots;
 pub mod stitch;
@@ -54,6 +55,7 @@ pub use context::{OrgQueryContext, QueryContext};
 pub use escalation::{privilege_escalation_paths, EscalationPath, Hop};
 pub use escalation_enrichment::{Holder, InstanceProfileRef, TrustPrincipal};
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
+pub use risky_actions::{RiskyActionGroup, RiskyActionGroups, RiskyActionsError};
 pub use scope::{resolve_org_context, resolve_scopes, ResolvedScope, ScopeSelector};
 pub use snapshots::{
     delete_snapshot, diff_permissions, latest_org_run_id, list_account_ids, list_snapshots,

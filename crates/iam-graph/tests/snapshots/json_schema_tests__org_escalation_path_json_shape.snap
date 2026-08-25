@@ -10,6 +10,9 @@ expression: value
   "risky_actions": [
     "sts:AssumeRole"
   ],
+  "matched_paths": [
+    "assume-role"
+  ],
   "path": [
     {
       "arn": "arn:aws:iam::210987654321:role/Victim",
