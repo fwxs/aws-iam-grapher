@@ -2,15 +2,15 @@ use crate::cli::common::{ConnectionArgs, OutputArgs};
 use crate::exit_code::CliValidationError;
 use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
 use anyhow::Context as _;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use iam_collector::account_id_from_arn;
 use iam_graph::{
     associated_entities, delete_snapshot, diff_permissions, entity_permissions,
     instance_profiles_with_action, list_account_ids, list_accounts, list_snapshots,
     org_escalation_paths, privilege_escalation_paths, resolve_org_context, resolve_scopes,
     snapshot_record, snapshots_for_org_run, who_can, AssociatedEntity, Caveat, EntityRef,
-    EscalationPath, GraphClient, GraphError, PermissionRow, QueryContext, ResolvedScope,
-    RiskyActionGroups, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
+    EscalationPath, GraphClient, GraphError, OrgEscalationPath, PermissionRow, QueryContext,
+    ResolvedScope, RiskyActionGroups, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -517,6 +517,8 @@ enum QueryCommand {
         hops: MaxHopsArg,
         #[command(flatten)]
         risky_actions: RiskyActionsArg,
+        #[command(flatten)]
+        entity_type: EntityTypeArg,
     },
     /// List available snapshots for the account.
     ListSnapshots,
@@ -539,6 +541,8 @@ enum QueryCommand {
         /// Org collection run id (default: most recent org run).
         #[arg(long)]
         org_run_id: Option<String>,
+        #[command(flatten)]
+        entity_type: EntityTypeArg,
     },
 }
 
@@ -559,6 +563,51 @@ pub struct RiskyActionsArg {
     /// ~/.aws-iam-grapher/config/risky-actions.yaml (fatal if neither is found).
     #[arg(long)]
     risky_actions: Option<PathBuf>,
+}
+
+/// Which escalating-entity types to keep in an escalation result. Shared by
+/// `PrivilegeEscalation` and `OrgEscalation`.
+#[derive(Args)]
+pub struct EntityTypeArg {
+    /// Restrict results to this entity type. `user` also keeps a Group path that has at
+    /// least one holder — a user reachable only via that group's membership is exactly
+    /// the case this filter is for.
+    #[arg(long = "entity-type", value_enum, default_value_t = EntityTypeFilter::All)]
+    entity_type: EntityTypeFilter,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EntityTypeFilter {
+    User,
+    Role,
+    Group,
+    All,
+}
+
+/// Filter escalation results in Rust, after the query returns — never in Cypher. The
+/// UNION/dedupe/Deny-subtraction logic in `privilege_escalation_paths.cypher` is
+/// intricate and correct; a post-filter here cannot break it.
+fn filter_by_entity_type<T>(
+    paths: Vec<T>,
+    filter: EntityTypeFilter,
+    entity_type: impl Fn(&T) -> &str,
+    holder_count: impl Fn(&T) -> usize,
+) -> Vec<T> {
+    match filter {
+        EntityTypeFilter::All => paths,
+        EntityTypeFilter::User => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "User" || holder_count(p) > 0)
+            .collect(),
+        EntityTypeFilter::Role => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "Role")
+            .collect(),
+        EntityTypeFilter::Group => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "Group")
+            .collect(),
+    }
 }
 
 /// Resolve the risky-actions config per the two-step rule: `explicit` (fatal if missing)
@@ -703,6 +752,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             hops: MaxHopsArg { max_hops },
             risky_actions,
             org_run_id,
+            entity_type: EntityTypeArg { entity_type },
         } => {
             let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let ctx = resolve_org_context(client.inner(), org_run_id).await?;
@@ -710,6 +760,12 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             let paths = org_escalation_paths(client.inner(), &ctx, max_hops, &groups)
                 .await
                 .context("org-escalation query failed")?;
+            let paths = filter_by_entity_type(
+                paths,
+                entity_type,
+                |p: &OrgEscalationPath| p.entity_type.as_str(),
+                |p: &OrgEscalationPath| p.holders.len(),
+            );
 
             if output == OutputFormat::Graphviz {
                 let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
@@ -1030,6 +1086,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
         QueryCommand::PrivilegeEscalation {
             hops: MaxHopsArg { max_hops },
             risky_actions,
+            entity_type: EntityTypeArg { entity_type },
         } => {
             let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let scopes = resolve_command_scopes(
@@ -1050,9 +1107,16 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                     let client = &client;
                     let groups = &groups;
                     async move {
-                        privilege_escalation_paths(client.inner(), &ctx, max_hops, groups)
-                            .await
-                            .context("privilege-escalation query failed")
+                        let paths =
+                            privilege_escalation_paths(client.inner(), &ctx, max_hops, groups)
+                                .await
+                                .context("privilege-escalation query failed")?;
+                        Ok(filter_by_entity_type(
+                            paths,
+                            entity_type,
+                            |p: &EscalationPath| p.entity_type.as_str(),
+                            |p: &EscalationPath| p.holders.len(),
+                        ))
                     }
                 },
                 |paths: &Vec<EscalationPath>| escalation_rows(paths),
@@ -1152,7 +1216,92 @@ fn short_id(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iam_graph::{Holder, UserAttributes};
     use std::cell::RefCell;
+
+    fn escalation_path(entity_type: &str, holders: Vec<Holder>) -> EscalationPath {
+        EscalationPath {
+            arn: format!("arn:aws:iam::111111111111:{entity_type}/x"),
+            name: "x".to_string(),
+            entity_type: entity_type.to_string(),
+            risky_actions: vec!["iam:PutUserPolicy".to_string()],
+            matched_paths: vec!["put-user-policy".to_string()],
+            path: vec![],
+            conditional: false,
+            holders,
+            instance_profiles: vec![],
+            trust_principals: vec![],
+            user_attributes: None,
+        }
+    }
+
+    fn holder(arn: &str) -> Holder {
+        Holder {
+            arn: arn.to_string(),
+            name: "holder".to_string(),
+            entity_type: "User".to_string(),
+            attributes: UserAttributes {
+                user_id: "AIDAHOLDER".to_string(),
+                has_mfa: false,
+                mfa_method: None,
+                console_login_enabled: false,
+                password_last_used: None,
+                last_activity_date: None,
+                create_date: "2025-01-01T00:00:00+00:00".to_string(),
+                access_key_count: 0,
+                active_access_key_count: 0,
+                oldest_active_key_date: None,
+                access_key_ids: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn filter_by_entity_type_user_keeps_user_entities_and_groups_with_holders() {
+        let paths = vec![
+            escalation_path("User", vec![]),
+            escalation_path("Role", vec![]),
+            escalation_path("Group", vec![]),
+            escalation_path(
+                "Group",
+                vec![holder("arn:aws:iam::111111111111:user/member")],
+            ),
+        ];
+
+        let filtered = filter_by_entity_type(
+            paths,
+            EntityTypeFilter::User,
+            |p: &EscalationPath| p.entity_type.as_str(),
+            |p: &EscalationPath| p.holders.len(),
+        );
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|p| p.entity_type == "User"));
+        assert!(filtered
+            .iter()
+            .any(|p| p.entity_type == "Group" && !p.holders.is_empty()));
+        assert!(!filtered
+            .iter()
+            .any(|p| p.entity_type == "Group" && p.holders.is_empty()));
+        assert!(!filtered.iter().any(|p| p.entity_type == "Role"));
+    }
+
+    #[test]
+    fn filter_by_entity_type_all_keeps_everything() {
+        let paths = vec![
+            escalation_path("User", vec![]),
+            escalation_path("Role", vec![]),
+        ];
+
+        let filtered = filter_by_entity_type(
+            paths,
+            EntityTypeFilter::All,
+            |p: &EscalationPath| p.entity_type.as_str(),
+            |p: &EscalationPath| p.holders.len(),
+        );
+
+        assert_eq!(filtered.len(), 2);
+    }
 
     #[test]
     fn supports_graphviz_true_for_graph_shaped_queries() {
@@ -1169,6 +1318,9 @@ mod tests {
             risky_actions: RiskyActionsArg {
                 risky_actions: None
             },
+            entity_type: EntityTypeArg {
+                entity_type: EntityTypeFilter::All
+            },
         }
         .supports_graphviz());
         assert!(QueryCommand::OrgEscalation {
@@ -1177,6 +1329,9 @@ mod tests {
                 risky_actions: None
             },
             org_run_id: None,
+            entity_type: EntityTypeArg {
+                entity_type: EntityTypeFilter::All
+            },
         }
         .supports_graphviz());
     }
