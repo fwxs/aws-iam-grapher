@@ -31,26 +31,9 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: check
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Unit tests
-        run: cargo test --workspace
-
-  integration-tests:
-    name: Integration Tests (Docker)
+  tests:
+    name: Tests & Docker tests
     runs-on: ubuntu-latest
     needs: test
     steps:
