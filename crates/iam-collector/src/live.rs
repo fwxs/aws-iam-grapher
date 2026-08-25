@@ -7,8 +7,8 @@ use aws_sdk_iam::operation::get_login_profile::GetLoginProfileError;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
 use iam_models::{
-    IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy, IamRole, IamUser, MfaDeviceType,
-    PermissionsBoundary, PolicyDocument, PolicyRef, RoleLastUsed,
+    AccessKeyMeta, AccessKeyStatus, IamGroup, IamInlinePolicy, IamInstanceProfile, IamPolicy,
+    IamRole, IamUser, MfaDeviceType, PermissionsBoundary, PolicyDocument, PolicyRef, RoleLastUsed,
 };
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
@@ -124,6 +124,7 @@ impl IamDataSource for LiveCollector {
             users[i].console_login_enabled = enrichment.console_login_enabled;
             users[i].password_last_used = enrichment.password_last_used;
             users[i].last_activity_date = enrichment.last_activity_date;
+            users[i].access_keys = enrichment.access_keys;
             enrichment_warnings.extend(warns);
         }
         if enrichment_warnings.contains(&EnrichmentWarning::Mfa) {
@@ -446,6 +447,7 @@ struct UserEnrichment {
     console_login_enabled: bool,
     password_last_used: Option<DateTime<Utc>>,
     last_activity_date: Option<DateTime<Utc>>,
+    access_keys: Vec<AccessKeyMeta>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -519,13 +521,23 @@ async fn enrich_user(
     };
 
     let mut last_activity_date = password_last_used;
+    let mut access_keys: Vec<AccessKeyMeta> = Vec::new();
     match client.list_access_keys().user_name(user_name).send().await {
         Ok(out) => {
             for key in out.access_key_metadata() {
                 let Some(key_id) = key.access_key_id() else {
                     continue;
                 };
-                match client
+                let status = match key.status() {
+                    Some(aws_sdk_iam::types::StatusType::Active) => AccessKeyStatus::Active,
+                    _ => AccessKeyStatus::Inactive,
+                };
+                let create_date = sdk_dt_opt(key.create_date()).unwrap_or_else(Utc::now);
+
+                // A key we know exists but can't date is still signal — keep it in the
+                // result with `last_used_date: None` rather than dropping it, and fold
+                // the failure into the existing AccessKeyActivity warning.
+                let (last_used_date, last_used_service, last_used_region) = match client
                     .get_access_key_last_used()
                     .access_key_id(key_id)
                     .send()
@@ -536,12 +548,33 @@ async fn enrich_user(
                             .access_key_last_used()
                             .and_then(|a| sdk_dt_opt(a.last_used_date()));
                         last_activity_date = max_option(last_activity_date, used);
+                        let service = lu
+                            .access_key_last_used()
+                            .map(|a| a.service_name())
+                            .filter(|s| *s != "N/A")
+                            .map(String::from);
+                        let region = lu
+                            .access_key_last_used()
+                            .map(|a| a.region())
+                            .filter(|r| *r != "N/A")
+                            .map(String::from);
+                        (used, service, region)
                     }
                     Err(e) => {
                         debug!(%user_name, %key_id, error = ?e, "GetAccessKeyLastUsed failed");
                         access_key_ok = false;
+                        (None, None, None)
                     }
-                }
+                };
+
+                access_keys.push(AccessKeyMeta {
+                    access_key_id: key_id.to_string(),
+                    status,
+                    create_date,
+                    last_used_date,
+                    last_used_service,
+                    last_used_region,
+                });
             }
         }
         Err(e) => {
@@ -560,6 +593,7 @@ async fn enrich_user(
             console_login_enabled,
             password_last_used,
             last_activity_date,
+            access_keys,
         },
         warnings,
     )
@@ -865,6 +899,64 @@ mod enrichment_tests {
         let expected = DateTime::from_timestamp(t2, 0).unwrap();
         assert_eq!(enrichment.last_activity_date, Some(expected));
         assert!(warnings.is_empty(), "no warnings expected: {warnings:?}");
+
+        assert_eq!(enrichment.access_keys.len(), 1);
+        let key = &enrichment.access_keys[0];
+        assert_eq!(key.access_key_id, "AKIAEXAMPLE");
+        assert_eq!(key.status, AccessKeyStatus::Active);
+        assert_eq!(
+            key.last_used_date,
+            Some(DateTime::from_timestamp(t2, 0).unwrap())
+        );
+        assert_eq!(key.last_used_service, Some("s3".to_string()));
+        assert_eq!(key.last_used_region, Some("us-east-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn enrich_user_access_key_last_used_error_still_yields_key_with_no_last_used_date() {
+        let mfa_rule = mock!(aws_sdk_iam::Client::list_mfa_devices).then_output(|| {
+            aws_sdk_iam::operation::list_mfa_devices::ListMfaDevicesOutput::builder()
+                .set_mfa_devices(Some(Vec::new()))
+                .is_truncated(false)
+                .build()
+                .expect("valid ListMfaDevicesOutput")
+        });
+        let login_rule =
+            mock!(aws_sdk_iam::Client::get_login_profile).then_error(no_such_entity_error);
+        let get_user_rule =
+            mock!(aws_sdk_iam::Client::get_user).then_output(|| get_user_output("alice", None));
+        let keys_rule = mock!(aws_sdk_iam::Client::list_access_keys)
+            .then_output(|| access_keys_output("alice", "AKIAEXAMPLE"));
+        let last_used_rule = mock!(aws_sdk_iam::Client::get_access_key_last_used).then_error(
+            || {
+                aws_sdk_iam::operation::get_access_key_last_used::GetAccessKeyLastUsedError::generic(
+                    aws_smithy_types::error::ErrorMetadata::builder()
+                        .code("AccessDenied")
+                        .build(),
+                )
+            },
+        );
+        let client = mock_client!(
+            aws_sdk_iam,
+            RuleMode::MatchAny,
+            &[
+                &mfa_rule,
+                &login_rule,
+                &get_user_rule,
+                &keys_rule,
+                &last_used_rule
+            ]
+        );
+
+        let (enrichment, warnings) = enrich_user(&client, "alice").await;
+
+        // A key we know exists but couldn't date is still signal — keep it in the
+        // result with last_used_date: None, rather than dropping it.
+        assert_eq!(enrichment.access_keys.len(), 1);
+        let key = &enrichment.access_keys[0];
+        assert_eq!(key.access_key_id, "AKIAEXAMPLE");
+        assert_eq!(key.last_used_date, None);
+        assert!(warnings.contains(&EnrichmentWarning::AccessKeyActivity));
     }
 
     #[tokio::test]
