@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.6.0] - 2026-08-24
+
+Configurable privilege-escalation detection.
+
+- **User-configurable risky-action groups**: the privilege-escalation risky-action list moves from a hardcoded 9-action Cypher array to `config/risky-actions.yaml`, resolved via `--risky-actions <path>` or the installed `~/.aws-iam-grapher/config/risky-actions.yaml` (fatal if neither is found; no repo-checkout fallback). Detection upgrades from "holds any of 9 actions" to named techniques with **AND-within-group, OR-across-group** matching, letting operators express multi-action escalation combos (e.g. `iam:CreatePolicyVersion` + `iam:SetDefaultPolicyVersion` together) instead of reporting each action independently. New `config check [path]` subcommand validates a config and reports every problem found. `scripts/install.sh` installs the default config and never overwrites an existing one. `privilege-escalation`/`org-escalation` results gain a `matched_paths` field naming the satisfied groups.
+  - **Behavior-preserving by default**: the shipped `config/risky-actions.yaml` reproduces the previous 9-action list as 9 single-action groups, so results with the installed default are unchanged. This is a breaking change only for operators who edit the config to add multi-action groups — until then, result sets are identical to 0.5.0.
+
 ## [0.5.0] - 2026-08-15
 
 Output, performance, and refactor-focused release.
