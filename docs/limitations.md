@@ -153,18 +153,22 @@ already deduplicates by ARN, collapsing multiple matching grants into a single r
 
 ### User MFA, console login, and last-activity attributes are live-collection-only
 
-`IamUser` carries `has_mfa`, `mfa_method`, `console_login_enabled`, and `last_activity_date`,
+`IamUser` carries `has_mfa`, `mfa_method`, `console_login_enabled`, `last_activity_date`, and
+`access_keys` (id, status, create date, last-used date/service/region — never the secret key),
 populated by a per-user enrichment pass (`ListMFADevices`, `GetLoginProfile`, `GetUser`,
 `ListAccessKeys` + `GetAccessKeyLastUsed`) in `LiveCollector`. `HybridCollector` inherits this
-since it delegates to `LiveCollector` for the live path.
+since it delegates to `LiveCollector` for the live path. The Neo4j `User` node additionally
+derives `access_key_count`, `active_access_key_count`, `oldest_active_key_date`, and
+`access_key_ids` from `access_keys` at ingest time (`nodes/user.rs::user_row`) — these are the
+fields `privilege-escalation`/`org-escalation` surface as `UserAttributes`.
 
 **`OfflineCollector` does not populate these fields** — `GetAccountAuthorizationDetails` and
 `ListInstanceProfiles` (its only inputs) carry none of this data. Offline snapshots always default
 them (`has_mfa: false`, `mfa_method: None`, `console_login_enabled: false`,
-`last_activity_date: None`) and are marked partial via
-`CollectorWarning::UserSecurityAttributesNotCollected`. Do not treat `has_mfa: false` on a snapshot
-ingested from an offline collection as evidence a user actually lacks MFA — check
-`Snapshot.partial_reasons` first.
+`last_activity_date: None`, `access_keys: []`) and are marked partial via
+`CollectorWarning::UserSecurityAttributesNotCollected`. Do not treat `has_mfa: false` or
+`access_key_count: 0` on a snapshot ingested from an offline collection as evidence a user
+actually lacks MFA or access keys — check `Snapshot.partial_reasons` first.
 
 **Per-user call failures are non-fatal** — a 403 on `ListMFADevices`, `GetLoginProfile`, or the
 access-key calls for one user does not fail the whole collection; it is folded into an

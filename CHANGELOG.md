@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+User attributes and access keys in escalation results.
+
+- **User security posture in escalation results**: `privilege-escalation`/`org-escalation` JSON output now attaches a `UserAttributes` object (MFA, console login, password/activity dates, access-key count/ids) to every User in a result — the escalating entity itself (`user_attributes`) and every Group `holders` entry (`attributes`). Table output is unchanged.
+- **Access keys ingested**: `LiveCollector` already called `ListAccessKeys`/`GetAccessKeyLastUsed` per user but discarded the results; `AccessKeyMeta` is now populated and carried into the graph as `access_key_count`, `active_access_key_count`, `oldest_active_key_date`, and `access_key_ids` on the `User` node. No new AWS API calls.
+- **`--entity-type <user|role|group|all>`** flag on `privilege-escalation`/`org-escalation` filters results after the query runs (default `all`); `user` keeps User-entity results and any Group result with a non-empty `holders` list.
+- **Graphviz**: escalation node tooltips gain a posture summary (MFA/console/active-key count), and a risky User terminal with no MFA renders in a distinct fill color.
+
 ## [0.6.0] - 2026-08-24
 
 Configurable privilege-escalation detection.

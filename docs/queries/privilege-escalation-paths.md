@@ -105,11 +105,20 @@ further batched enrichment queries run once per call, keyed on the deduped set o
 discarded by dedup:
 
 ```cypher
--- escalation_holders.cypher (Group terminals only)
+-- escalation_holders.cypher (Group terminals only) — also returns the holder's own
+-- User node properties as `attributes` (see below)
 UNWIND $arns AS terminal_arn
 MATCH (g:Group {arn: terminal_arn, account_id: $account_id, snapshot_id: $snapshot_id})
 MATCH (u:User)-[:MEMBER_OF]->(g)
-RETURN terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
+RETURN terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type,
+       u.user_id AS user_id, u.has_mfa AS has_mfa, u.mfa_method AS mfa_method,
+       u.console_login_enabled AS console_login_enabled,
+       u.password_last_used AS password_last_used,
+       u.last_activity_date AS last_activity_date, u.create_date AS create_date,
+       u.access_key_count AS access_key_count,
+       u.active_access_key_count AS active_access_key_count,
+       u.oldest_active_key_date AS oldest_active_key_date,
+       u.access_key_ids AS access_key_ids
 
 -- escalation_instance_profiles.cypher (Role terminals only)
 UNWIND $arns AS terminal_arn
@@ -122,6 +131,20 @@ UNWIND $arns AS terminal_arn
 MATCH (r:Role {arn: terminal_arn, account_id: $account_id, snapshot_id: $snapshot_id})
 MATCH (pr:Principal)-[rel:CAN_ASSUME]->(r)
 RETURN terminal_arn, pr.id AS id, pr.type AS principal_type, rel.conditional AS conditional
+
+-- escalation_user_attributes.cypher (User entities only) — keyed on the escalating
+-- entity's own arn, NOT the terminal: for a transitive chain, arn is the assumer who'd
+-- actually be attacked, while the terminal is the entity that holds the permission
+UNWIND $arns AS entity_arn
+MATCH (u:User {arn: entity_arn, account_id: $account_id, snapshot_id: $snapshot_id})
+RETURN entity_arn, u.user_id AS user_id, u.has_mfa AS has_mfa, u.mfa_method AS mfa_method,
+       u.console_login_enabled AS console_login_enabled,
+       u.password_last_used AS password_last_used,
+       u.last_activity_date AS last_activity_date, u.create_date AS create_date,
+       u.access_key_count AS access_key_count,
+       u.active_access_key_count AS active_access_key_count,
+       u.oldest_active_key_date AS oldest_active_key_date,
+       u.access_key_ids AS access_key_ids
 ```
 
 Each is skipped entirely (no round trip) when its ARN batch is empty.
@@ -134,14 +157,18 @@ Uses `render_hop_bound(ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}` 
 execution; `$risky_actions` (`groups.all_actions()`) is bound alongside `$account_id`/
 `$snapshot_id`. Enrichment queries live in
 `crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_holders`,
-`fetch_instance_profiles`, `fetch_trust_principals`), shared with `org_escalation.rs`.
+`fetch_instance_profiles`, `fetch_trust_principals`, `fetch_user_attributes`), shared with
+`org_escalation.rs`. `iam-grapher`'s `query privilege-escalation`/`org-escalation` subcommands
+apply an additional `--entity-type <user|role|group|all>` filter in Rust, after this query
+returns — see `crates/iam-grapher/src/cli/query.rs::filter_by_entity_type`.
 
 ## Returns
 
 `Vec<EscalationPath>` where
-`EscalationPath { arn, name, entity_type, risky_actions, matched_paths, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`,
-`Hop { arn, entity_type }`, `Holder { arn, name, entity_type }`,
-`InstanceProfileRef { arn, name }`, and `TrustPrincipal { id, principal_type, conditional }`.
+`EscalationPath { arn, name, entity_type, risky_actions, matched_paths, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes> }`,
+`Hop { arn, entity_type }`, `Holder { arn, name, entity_type, attributes: UserAttributes }`,
+`InstanceProfileRef { arn, name }`, `TrustPrincipal { id, principal_type, conditional }`, and
+`UserAttributes { user_id, has_mfa, mfa_method: Option<String>, console_login_enabled, password_last_used: Option<String>, last_activity_date: Option<String>, create_date, access_key_count, active_access_key_count, oldest_active_key_date: Option<String>, access_key_ids: Vec<String> }`.
 Rust post-processing dedupes by arn (shortest path wins), applies wildcard-aware Deny
 suppression via `iam_expander::glob_match`, then evaluates AND-within-group/OR-across-group
 matching via `RiskyActionGroups::finalize_actions` on the post-Deny action set — group matching
@@ -154,9 +181,10 @@ surviving terminal set.
 
 `holders` is populated only when the terminal's `entity_type == "Group"` (member Users via
 `MEMBER_OF`); `instance_profiles` and `trust_principals` only when the terminal's
-`entity_type == "Role"` (via `CONTAINS_ROLE` and `CAN_ASSUME` respectively). All three are
-empty otherwise. These, and `matched_paths`, are exact graph traversals/exact-match
-evaluations, not glob-match approximations, so no new `CaveatCode` variant applies to them.
+`entity_type == "Role"` (via `CONTAINS_ROLE` and `CAN_ASSUME` respectively); `user_attributes`
+only when `arn`'s own `entity_type == "User"`. All are empty/absent otherwise. These, and
+`matched_paths`, are exact graph traversals/exact-match evaluations, not glob-match
+approximations, so no new `CaveatCode` variant applies to them.
 
 ## Notes
 
