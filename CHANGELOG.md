@@ -6,10 +6,11 @@ All notable changes to this project are documented here.
 
 User attributes and access keys in escalation results.
 
-- **User security posture in escalation results**: `privilege-escalation`/`org-escalation` JSON output now attaches a `UserAttributes` object (MFA, console login, password/activity dates, access-key count/ids) to every User in a result — the escalating entity itself (`user_attributes`) and every Group `holders` entry (`attributes`). Table output is unchanged.
+- **User security posture in escalation results**: `privilege-escalation`/`org-escalation` JSON output now attaches a `UserAttributes` object (MFA, console login, password/activity dates, access-key count/ids) to every User in a result — the escalating entity itself (`user_attributes`) and every Group `holders` entry (`attributes`).
 - **Access keys ingested**: `LiveCollector` already called `ListAccessKeys`/`GetAccessKeyLastUsed` per user but discarded the results; `AccessKeyMeta` is now populated and carried into the graph as `access_key_count`, `active_access_key_count`, `oldest_active_key_date`, and `access_key_ids` on the `User` node. No new AWS API calls.
 - **`--entity-type <user|role|group|all>`** flag on `privilege-escalation`/`org-escalation` filters results after the query runs (default `all`); `user` keeps User-entity results and any Group result with a non-empty `holders` list.
 - **Graphviz**: escalation node tooltips gain a posture summary (MFA/console/active-key count), and a risky User terminal with no MFA renders in a distinct fill color.
+- **BREAKING: `--output table` removed.** JSON is now the only (and default) output format for `query`, `collect`, `collect org`, `docs`, and `config`; `--output graphviz` is unchanged. Scripts that relied on the hand-rolled table format or on `table` being the implicit default must switch to `--output json` (or drop `--output` entirely, since `json` is now the default) and parse the `{"results": ..., "caveats": [...]}` envelope.
 
 ## [0.6.0] - 2026-08-24
 

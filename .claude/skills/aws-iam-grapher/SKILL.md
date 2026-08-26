@@ -13,8 +13,8 @@ the full caveat/limitation list this file only summarizes.
 
 ## Hard rules
 
-1. **Always pass `--output json`** and parse stdout as `{"results": ..., "caveats": [...]}`.
-   Never rely on the table-formatted output for anything but showing the user something readable.
+1. **Parse stdout as `{"results": ..., "caveats": [...]}`.** JSON is the CLI's only output
+   format (`--output graphviz` is the sole exception, for graph-shaped queries).
 2. **Never pass a password on the command line.** There is no `--neo4j-pass` flag — only
    `--neo4j-pass-file <path>`. In normal use, don't pass any credential flag at all: the binary
    reads `NEO4J_PASSWORD` from the environment on its own. Never print, echo, or repeat the value

@@ -378,16 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn print_collect_summary_table_no_file_writes_no_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-
-        summary_args(OutputFormat::Table, None).unwrap();
-
-        assert!(!path.exists());
-    }
-
-    #[test]
     fn print_collect_summary_json_no_file_writes_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
@@ -395,16 +385,6 @@ mod tests {
         summary_args(OutputFormat::Json, None).unwrap();
 
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn print_collect_summary_table_with_file_writes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-
-        summary_args(OutputFormat::Table, Some(&path)).unwrap();
-
-        assert!(path.exists());
     }
 
     #[test]

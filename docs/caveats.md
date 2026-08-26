@@ -1,11 +1,11 @@
 # Caveats
 
-`query ... --output json` attaches a machine-readable `caveats` array to every response,
-populated with only the codes below that actually apply to that query and that snapshot. The
-array is always present, empty when no caveat applies. This document explains each approximation
-those codes reference — a human reading table output can hold them in mind; a model consuming
-bare JSON cannot, so the closed `CaveatCode` enum (`crates/iam-graph/src/queries/caveats.rs`)
-carries the applicable subset alongside query results.
+`query` attaches a machine-readable `caveats` array to every JSON response, populated with only
+the codes below that actually apply to that query and that snapshot. The array is always
+present, empty when no caveat applies. This document explains each approximation those codes
+reference — a model consuming bare JSON has no other way to hold them in mind, so the closed
+`CaveatCode` enum (`crates/iam-graph/src/queries/caveats.rs`) carries the applicable subset
+alongside query results.
 
 ## Caveat codes
 
