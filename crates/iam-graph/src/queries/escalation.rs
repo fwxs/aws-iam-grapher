@@ -2,13 +2,14 @@ use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use crate::queries::escalation_enrichment::{
-    fetch_holders, fetch_instance_profiles, fetch_trust_principals, fetch_user_attributes, Holder,
-    InstanceProfileRef, TrustPrincipal, UserAttributes,
+    collect_enrichment_keys, fetch_holders, fetch_instance_profiles, fetch_trust_principals,
+    fetch_user_attributes, EnrichmentKeys, Holder, InstanceProfileRef, TrustPrincipal,
+    UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
 use neo4rs::Graph;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// One hop in an escalation path — the ARN and entity-type label of a node on the chain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -140,39 +141,18 @@ pub async fn privilege_escalation_paths(
         kept.push((arn, candidate, risky_actions, matched_paths));
     }
 
-    // Enrichment is keyed on the terminal entity (the actual permission holder, the last
-    // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
-    // *reach* the risky action, while `path.last()` is the entity that holds it directly.
-    // Multiple distinct start entities can share the same terminal via different chains, so
-    // dedupe via HashSet before UNWINDing — otherwise the enrichment query re-executes its
-    // MATCH once per duplicate and every path sharing that terminal reports doubled results.
-    let terminal_hops: Vec<&Hop> = kept
-        .iter()
-        .filter_map(|(_, c, _, _)| c.path.last())
-        .collect();
-    let group_terminals: Vec<String> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Group")
-        .map(|h| h.arn.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let role_terminals: Vec<String> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Role")
-        .map(|h| h.arn.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    // Keyed on the escalating entity's own arn (not the terminal) — the User whose
-    // posture matters is the one who'd actually be attacked, at the start of the chain.
-    let user_arns: Vec<String> = kept
-        .iter()
-        .filter(|(_, c, _, _)| c.entity_type == "User")
-        .map(|(arn, _, _, _)| arn.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let EnrichmentKeys {
+        group_terminals,
+        role_terminals,
+        user_arns,
+    } = collect_enrichment_keys(
+        &kept,
+        |c: &Candidate| c.path.as_slice(),
+        |c: &Candidate| c.entity_type.as_str(),
+        |h: &Hop| h.arn.clone(),
+        |h: &Hop| h.entity_type.as_str(),
+        |arn: &str, _c: &Candidate| Some(arn.to_string()),
+    );
 
     let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
         fetch_holders(graph, ctx, &group_terminals),

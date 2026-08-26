@@ -3,7 +3,7 @@ use crate::nodes::Row;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use neo4rs::Graph;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Security posture of a `User` appearing in an escalation result — either the escalating
 /// entity itself, or a `Holder` who inherits risky permissions via `MEMBER_OF`.
@@ -260,6 +260,75 @@ pub(crate) async fn fetch_user_attributes(
 pub(crate) struct OrgTerminal {
     pub arn: String,
     pub snapshot_id: String,
+}
+
+/// Deduped terminal/entity keys to enrich for one `privilege_escalation_paths`/
+/// `org_escalation_paths` call — `K` is `String` for the single-account query, `OrgTerminal`
+/// for the org-wide one (which needs each terminal's own `snapshot_id` alongside its arn).
+pub(crate) struct EnrichmentKeys<K> {
+    pub group_terminals: Vec<K>,
+    pub role_terminals: Vec<K>,
+    pub user_arns: Vec<K>,
+}
+
+/// Extract and dedupe the three enrichment key sets from a candidate list, shared by
+/// `privilege_escalation_paths` and `org_escalation_paths` so the dedup rule can't drift
+/// between them.
+///
+/// Enrichment is keyed on the terminal entity (the actual permission holder, the last hop
+/// of a path) for `group_terminals`/`role_terminals` — for transitive chains the candidate's
+/// own key is the assumer that can *reach* the risky action, while the terminal is the entity
+/// that holds it directly. `user_arns` is the opposite: keyed on the escalating entity's own
+/// key, since the User whose security posture matters is the one who'd actually be attacked,
+/// at the start of the chain, not whichever entity happens to hold the permission at the end.
+///
+/// Multiple distinct candidates can share the same terminal via different chains, so every
+/// set is deduped via `HashSet` before the caller UNWINDs it — otherwise the enrichment query
+/// re-executes its `MATCH` once per duplicate and every path sharing that terminal reports
+/// doubled results.
+pub(crate) fn collect_enrichment_keys<C, K, H>(
+    candidates: &[(String, C, Vec<String>, Vec<String>)],
+    path_of: impl Fn(&C) -> &[H],
+    entity_type_of: impl Fn(&C) -> &str,
+    terminal_key: impl Fn(&H) -> K,
+    hop_entity_type: impl Fn(&H) -> &str,
+    user_key: impl Fn(&str, &C) -> Option<K>,
+) -> EnrichmentKeys<K>
+where
+    K: Eq + std::hash::Hash + Clone,
+{
+    let terminal_hops: Vec<&H> = candidates
+        .iter()
+        .filter_map(|(_, c, _, _)| path_of(c).last())
+        .collect();
+
+    let group_terminals: Vec<K> = terminal_hops
+        .iter()
+        .filter(|h| hop_entity_type(h) == "Group")
+        .map(|h| terminal_key(h))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let role_terminals: Vec<K> = terminal_hops
+        .iter()
+        .filter(|h| hop_entity_type(h) == "Role")
+        .map(|h| terminal_key(h))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let user_arns: Vec<K> = candidates
+        .iter()
+        .filter(|(_, c, _, _)| entity_type_of(c) == "User")
+        .filter_map(|(arn, c, _, _)| user_key(arn, c))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    EnrichmentKeys {
+        group_terminals,
+        role_terminals,
+        user_arns,
+    }
 }
 
 fn org_pairs(terminals: &[OrgTerminal]) -> Vec<Row> {
