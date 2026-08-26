@@ -532,7 +532,14 @@ async fn enrich_user(
                     Some(aws_sdk_iam::types::StatusType::Active) => AccessKeyStatus::Active,
                     _ => AccessKeyStatus::Inactive,
                 };
-                let create_date = sdk_dt_opt(key.create_date()).unwrap_or_else(Utc::now);
+                let create_date = match sdk_dt_opt(key.create_date()) {
+                    Some(d) => d,
+                    None => {
+                        debug!(%user_name, %key_id, "access key CreateDate missing or unparseable");
+                        access_key_ok = false;
+                        Utc::now()
+                    }
+                };
 
                 // A key we know exists but can't date is still signal — keep it in the
                 // result with `last_used_date: None` rather than dropping it, and fold
