@@ -53,7 +53,7 @@ pub use analysis::{
 pub use caveats::{Caveat, CaveatCode};
 pub use context::{OrgQueryContext, QueryContext};
 pub use escalation::{privilege_escalation_paths, EscalationPath, Hop};
-pub use escalation_enrichment::{Holder, InstanceProfileRef, TrustPrincipal};
+pub use escalation_enrichment::{Holder, InstanceProfileRef, TrustPrincipal, UserAttributes};
 pub use org_escalation::{org_escalation_paths, OrgEscalationPath, OrgHop};
 pub use risky_actions::{RiskyActionGroup, RiskyActionGroups, RiskyActionsError};
 pub use scope::{resolve_org_context, resolve_scopes, ResolvedScope, ScopeSelector};

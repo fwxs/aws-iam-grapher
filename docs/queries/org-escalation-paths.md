@@ -79,11 +79,20 @@ the deduped set of terminal (permission-holding) hops — `path.last()`, not the
 each pair carries its own `snapshot_id` rather than one bound parameter:
 
 ```cypher
--- org_escalation_holders.cypher (Group terminals only)
+-- org_escalation_holders.cypher (Group terminals only) — also returns the holder's own
+-- User node properties as `attributes` (see below)
 UNWIND $pairs AS pair
 MATCH (g:Group {arn: pair.arn, snapshot_id: pair.snapshot_id})
 MATCH (u:User)-[:MEMBER_OF]->(g)
-RETURN pair.arn AS terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type
+RETURN pair.arn AS terminal_arn, u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type,
+       u.user_id AS user_id, u.has_mfa AS has_mfa, u.mfa_method AS mfa_method,
+       u.console_login_enabled AS console_login_enabled,
+       u.password_last_used AS password_last_used,
+       u.last_activity_date AS last_activity_date, u.create_date AS create_date,
+       u.access_key_count AS access_key_count,
+       u.active_access_key_count AS active_access_key_count,
+       u.oldest_active_key_date AS oldest_active_key_date,
+       u.access_key_ids AS access_key_ids
 
 -- org_escalation_instance_profiles.cypher (Role terminals only)
 UNWIND $pairs AS pair
@@ -96,6 +105,19 @@ UNWIND $pairs AS pair
 MATCH (r:Role {arn: pair.arn, snapshot_id: pair.snapshot_id})
 MATCH (pr:Principal)-[rel:CAN_ASSUME]->(r)
 RETURN pair.arn AS terminal_arn, pr.id AS id, pr.type AS principal_type, rel.conditional AS conditional
+
+-- org_escalation_user_attributes.cypher (User entities only) — keyed on the escalating
+-- entity's own (arn, snapshot_id), NOT the terminal
+UNWIND $pairs AS pair
+MATCH (u:User {arn: pair.arn, snapshot_id: pair.snapshot_id})
+RETURN pair.arn AS entity_arn, u.user_id AS user_id, u.has_mfa AS has_mfa,
+       u.mfa_method AS mfa_method, u.console_login_enabled AS console_login_enabled,
+       u.password_last_used AS password_last_used,
+       u.last_activity_date AS last_activity_date, u.create_date AS create_date,
+       u.access_key_count AS access_key_count,
+       u.active_access_key_count AS active_access_key_count,
+       u.oldest_active_key_date AS oldest_active_key_date,
+       u.access_key_ids AS access_key_ids
 ```
 
 Each is skipped entirely (no round trip) when its terminal batch is empty.
@@ -107,27 +129,32 @@ Each is skipped entirely (no round trip) when its terminal batch is empty.
 Uses `render_hop_bound(ORG_ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}`; bound
 parameters are `$org_run_id` and `$risky_actions` (`groups.all_actions()`). Enrichment queries
 live in `crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_org_holders`,
-`fetch_org_instance_profiles`, `fetch_org_trust_principals`), shared with `escalation.rs`.
+`fetch_org_instance_profiles`, `fetch_org_trust_principals`, `fetch_org_user_attributes`),
+shared with `escalation.rs`. `iam-grapher`'s `query org-escalation` subcommand applies an
+additional `--entity-type <user|role|group|all>` filter in Rust, after this query returns —
+see `crates/iam-grapher/src/cli/query.rs::filter_by_entity_type`.
 
 ## Returns
 
 `Vec<OrgEscalationPath>` where
-`OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, matched_paths, path: Vec<OrgHop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal> }`
+`OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, matched_paths, path: Vec<OrgHop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes> }`
 and `OrgHop { arn, entity_type, account_id, snapshot_id }` — `OrgHop` carries `account_id` and
 `snapshot_id` per node so a caller can render the cross-account path and enrichment queries
-can resolve each hop against its own snapshot. Rust post-processing dedupes by arn keeping the
-shortest path, applies wildcard Deny suppression via `iam_expander::glob_match`, then evaluates
-AND-within-group/OR-across-group matching via `RiskyActionGroups::finalize_actions` on the
-post-Deny action set — this must happen after Deny subtraction, never before (see
-`RiskyActionGroups::finalize_actions`'s doc comment) — and drops entities that satisfy no
-group. `risky_actions` is the deduplicated union of actions belonging to every matched group;
-`matched_paths` names the matched groups. The enrichment queries then run against the surviving
-terminal set.
+can resolve each hop against its own snapshot. `Holder`/`UserAttributes` are the same shape
+used by `escalation.rs` — see `privilege-escalation-paths.md`. Rust post-processing dedupes by
+arn keeping the shortest path, applies wildcard Deny suppression via
+`iam_expander::glob_match`, then evaluates AND-within-group/OR-across-group matching via
+`RiskyActionGroups::finalize_actions` on the post-Deny action set — this must happen after
+Deny subtraction, never before (see `RiskyActionGroups::finalize_actions`'s doc comment) — and
+drops entities that satisfy no group. `risky_actions` is the deduplicated union of actions
+belonging to every matched group; `matched_paths` names the matched groups. The enrichment
+queries then run against the surviving terminal set.
 
 `holders` is populated only when the terminal's `entity_type == "Group"`;
-`instance_profiles`/`trust_principals` only when `entity_type == "Role"`. All three are empty
-otherwise. These, and `matched_paths`, are exact graph traversals/exact-match evaluations, not
-glob-match approximations, so no new `CaveatCode` variant applies to them.
+`instance_profiles`/`trust_principals` only when `entity_type == "Role"`; `user_attributes`
+only when `arn`'s own `entity_type == "User"`. All are empty/absent otherwise. These, and
+`matched_paths`, are exact graph traversals/exact-match evaluations, not glob-match
+approximations, so no new `CaveatCode` variant applies to them.
 
 ## Notes
 

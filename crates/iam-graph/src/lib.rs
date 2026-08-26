@@ -36,5 +36,5 @@ pub use queries::{
     InstanceProfileRef, OrgEscalationPath, OrgHop, OrgQueryContext, PermissionDiff,
     PermissionRecord, PermissionRow, QueryContext, ResolvedScope, RiskyActionGroup,
     RiskyActionGroups, RiskyActionsError, ScopeSelector, SnapshotRecord, TrustPrincipal,
-    DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
+    UserAttributes, DEFAULT_MAX_HOPS, MAX_HOPS_CAP,
 };

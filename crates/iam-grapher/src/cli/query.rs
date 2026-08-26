@@ -1,16 +1,16 @@
 use crate::cli::common::{ConnectionArgs, OutputArgs};
 use crate::exit_code::CliValidationError;
-use crate::output::{graphviz, json, table, table::RenderSpec, OutputFormat};
+use crate::output::{graphviz, json, OutputFormat};
 use anyhow::Context as _;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use iam_collector::account_id_from_arn;
 use iam_graph::{
     associated_entities, delete_snapshot, diff_permissions, entity_permissions,
     instance_profiles_with_action, list_account_ids, list_accounts, list_snapshots,
     org_escalation_paths, privilege_escalation_paths, resolve_org_context, resolve_scopes,
-    snapshot_record, snapshots_for_org_run, who_can, AssociatedEntity, Caveat, EntityRef,
-    EscalationPath, GraphClient, GraphError, PermissionRow, QueryContext, ResolvedScope,
-    RiskyActionGroups, ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
+    snapshot_record, snapshots_for_org_run, who_can, Caveat, EntityRef, EscalationPath,
+    GraphClient, GraphError, OrgEscalationPath, QueryContext, ResolvedScope, RiskyActionGroups,
+    ScopeSelector, SnapshotRecord, DEFAULT_MAX_HOPS,
 };
 use iam_models::condition::ConditionContext;
 use serde::Serialize;
@@ -49,35 +49,20 @@ struct QueryResponse<'a, T: Serialize> {
     caveats: Vec<Caveat>,
 }
 
-/// Emit JSON (wrapped in [`QueryResponse`]) to `output_file` (if given) and/or stdout per
-/// `output`. Returns `true` if the human-readable view should still be printed to stdout.
-///
-/// | output | output_file | file | stdout |
-/// |--------|-------------|------|--------|
-/// | table  | absent      | —    | table  |
-/// | json   | absent      | —    | json   |
-/// | table  | present     | json | table  |
-/// | json   | present     | json | (none) |
+/// Emit JSON (wrapped in [`QueryResponse`]) to `output_file` (if given), or stdout otherwise.
 fn emit_json<T: Serialize>(
     value: &T,
     caveats: Vec<Caveat>,
-    output: &OutputFormat,
     output_file: Option<&Path>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<()> {
     let response = QueryResponse {
         results: value,
         caveats,
     };
-    if let Some(path) = output_file {
-        json::write_json(&response, path)?;
+    match output_file {
+        Some(path) => json::write_json(&response, path),
+        None => json::print_json(&response),
     }
-    if *output == OutputFormat::Json {
-        if output_file.is_none() {
-            json::print_json(&response)?;
-        }
-        return Ok(false);
-    }
-    Ok(true)
 }
 
 /// One account's results within a multi-account (`--account-id` omitted) fan-out.
@@ -136,122 +121,6 @@ fn who_can_static_caveats() -> Vec<Caveat> {
 /// but never evaluate `NotAction` — so only `approximate-deny` applies here.
 fn escalation_static_caveats() -> Vec<Caveat> {
     vec![Caveat::approximate_deny()]
-}
-
-fn print_account_header(account_id: &str, snapshot_id: &str) {
-    println!(
-        "=== Account: {} (snapshot: {}) ===",
-        account_id,
-        short_id(snapshot_id)
-    );
-}
-
-fn who_can_rows(results: &[EntityRef]) -> RenderSpec {
-    let rows = results
-        .iter()
-        .map(|e| {
-            let mut type_label = e.entity_type.clone();
-            if e.is_full_admin {
-                type_label.push_str(" [full-admin]");
-            }
-            if e.is_bounded {
-                type_label.push_str(" [bounded]");
-            }
-            if e.conditional {
-                type_label.push_str(&format!(
-                    " [conditional: {}]",
-                    e.unevaluated_condition_keys.join(", ")
-                ));
-            }
-            vec![type_label, e.arn.clone(), e.resource.clone()]
-        })
-        .collect();
-    RenderSpec {
-        headers: &["TYPE", "ARN", "RESOURCE"],
-        rows,
-    }
-}
-
-fn entity_perm_rows(perms: &[PermissionRow]) -> RenderSpec {
-    let rows = perms
-        .iter()
-        .map(|p| {
-            let status = if p.effective {
-                "effective"
-            } else {
-                "capped-by-boundary"
-            };
-            vec![
-                p.effect.clone(),
-                p.action.clone(),
-                p.resource.clone(),
-                status.to_string(),
-            ]
-        })
-        .collect();
-    RenderSpec {
-        headers: &["EFFECT", "ACTION", "RESOURCE", "STATUS"],
-        rows,
-    }
-}
-
-fn associated_entities_rows(results: &[AssociatedEntity]) -> RenderSpec {
-    let rows = results
-        .iter()
-        .map(|e| vec![e.entity_type.clone(), e.arn.clone(), e.relationship.clone()])
-        .collect();
-    RenderSpec {
-        headers: &["TYPE", "ARN", "RELATIONSHIP"],
-        rows,
-    }
-}
-
-fn instance_profile_rows(results: &[EntityRef]) -> RenderSpec {
-    let rows = results
-        .iter()
-        .map(|e| vec![e.name.clone(), e.arn.clone()])
-        .collect();
-    RenderSpec {
-        headers: &["NAME", "ARN"],
-        rows,
-    }
-}
-
-fn escalation_rows(paths: &[EscalationPath]) -> RenderSpec {
-    let rows = paths
-        .iter()
-        .map(|p| {
-            let path_str = p
-                .path
-                .iter()
-                .map(|h| h.arn.as_str())
-                .collect::<Vec<_>>()
-                .join(" -> ");
-            vec![
-                p.arn.clone(),
-                path_str,
-                p.risky_actions.join(", "),
-                p.matched_paths.join(", "),
-                p.holders.len().to_string(),
-                p.instance_profiles.len().to_string(),
-                p.trust_principals.len().to_string(),
-                if p.conditional { "yes" } else { "no" }.to_string(),
-            ]
-        })
-        .collect();
-    RenderSpec {
-        headers: &[
-            "ENTITY",
-            "PATH",
-            "RISKY ACTIONS",
-            "MATCHED PATHS",
-            "HOLDERS",
-            "INSTANCE PROFILES",
-            "TRUST PRINCIPALS",
-            "CONDITIONAL",
-        ],
-        rows,
-    }
 }
 
 /// Resolve the accounts a fan-out (`ref cmd` with no `--account-id`) should target:
@@ -315,13 +184,6 @@ fn print_partial_warning(snapshot: &SnapshotRecord) {
     }
 }
 
-/// Whether a scoped query ran against one account (carrying its snapshot id, for the
-/// single-account heading) or fanned out across several (carrying the account count).
-enum ScopeCount<'a> {
-    Single(&'a str),
-    Multi(usize),
-}
-
 /// Output routing plus single-vs-fan-out mode for a `run_scoped` call, bundled so the
 /// driver stays under clippy's argument-count lint.
 struct ScopedOutput<'a> {
@@ -340,21 +202,17 @@ struct ScopedOutput<'a> {
 /// Renders a query result as Graphviz DOT text, given (result, suggested graph name).
 type ToDot<'a, T> = &'a dyn Fn(&T, &str) -> String;
 
-/// Run a query over one or more resolved scopes and render the result uniformly.
+/// Run a query over one or more resolved scopes and emit the result as JSON.
 ///
 /// `to_dot`, when present, renders a scope's result as Graphviz DOT text. Pass `None`
 /// for queries with no graph-shaped result — `--output graphviz` is rejected up front
 /// in `run()` for those, so this is never called with `out.format == Graphviz` and
 /// `to_dot: None` at once.
-#[allow(clippy::too_many_arguments)]
 async fn run_scoped<T, F, Fut>(
     out: ScopedOutput<'_>,
     scopes: Vec<ResolvedScope>,
     query: F,
-    render: impl Fn(&T) -> RenderSpec,
     to_dot: Option<ToDot<'_, T>>,
-    heading: impl Fn(ScopeCount) -> String,
-    empty_msg: &str,
 ) -> anyhow::Result<()>
 where
     T: Serialize,
@@ -376,22 +234,11 @@ where
                 )
             })?;
         print_partial_warning(&snapshot);
-        let result = query(context.clone()).await?;
+        let result = query(context).await?;
 
         let mut caveats = out.caveats;
         caveats.extend(snapshot_caveats(&[&snapshot]));
-        if !emit_json(&result, caveats, out.format, out.file)? {
-            return Ok(());
-        }
-
-        println!("{}\n", heading(ScopeCount::Single(&context.snapshot_id)));
-
-        let spec = render(&result);
-        if spec.rows.is_empty() {
-            println!("{empty_msg}");
-            return Ok(());
-        }
-        print!("{}", table::format_table(spec.headers, &spec.rows));
+        emit_json(&result, caveats, out.file)?;
         return Ok(());
     }
 
@@ -410,20 +257,7 @@ where
 
     let mut caveats = out.caveats;
     caveats.extend(snapshot_caveats(&all_snapshots));
-    if !emit_json(&groups, caveats, out.format, out.file)? {
-        return Ok(());
-    }
-
-    println!("{}\n", heading(ScopeCount::Multi(groups.len())));
-    for g in &groups {
-        print_account_header(&g.account_id, &g.snapshot_id);
-        let spec = render(&g.results);
-        if spec.rows.is_empty() {
-            println!("{empty_msg}\n");
-            continue;
-        }
-        println!("{}", table::format_table(spec.headers, &spec.rows));
-    }
+    emit_json(&groups, caveats, out.file)?;
     Ok(())
 }
 
@@ -517,6 +351,8 @@ enum QueryCommand {
         hops: MaxHopsArg,
         #[command(flatten)]
         risky_actions: RiskyActionsArg,
+        #[command(flatten)]
+        entity_type: EntityTypeArg,
     },
     /// List available snapshots for the account.
     ListSnapshots,
@@ -539,6 +375,8 @@ enum QueryCommand {
         /// Org collection run id (default: most recent org run).
         #[arg(long)]
         org_run_id: Option<String>,
+        #[command(flatten)]
+        entity_type: EntityTypeArg,
     },
 }
 
@@ -559,6 +397,51 @@ pub struct RiskyActionsArg {
     /// ~/.aws-iam-grapher/config/risky-actions.yaml (fatal if neither is found).
     #[arg(long)]
     risky_actions: Option<PathBuf>,
+}
+
+/// Which escalating-entity types to keep in an escalation result. Shared by
+/// `PrivilegeEscalation` and `OrgEscalation`.
+#[derive(Args)]
+pub struct EntityTypeArg {
+    /// Restrict results to this entity type. `user` also keeps a Group path that has at
+    /// least one holder — a user reachable only via that group's membership is exactly
+    /// the case this filter is for.
+    #[arg(long = "entity-type", value_enum, default_value_t = EntityTypeFilter::All)]
+    entity_type: EntityTypeFilter,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EntityTypeFilter {
+    User,
+    Role,
+    Group,
+    All,
+}
+
+/// Filter escalation results in Rust, after the query returns — never in Cypher. The
+/// UNION/dedupe/Deny-subtraction logic in `privilege_escalation_paths.cypher` is
+/// intricate and correct; a post-filter here cannot break it.
+fn filter_by_entity_type<T>(
+    paths: Vec<T>,
+    filter: EntityTypeFilter,
+    entity_type: impl Fn(&T) -> &str,
+    holder_count: impl Fn(&T) -> usize,
+) -> Vec<T> {
+    match filter {
+        EntityTypeFilter::All => paths,
+        EntityTypeFilter::User => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "User" || holder_count(p) > 0)
+            .collect(),
+        EntityTypeFilter::Role => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "Role")
+            .collect(),
+        EntityTypeFilter::Group => paths
+            .into_iter()
+            .filter(|p| entity_type(p) == "Group")
+            .collect(),
+    }
 }
 
 /// Resolve the risky-actions config per the two-step rule: `explicit` (fatal if missing)
@@ -633,30 +516,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
             // A snapshot listing isn't an access query — it's metadata, and each row
             // already self-reports `is_partial`/`partial_reasons`. No caveats apply.
-            if !emit_json(
-                &snapshots,
-                Vec::new(),
-                &output,
-                args.output.output_file.as_deref(),
-            )? {
-                return Ok(());
-            }
-
-            let rows: Vec<Vec<String>> = snapshots
-                .iter()
-                .map(|s| {
-                    vec![
-                        s.id.clone(),
-                        s.account_id.clone(),
-                        s.collected_at.clone(),
-                        if s.is_partial { "partial" } else { "full" }.to_string(),
-                    ]
-                })
-                .collect();
-            print!(
-                "{}",
-                table::format_table(&["SNAPSHOT ID", "ACCOUNT", "COLLECTED AT", "STATUS"], &rows)
-            );
+            emit_json(&snapshots, Vec::new(), args.output.output_file.as_deref())?;
         }
 
         QueryCommand::ListAccounts => {
@@ -666,30 +526,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
 
             // Cross-account discovery, not an access query. Always empty (acceptance
             // criterion: `list-accounts --output json` returns `caveats: []`).
-            if !emit_json(
-                &accounts,
-                Vec::new(),
-                &output,
-                args.output.output_file.as_deref(),
-            )? {
-                return Ok(());
-            }
-
-            let rows: Vec<Vec<String>> = accounts
-                .iter()
-                .map(|a| {
-                    vec![
-                        a.id.clone(),
-                        a.alias.clone().unwrap_or_default(),
-                        a.ou_id.clone().unwrap_or_default(),
-                        a.ou_name.clone().unwrap_or_default(),
-                    ]
-                })
-                .collect();
-            print!(
-                "{}",
-                table::format_table(&["ACCOUNT ID", "ALIAS", "OU ID", "OU NAME"], &rows)
-            );
+            emit_json(&accounts, Vec::new(), args.output.output_file.as_deref())?;
         }
 
         QueryCommand::DeleteSnapshot { snapshot_id } => {
@@ -703,6 +540,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             hops: MaxHopsArg { max_hops },
             risky_actions,
             org_run_id,
+            entity_type: EntityTypeArg { entity_type },
         } => {
             let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let ctx = resolve_org_context(client.inner(), org_run_id).await?;
@@ -710,6 +548,12 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             let paths = org_escalation_paths(client.inner(), &ctx, max_hops, &groups)
                 .await
                 .context("org-escalation query failed")?;
+            let paths = filter_by_entity_type(
+                paths,
+                entity_type,
+                |p: &OrgEscalationPath| p.entity_type.as_str(),
+                |p: &OrgEscalationPath| p.holders.len(),
+            );
 
             if output == OutputFormat::Graphviz {
                 let dot = graphviz::org_escalation_paths_to_dot("org_escalation", &paths);
@@ -718,69 +562,12 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             }
 
             // Snapshot-derived caveats need one extra graph query across the whole org run.
-            // Only pay for it when the result will actually carry caveats: `--output table`
-            // with no `--output-file` never serializes JSON at all.
             let mut caveats = escalation_static_caveats();
-            if output == OutputFormat::Json || args.output.output_file.is_some() {
-                let snapshots = snapshots_for_org_run(client.inner(), &run_id)
-                    .await
-                    .context("failed to resolve org-run snapshots for caveats")?;
-                caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
-            }
-            if !emit_json(&paths, caveats, &output, args.output.output_file.as_deref())? {
-                return Ok(());
-            }
-
-            println!(
-                "Cross-account escalation paths (org-run: {}, max-hops: {})\n",
-                short_id(&run_id),
-                max_hops
-            );
-
-            if paths.is_empty() {
-                println!("No cross-account escalation paths found.");
-                return Ok(());
-            }
-
-            let rows: Vec<Vec<String>> = paths
-                .iter()
-                .map(|ep| {
-                    let path_str = ep
-                        .path
-                        .iter()
-                        .map(|h| format!("{}@{}", h.arn, short_id(&h.account_id)))
-                        .collect::<Vec<_>>()
-                        .join(" -> ");
-                    vec![
-                        ep.arn.clone(),
-                        ep.account_id.clone(),
-                        path_str,
-                        ep.risky_actions.join(", "),
-                        ep.matched_paths.join(", "),
-                        ep.holders.len().to_string(),
-                        ep.instance_profiles.len().to_string(),
-                        ep.trust_principals.len().to_string(),
-                        if ep.conditional { "yes" } else { "no" }.to_string(),
-                    ]
-                })
-                .collect();
-            print!(
-                "{}",
-                table::format_table(
-                    &[
-                        "ENTITY",
-                        "ACCOUNT",
-                        "PATH",
-                        "RISKY ACTIONS",
-                        "MATCHED PATHS",
-                        "HOLDERS",
-                        "INSTANCE PROFILES",
-                        "TRUST PRINCIPALS",
-                        "CONDITIONAL"
-                    ],
-                    &rows
-                )
-            );
+            let snapshots = snapshots_for_org_run(client.inner(), &run_id)
+                .await
+                .context("failed to resolve org-run snapshots for caveats")?;
+            caveats.extend(snapshot_caveats(&snapshots.iter().collect::<Vec<_>>()));
+            emit_json(&paths, caveats, args.output.output_file.as_deref())?;
         }
 
         QueryCommand::Diff {
@@ -816,31 +603,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
             // reconciliation, no glob matching, no NotAction logic. Neither approximation
             // caveat applies; only snapshot-derived caveats can.
             let caveats = snapshot_caveats(&[&record_a, &record_b]);
-            if !emit_json(&diff, caveats, &output, args.output.output_file.as_deref())? {
-                return Ok(());
-            }
-
-            println!("Permission diff between {snapshot_a} and {snapshot_b}\n");
-
-            if diff.added.is_empty() && diff.removed.is_empty() {
-                println!("No permission differences found.");
-                return Ok(());
-            }
-
-            if !diff.added.is_empty() {
-                println!("NEW PERMISSIONS (in {snapshot_b}, not in {snapshot_a}):");
-                for p in &diff.added {
-                    println!("  [+] {:<6} {:<40} {}", p.effect, p.action, p.resource);
-                }
-                println!();
-            }
-
-            if !diff.removed.is_empty() {
-                println!("REMOVED PERMISSIONS (in {snapshot_a}, not in {snapshot_b}):");
-                for p in &diff.removed {
-                    println!("  [-] {:<6} {:<40} {}", p.effect, p.action, p.resource);
-                }
-            }
+            emit_json(&diff, caveats, args.output.output_file.as_deref())?;
         }
 
         QueryCommand::WhoCan {
@@ -882,21 +645,9 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                         .context("who-can query failed")
                     }
                 },
-                |results: &Vec<EntityRef>| who_can_rows(results),
                 Some(&|results: &Vec<EntityRef>, graph_name: &str| {
                     graphviz::who_can_to_dot(graph_name, &action, results)
                 }),
-                |sc| match sc {
-                    ScopeCount::Single(snapshot_id) => format!(
-                        "Entities with permission {} (snapshot: {})",
-                        action,
-                        short_id(snapshot_id)
-                    ),
-                    ScopeCount::Multi(n) => {
-                        format!("Entities with permission {action} (across {n} account(s))")
-                    }
-                },
-                "No entities found with that permission.",
             )
             .await?;
         }
@@ -933,10 +684,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                             .context("entity-perms query failed")
                     }
                 },
-                |perms: &Vec<PermissionRow>| entity_perm_rows(perms),
                 None,
-                |_sc| format!("Permissions for {arn}"),
-                "No permissions found.",
             )
             .await?;
         }
@@ -974,10 +722,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                             .context("associated-entities query failed")
                     }
                 },
-                |results: &Vec<AssociatedEntity>| associated_entities_rows(results),
                 None,
-                |_sc| format!("Entities associated with {arn}"),
-                "No associated entities found.",
             )
             .await?;
         }
@@ -1010,19 +755,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                             .context("instance-profiles-with query failed")
                     }
                 },
-                |results: &Vec<EntityRef>| instance_profile_rows(results),
                 None,
-                |sc| match sc {
-                    ScopeCount::Single(snapshot_id) => format!(
-                        "Instance profiles granting {} (snapshot: {})",
-                        action,
-                        short_id(snapshot_id)
-                    ),
-                    ScopeCount::Multi(n) => {
-                        format!("Instance profiles granting {action} (across {n} account(s))")
-                    }
-                },
-                "No instance profiles found with that permission.",
             )
             .await?;
         }
@@ -1030,6 +763,7 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
         QueryCommand::PrivilegeEscalation {
             hops: MaxHopsArg { max_hops },
             risky_actions,
+            entity_type: EntityTypeArg { entity_type },
         } => {
             let groups = resolve_risky_actions(risky_actions.risky_actions.as_deref())?;
             let scopes = resolve_command_scopes(
@@ -1050,26 +784,21 @@ pub async fn run(args: QueryArgs, output: OutputFormat) -> anyhow::Result<()> {
                     let client = &client;
                     let groups = &groups;
                     async move {
-                        privilege_escalation_paths(client.inner(), &ctx, max_hops, groups)
-                            .await
-                            .context("privilege-escalation query failed")
+                        let paths =
+                            privilege_escalation_paths(client.inner(), &ctx, max_hops, groups)
+                                .await
+                                .context("privilege-escalation query failed")?;
+                        Ok(filter_by_entity_type(
+                            paths,
+                            entity_type,
+                            |p: &EscalationPath| p.entity_type.as_str(),
+                            |p: &EscalationPath| p.holders.len(),
+                        ))
                     }
                 },
-                |paths: &Vec<EscalationPath>| escalation_rows(paths),
                 Some(&|paths: &Vec<EscalationPath>, graph_name: &str| {
                     graphviz::escalation_paths_to_dot(graph_name, paths)
                 }),
-                |sc| match sc {
-                    ScopeCount::Single(snapshot_id) => format!(
-                        "Privilege escalation paths (snapshot: {}, max-hops: {})",
-                        short_id(snapshot_id),
-                        max_hops
-                    ),
-                    ScopeCount::Multi(n) => format!(
-                        "Privilege escalation paths (max-hops: {max_hops}, across {n} account(s))"
-                    ),
-                },
-                "No privilege escalation paths found.",
             )
             .await?;
         }
@@ -1145,14 +874,94 @@ fn entity_perms_account(
     Ok(arn_account)
 }
 
-fn short_id(id: &str) -> &str {
-    &id[..8.min(id.len())]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use iam_graph::{Holder, UserAttributes};
+
+    fn escalation_path(entity_type: &str, holders: Vec<Holder>) -> EscalationPath {
+        EscalationPath {
+            arn: format!("arn:aws:iam::111111111111:{entity_type}/x"),
+            name: "x".to_string(),
+            entity_type: entity_type.to_string(),
+            risky_actions: vec!["iam:PutUserPolicy".to_string()],
+            matched_paths: vec!["put-user-policy".to_string()],
+            path: vec![],
+            conditional: false,
+            holders,
+            instance_profiles: vec![],
+            trust_principals: vec![],
+            user_attributes: None,
+        }
+    }
+
+    fn holder(arn: &str) -> Holder {
+        Holder {
+            arn: arn.to_string(),
+            name: "holder".to_string(),
+            entity_type: "User".to_string(),
+            attributes: UserAttributes {
+                user_id: "AIDAHOLDER".to_string(),
+                has_mfa: false,
+                mfa_method: None,
+                console_login_enabled: false,
+                password_last_used: None,
+                last_activity_date: None,
+                create_date: "2025-01-01T00:00:00+00:00".to_string(),
+                access_key_count: 0,
+                active_access_key_count: 0,
+                oldest_active_key_date: None,
+                access_key_ids: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn filter_by_entity_type_user_keeps_user_entities_and_groups_with_holders() {
+        let paths = vec![
+            escalation_path("User", vec![]),
+            escalation_path("Role", vec![]),
+            escalation_path("Group", vec![]),
+            escalation_path(
+                "Group",
+                vec![holder("arn:aws:iam::111111111111:user/member")],
+            ),
+        ];
+
+        let filtered = filter_by_entity_type(
+            paths,
+            EntityTypeFilter::User,
+            |p: &EscalationPath| p.entity_type.as_str(),
+            |p: &EscalationPath| p.holders.len(),
+        );
+
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|p| p.entity_type == "User"));
+        assert!(filtered
+            .iter()
+            .any(|p| p.entity_type == "Group" && !p.holders.is_empty()));
+        assert!(!filtered
+            .iter()
+            .any(|p| p.entity_type == "Group" && p.holders.is_empty()));
+        assert!(!filtered.iter().any(|p| p.entity_type == "Role"));
+    }
+
+    #[test]
+    fn filter_by_entity_type_all_keeps_everything() {
+        let paths = vec![
+            escalation_path("User", vec![]),
+            escalation_path("Role", vec![]),
+        ];
+
+        let filtered = filter_by_entity_type(
+            paths,
+            EntityTypeFilter::All,
+            |p: &EscalationPath| p.entity_type.as_str(),
+            |p: &EscalationPath| p.holders.len(),
+        );
+
+        assert_eq!(filtered.len(), 2);
+    }
 
     #[test]
     fn supports_graphviz_true_for_graph_shaped_queries() {
@@ -1169,6 +978,9 @@ mod tests {
             risky_actions: RiskyActionsArg {
                 risky_actions: None
             },
+            entity_type: EntityTypeArg {
+                entity_type: EntityTypeFilter::All
+            },
         }
         .supports_graphviz());
         assert!(QueryCommand::OrgEscalation {
@@ -1177,6 +989,9 @@ mod tests {
                 risky_actions: None
             },
             org_run_id: None,
+            entity_type: EntityTypeArg {
+                entity_type: EntityTypeFilter::All
+            },
         }
         .supports_graphviz());
     }
@@ -1260,81 +1075,28 @@ mod tests {
         }
     }
 
-    // Signature must be `&String`, not `&str`: it's used as `render: impl Fn(&T)` with
-    // `T = String` (the query closures below return `anyhow::Result<String>`).
-    #[allow(clippy::ptr_arg)]
-    fn render_str(s: &String) -> RenderSpec {
-        RenderSpec {
-            headers: &["X"],
-            rows: vec![vec![s.clone()]],
-        }
-    }
-
     #[derive(Serialize)]
     struct SampleValue {
         n: u32,
     }
 
     #[test]
-    fn emit_json_table_no_file_prints_table_no_file_written() {
+    fn emit_json_no_file_writes_nothing_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
 
-        let print_table = emit_json(
-            &SampleValue { n: 1 },
-            Vec::new(),
-            &OutputFormat::Table,
-            None,
-        )
-        .unwrap();
+        emit_json(&SampleValue { n: 1 }, Vec::new(), None).unwrap();
 
-        assert!(print_table);
         assert!(!path.exists());
     }
 
     #[test]
-    fn emit_json_json_no_file_suppresses_table_no_file_written() {
+    fn emit_json_with_file_writes_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
 
-        let print_table =
-            emit_json(&SampleValue { n: 1 }, Vec::new(), &OutputFormat::Json, None).unwrap();
+        emit_json(&SampleValue { n: 1 }, Vec::new(), Some(&path)).unwrap();
 
-        assert!(!print_table);
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn emit_json_table_with_file_writes_file_and_prints_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-
-        let print_table = emit_json(
-            &SampleValue { n: 1 },
-            Vec::new(),
-            &OutputFormat::Table,
-            Some(&path),
-        )
-        .unwrap();
-
-        assert!(print_table);
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn emit_json_json_with_file_writes_file_and_suppresses_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("out.json");
-
-        let print_table = emit_json(
-            &SampleValue { n: 1 },
-            Vec::new(),
-            &OutputFormat::Json,
-            Some(&path),
-        )
-        .unwrap();
-
-        assert!(!print_table);
         assert!(path.exists());
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"n\": 1"));
@@ -1343,10 +1105,11 @@ mod tests {
     #[tokio::test]
     async fn run_scoped_multi_mode_wraps_result_even_for_one_scope() {
         let scopes = vec![scope("111111111111", "snap-a")];
-        let calls = RefCell::new(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
         let out = ScopedOutput {
-            format: &OutputFormat::Table,
-            file: None,
+            format: &OutputFormat::Json,
+            file: Some(&path),
             single: false,
             caveats: Vec::new(),
         };
@@ -1355,32 +1118,25 @@ mod tests {
             out,
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
-            render_str,
             None,
-            |sc| {
-                calls.borrow_mut().push(match sc {
-                    ScopeCount::Single(_) => "single".to_string(),
-                    ScopeCount::Multi(n) => format!("multi:{n}"),
-                });
-                String::new()
-            },
-            "empty",
         )
         .await
         .unwrap();
 
         // --account-id omitted always fans out through AccountGroup, even when only
         // one account resolved — matches base behavior; must not key off scopes.len().
-        assert_eq!(calls.into_inner(), ["multi:1"]);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"account_id\""));
     }
 
     #[tokio::test]
     async fn run_scoped_single_mode_unwraps_the_lone_scope() {
         let scopes = vec![scope("111111111111", "snap-a")];
-        let calls = RefCell::new(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
         let out = ScopedOutput {
-            format: &OutputFormat::Table,
-            file: None,
+            format: &OutputFormat::Json,
+            file: Some(&path),
             single: true,
             caveats: Vec::new(),
         };
@@ -1389,28 +1145,21 @@ mod tests {
             out,
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
-            render_str,
             None,
-            |sc| {
-                calls.borrow_mut().push(match sc {
-                    ScopeCount::Single(id) => format!("single:{id}"),
-                    ScopeCount::Multi(n) => format!("multi:{n}"),
-                });
-                String::new()
-            },
-            "empty",
         )
         .await
         .unwrap();
 
-        assert_eq!(calls.into_inner(), ["single:snap-a"]);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("111111111111"));
+        assert!(!contents.contains("\"account_id\""));
     }
 
     #[tokio::test]
     async fn run_scoped_single_mode_errors_on_unexpected_scope_count() {
         let scopes = vec![scope("111111111111", "a"), scope("222222222222", "b")];
         let out = ScopedOutput {
-            format: &OutputFormat::Table,
+            format: &OutputFormat::Json,
             file: None,
             single: true,
             caveats: Vec::new(),
@@ -1420,10 +1169,7 @@ mod tests {
             out,
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
-            render_str,
             None,
-            |_sc| String::new(),
-            "empty",
         )
         .await;
 
@@ -1444,10 +1190,7 @@ mod tests {
             out,
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
-            render_str,
             Some(&|s: &String, graph_name: &str| format!("digraph {graph_name} {{ {s} }}")),
-            |_sc| String::new(),
-            "empty",
         )
         .await;
 
@@ -1468,10 +1211,7 @@ mod tests {
             out,
             scopes,
             |ctx: QueryContext| async move { Ok(ctx.account_id) },
-            render_str,
             None,
-            |_sc| String::new(),
-            "empty",
         )
         .await;
 
@@ -1498,7 +1238,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
 
-        emit_json(&"hello", Vec::new(), &OutputFormat::Table, Some(&path)).unwrap();
+        emit_json(&"hello", Vec::new(), Some(&path)).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"results\""));
@@ -1510,7 +1250,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
 
-        emit_json(&"hello", Vec::new(), &OutputFormat::Table, Some(&path)).unwrap();
+        emit_json(&"hello", Vec::new(), Some(&path)).unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("\"caveats\": []"));

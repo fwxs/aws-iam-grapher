@@ -1,5 +1,6 @@
 ---
 source: crates/iam-graph/tests/json_schema_tests.rs
+assertion_line: 96
 expression: value
 ---
 {
@@ -32,5 +33,20 @@ expression: value
       "principal_type": "AWS",
       "conditional": false
     }
-  ]
+  ],
+  "user_attributes": {
+    "user_id": "AIDAEXAMPLEATTACKER",
+    "has_mfa": false,
+    "console_login_enabled": true,
+    "password_last_used": "2026-01-01T00:00:00+00:00",
+    "last_activity_date": "2026-01-15T00:00:00+00:00",
+    "create_date": "2025-01-01T00:00:00+00:00",
+    "access_key_count": 2,
+    "active_access_key_count": 1,
+    "oldest_active_key_date": "2025-06-01T00:00:00+00:00",
+    "access_key_ids": [
+      "AKIAEXAMPLE1",
+      "AKIAEXAMPLE2"
+    ]
+  }
 }

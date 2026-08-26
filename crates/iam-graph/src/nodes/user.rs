@@ -1,6 +1,6 @@
 use crate::nodes::uid::entity_uid;
 use crate::nodes::Row;
-use iam_models::IamUser;
+use iam_models::{AccessKeyStatus, IamUser};
 
 /// UNWIND-batched: MERGE a User node per row.
 pub const MERGE_USER: &str = "
@@ -17,6 +17,10 @@ pub const MERGE_USER: &str = "
         u.mfa_method = row.mfa_method,
         u.console_login_enabled = row.console_login_enabled,
         u.last_activity_date = row.last_activity_date,
+        u.access_key_count = row.access_key_count,
+        u.active_access_key_count = row.active_access_key_count,
+        u.oldest_active_key_date = row.oldest_active_key_date,
+        u.access_key_ids = row.access_key_ids,
         u.account_id = row.account_id,
         u.snapshot_id = row.snapshot_id
 ";
@@ -36,6 +40,26 @@ pub fn user_row(snapshot_id: &str, account_id: &str, user: &IamUser) -> Row {
         .last_activity_date
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
+
+    let active_access_key_count = user
+        .access_keys
+        .iter()
+        .filter(|k| k.status == AccessKeyStatus::Active)
+        .count();
+    let oldest_active_key_date = user
+        .access_keys
+        .iter()
+        .filter(|k| k.status == AccessKeyStatus::Active)
+        .map(|k| k.create_date)
+        .min()
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_default();
+    let access_key_ids: Vec<String> = user
+        .access_keys
+        .iter()
+        .map(|k| k.access_key_id.clone())
+        .collect();
+
     Row::from([
         ("uid".to_string(), uid.into()),
         ("arn".to_string(), user.arn.clone().into()),
@@ -55,6 +79,19 @@ pub fn user_row(snapshot_id: &str, account_id: &str, user: &IamUser) -> Row {
             user.console_login_enabled.into(),
         ),
         ("last_activity_date".to_string(), last_activity_date.into()),
+        (
+            "access_key_count".to_string(),
+            (user.access_keys.len() as i64).into(),
+        ),
+        (
+            "active_access_key_count".to_string(),
+            (active_access_key_count as i64).into(),
+        ),
+        (
+            "oldest_active_key_date".to_string(),
+            oldest_active_key_date.into(),
+        ),
+        ("access_key_ids".to_string(), access_key_ids.into()),
         ("account_id".to_string(), account_id.into()),
         ("snapshot_id".to_string(), snapshot_id.into()),
     ])

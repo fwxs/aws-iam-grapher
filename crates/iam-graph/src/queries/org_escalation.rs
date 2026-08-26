@@ -2,13 +2,14 @@ use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
 use crate::queries::escalation_enrichment::{
-    fetch_org_holders, fetch_org_instance_profiles, fetch_org_trust_principals, Holder,
-    InstanceProfileRef, OrgTerminal, TrustPrincipal,
+    collect_enrichment_keys, fetch_org_holders, fetch_org_instance_profiles,
+    fetch_org_trust_principals, fetch_org_user_attributes, finalize_kept, EnrichmentKeys, Holder,
+    InstanceProfileRef, OrgTerminal, TrustPrincipal, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
 use neo4rs::Graph;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// One hop in a cross-account escalation path — includes `account_id` for account labeling.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +47,9 @@ pub struct OrgEscalationPath {
     /// Trust-policy principals that can assume this entity via `CAN_ASSUME`, populated only
     /// when `entity_type == "Role"`.
     pub trust_principals: Vec<TrustPrincipal>,
+    /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_attributes: Option<UserAttributes>,
 }
 
 const ORG_ESCALATION_QUERY: &str = include_str!("../../queries/org_escalation_paths.cypher");
@@ -112,68 +116,44 @@ pub async fn org_escalation_paths(
         }
     }
 
-    let mut kept: Vec<(String, Candidate, Vec<String>, Vec<String>)> = Vec::new();
-    for (arn, candidate) in by_arn {
-        let risky_actions: Vec<String> = candidate
-            .allowed_actions
-            .iter()
-            .filter(|action| {
-                !candidate
-                    .deny_actions
-                    .iter()
-                    .any(|deny| iam_expander::glob_match(deny, action))
+    let kept = finalize_kept(
+        by_arn,
+        groups,
+        |c: &Candidate| c.allowed_actions.as_slice(),
+        |c: &Candidate| c.deny_actions.as_slice(),
+    );
+
+    // Org terminals may span different account snapshots, so `OrgTerminal` carries its own
+    // `snapshot_id` from the hop rather than a single bound `QueryContext`; the escalating
+    // entity's own `snapshot_id` for `user_arns` comes from `path.first()` — the first node
+    // of `path` is always `start` (see org_escalation_paths.cypher) — since `Candidate`
+    // doesn't separately track it.
+    let EnrichmentKeys {
+        group_terminals,
+        role_terminals,
+        user_arns,
+    } = collect_enrichment_keys(
+        &kept,
+        |c: &Candidate| c.path.as_slice(),
+        |c: &Candidate| c.entity_type.as_str(),
+        |h: &OrgHop| OrgTerminal {
+            arn: h.arn.clone(),
+            snapshot_id: h.snapshot_id.clone(),
+        },
+        |h: &OrgHop| h.entity_type.as_str(),
+        |arn: &str, c: &Candidate| {
+            c.path.first().map(|start_hop| OrgTerminal {
+                arn: arn.to_string(),
+                snapshot_id: start_hop.snapshot_id.clone(),
             })
-            .cloned()
-            .collect();
+        },
+    );
 
-        // Group AND-matching MUST run on the post-Deny risky_actions computed above,
-        // never on candidate.allowed_actions directly — evaluating groups before Deny
-        // subtraction would let a group falsely "match" on an action an explicit Deny
-        // actually suppresses, a false positive on a security query.
-        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
-            continue;
-        };
-
-        kept.push((arn, candidate, risky_actions, matched_paths));
-    }
-
-    // Enrichment is keyed on the terminal entity (the actual permission holder, the last
-    // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
-    // *reach* the risky action, while `path.last()` is the entity that holds it directly.
-    // Org terminals may span different account snapshots, so each carries its own
-    // `snapshot_id` from the hop rather than a single bound `QueryContext`. Multiple distinct
-    // start entities can share the same terminal via different chains, so dedupe via HashSet
-    // before UNWINDing — otherwise the enrichment query re-executes its MATCH once per
-    // duplicate and every path sharing that terminal reports doubled results.
-    let terminal_hops: Vec<&OrgHop> = kept
-        .iter()
-        .filter_map(|(_, c, _, _)| c.path.last())
-        .collect();
-    let group_terminals: Vec<OrgTerminal> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Group")
-        .map(|h| OrgTerminal {
-            arn: h.arn.clone(),
-            snapshot_id: h.snapshot_id.clone(),
-        })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let role_terminals: Vec<OrgTerminal> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Role")
-        .map(|h| OrgTerminal {
-            arn: h.arn.clone(),
-            snapshot_id: h.snapshot_id.clone(),
-        })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
         fetch_org_holders(graph, &group_terminals),
         fetch_org_instance_profiles(graph, &role_terminals),
         fetch_org_trust_principals(graph, &role_terminals),
+        fetch_org_user_attributes(graph, &user_arns),
     )?;
 
     let results = kept
@@ -196,6 +176,7 @@ pub async fn org_escalation_paths(
                 .get(terminal_arn)
                 .cloned()
                 .unwrap_or_default();
+            let user_attributes = user_attrs_by_arn.get(&arn).cloned();
             OrgEscalationPath {
                 arn,
                 name: candidate.name,
@@ -208,6 +189,7 @@ pub async fn org_escalation_paths(
                 holders,
                 instance_profiles,
                 trust_principals,
+                user_attributes,
             }
         })
         .collect();

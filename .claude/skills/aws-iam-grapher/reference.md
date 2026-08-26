@@ -60,14 +60,27 @@ a raw structural diff — same restriction. `list-snapshots`/`list-accounts` nev
   `holders` (member Users, `Group` terminals only), `instance_profiles` (wrapping InstanceProfiles,
   `Role` terminals only), `trust_principals` (trust-policy principals that can assume it, `Role`
   terminals only), `matched_paths` (names of the risky-action groups the entity's actions satisfy,
-  evaluated after Deny subtraction). Table output shows counts for holders/instance_profiles/
-  trust_principals and the group name list for matched_paths; `--output json` carries full detail.
+  evaluated after Deny subtraction). `--output json` carries full detail for each field.
   These are exact graph traversals/exact-match evaluations, not glob-match approximations — no
   `caveats` entry applies to them.
+- **Every User in a `privilege-escalation`/`org-escalation` result carries its security posture**:
+  each `holders` entry has an `attributes` object, and a result whose own `entity_type` is `"User"`
+  carries top-level `user_attributes` (`null`/absent otherwise). Fields: `user_id`, `has_mfa`,
+  `mfa_method` (`virtual`/`hardware`/`sms`, absent if no MFA), `console_login_enabled`,
+  `password_last_used`, `last_activity_date`, `create_date`, `access_key_count`,
+  `active_access_key_count`, `oldest_active_key_date` (oldest *active* key's create date, absent
+  if none active), `access_key_ids` (both active and inactive). Use `--entity-type user`
+  (below) to surface only these.
+- **`--entity-type <user|role|group|all>`** filters `privilege-escalation`/`org-escalation` results
+  after the query runs (default `all`). `user` keeps every result whose `entity_type` is `"User"`
+  **and** every Group result that has a non-empty `holders` list — a user reachable only through
+  group membership is exactly the "which users" case, so it stays even though the path's own
+  `entity_type` is `"Group"`. `role`/`group` keep only that exact `entity_type`.
 - **Offline-collected snapshots never populate user security attributes** (`has_mfa`, `mfa_method`,
-  `console_login_enabled`, `last_activity_date`) — these default to `false`/`None` and the snapshot
-  is marked partial (`UserSecurityAttributesNotCollected`). Never state "this user lacks MFA" from
-  an offline snapshot without checking `partial_reasons` first.
+  `console_login_enabled`, `last_activity_date`, access keys) — these default to `false`/`None`/empty
+  and the snapshot is marked partial (`UserSecurityAttributesNotCollected`). Never state "this user
+  lacks MFA" or "this user has no active keys" from an offline snapshot without checking
+  `partial_reasons` first.
 
 Full detail: `docs/limitations.md`, `docs/caveats.md` in the repository.
 
