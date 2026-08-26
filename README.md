@@ -15,24 +15,39 @@ Collect AWS IAM permissions into a Neo4j graph and run security analysis queries
 
 ## Installation
 
-```bash
-git clone https://github.com/<user>/aws-iam-grapher
-cd aws-iam-grapher
-```
-
 ### Install (recommended)
 
+From a local checkout:
+
 ```bash
+git clone https://github.com/fwxs/aws-iam-grapher
+cd aws-iam-grapher
 ./scripts/install.sh
 ```
 
-Builds a release binary and installs it to `~/.aws-iam-grapher/bin/aws-iam-grapher`, and
-copies `docs/*.md` to `~/.aws-iam-grapher/docs/`. Prints OS-specific instructions for adding
-`~/.aws-iam-grapher/bin` to your `PATH`.
+Or without cloning first — pipe the script directly, and it clones `main` into a temp dir
+for you (removed on exit either way):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fwxs/aws-iam-grapher/main/scripts/install.sh | bash
+```
+
+Either way, it builds a release binary and installs everything under `~/.aws-iam-grapher/`:
+
+- `bin/aws-iam-grapher` — the binary
+- `docs/*.md` and `docs/queries/*.md` — bundled reference docs (same content `aws-iam-grapher docs` reads)
+- `scripts/neo4j-backup.sh`, `scripts/neo4j-restore.sh` — the offline backup/restore helpers
+- `config/risky-actions.yaml` — the default privilege-escalation risky-action config (only if
+  `~/.aws-iam-grapher/config/risky-actions.yaml` doesn't already exist — an existing file is
+  never overwritten)
+
+Prints OS-specific instructions for adding `~/.aws-iam-grapher/bin` to your `PATH`.
 
 ### Build from source only
 
 ```bash
+git clone https://github.com/fwxs/aws-iam-grapher
+cd aws-iam-grapher
 cargo build --release
 ```
 
