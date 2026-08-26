@@ -18,21 +18,37 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Checkout main
+      - name: Checkout merge commit
         uses: actions/checkout@v4
         with:
-          ref: main
+          # Pin to the exact commit that was merged into main, not main's HEAD at run time —
+          # avoids racing a second PR that merges into main while this job is starting up.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           # Full history needed to create branches correctly
           fetch-depth: 0
 
       - name: Generate backport branch name
         id: branch_name
         run: |
-          # Format: yyyymmdd-HHmm in UTC
-          BRANCH="backport/$(date -u +'%Y%m%d-%H%M')-pr${{ github.event.pull_request.number }}"
+          BRANCH="backport/pr${{ github.event.pull_request.number }}"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
+      - name: Check for existing backport PR
+        id: check_existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --base develop --head "${{ steps.branch_name.outputs.branch }}" \
+            --state open --json number --jq '.[0].number')
+          if [[ -n "$EXISTING" ]]; then
+            echo "::notice::Backport PR #$EXISTING already open for this branch. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create backport branch from main
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -41,6 +57,7 @@ jobs:
 
       - name: Verify develop branch exists
         id: check_develop
+        if: steps.check_existing.outputs.skip == 'false'
         run: |
           if git ls-remote --exit-code --heads origin develop; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -49,8 +66,8 @@ jobs:
             echo "::warning::develop branch not found. Skipping PR creation."
           fi
 
-      - name: Create PR to develop
-        if: steps.check_develop.outputs.exists == 'true'
+      - name: Create and merge PR to develop
+        if: steps.check_existing.outputs.skip == 'false' && steps.check_develop.outputs.exists == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -66,7 +83,15 @@ jobs:
           **Source PR:** ${{ github.event.pull_request.title }}
           **Merged by:** @${{ github.event.pull_request.merged_by.login }}
           **Backport branch:** \`${{ steps.branch_name.outputs.branch }}\`
-
-          > Review and merge to keep \`develop\` in sync with \`main\`.
           EOF
           )"
+
+          # Merge with a real merge commit (not squash/rebase) so main's commit SHAs land on
+          # develop unchanged — this is what keeps develop a strict superset of main's history,
+          # regardless of the repo's default merge-button setting. If this fails (e.g. a
+          # genuine conflict with develop), fail the job loudly instead of leaving the PR open
+          # with no signal.
+          gh pr merge "${{ steps.branch_name.outputs.branch }}" \
+            --merge \
+            --delete-branch \
+            --subject "chore: backport from main (${{ steps.branch_name.outputs.branch }})"
