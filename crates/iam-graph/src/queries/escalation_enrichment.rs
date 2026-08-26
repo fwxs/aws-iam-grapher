@@ -2,6 +2,7 @@ use crate::errors::GraphError;
 use crate::nodes::Row;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
+use crate::queries::risky_actions::RiskyActionGroups;
 use neo4rs::Graph;
 use std::collections::{HashMap, HashSet};
 
@@ -84,6 +85,24 @@ async fn fetch_rows<T>(
         by_terminal.entry(terminal_arn).or_default().push(value);
     }
     Ok(by_terminal)
+}
+
+/// Like [`fetch_rows`], but for a query that returns at most one row per key (e.g. one
+/// `UserAttributes` per ARN) rather than a 1-to-many relationship — `insert` instead of
+/// `push`, so a later row for the same key overwrites rather than accumulates.
+async fn fetch_row<T>(
+    graph: &Graph,
+    query: neo4rs::Query,
+    row_mapper: impl Fn(&neo4rs::Row) -> Result<(String, T), GraphError>,
+) -> Result<HashMap<String, T>, GraphError> {
+    let mut stream = graph.execute(query).await?;
+
+    let mut by_key: HashMap<String, T> = HashMap::new();
+    while let Some(row) = stream.next().await? {
+        let (key, value) = row_mapper(&row)?;
+        by_key.insert(key, value);
+    }
+    Ok(by_key)
 }
 
 /// Node properties are written as `""` rather than absent when a `DateTime`/enum field is
@@ -243,14 +262,7 @@ pub(crate) async fn fetch_user_attributes(
         .param("arns", arns.to_vec())
         .param("account_id", ctx.account_id.as_str())
         .param("snapshot_id", ctx.snapshot_id.as_str());
-
-    let mut stream = graph.execute(query).await?;
-    let mut by_arn = HashMap::new();
-    while let Some(row) = stream.next().await? {
-        let (arn, attributes) = decode_entity_user_attributes(&row)?;
-        by_arn.insert(arn, attributes);
-    }
-    Ok(by_arn)
+    fetch_row(graph, query, decode_entity_user_attributes).await
 }
 
 /// `(arn, snapshot_id)` pair identifying one org-escalation terminal — org terminals may
@@ -331,6 +343,44 @@ where
     }
 }
 
+/// Wildcard- and group-Deny-aware suppression, followed by risky-action-group AND-matching,
+/// shared by `privilege_escalation_paths` and `org_escalation_paths` so the two evaluation
+/// orders can't drift apart.
+///
+/// Drops any allowed action covered by a Deny (exact, wildcard, or full-admin) on the
+/// terminal entity's own or a member group's policies, then runs `groups.finalize_actions`
+/// on the survivors. Group AND-matching MUST run on the post-Deny actions, never on the raw
+/// allowed actions — evaluating groups before Deny subtraction would let a group falsely
+/// "match" on an action an explicit Deny actually suppresses, a false positive on a security
+/// query. Candidates whose post-Deny actions don't fully satisfy any risky-action group are
+/// dropped.
+pub(crate) fn finalize_kept<C>(
+    by_arn: HashMap<String, C>,
+    groups: &RiskyActionGroups,
+    allowed_actions: impl Fn(&C) -> &[String],
+    deny_actions: impl Fn(&C) -> &[String],
+) -> Vec<(String, C, Vec<String>, Vec<String>)> {
+    let mut kept = Vec::new();
+    for (arn, candidate) in by_arn {
+        let risky_actions: Vec<String> = allowed_actions(&candidate)
+            .iter()
+            .filter(|action| {
+                !deny_actions(&candidate)
+                    .iter()
+                    .any(|deny| iam_expander::glob_match(deny, action))
+            })
+            .cloned()
+            .collect();
+
+        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
+            continue;
+        };
+
+        kept.push((arn, candidate, risky_actions, matched_paths));
+    }
+    kept
+}
+
 fn org_pairs(terminals: &[OrgTerminal]) -> Vec<Row> {
     terminals
         .iter()
@@ -388,12 +438,5 @@ pub(crate) async fn fetch_org_user_attributes(
         return Ok(HashMap::new());
     }
     let query = neo4rs::query(ORG_USER_ATTRIBUTES_QUERY).param("pairs", org_pairs(terminals));
-
-    let mut stream = graph.execute(query).await?;
-    let mut by_arn = HashMap::new();
-    while let Some(row) = stream.next().await? {
-        let (arn, attributes) = decode_entity_user_attributes(&row)?;
-        by_arn.insert(arn, attributes);
-    }
-    Ok(by_arn)
+    fetch_row(graph, query, decode_entity_user_attributes).await
 }

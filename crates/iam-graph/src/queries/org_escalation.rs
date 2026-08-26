@@ -3,7 +3,7 @@ use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
 use crate::queries::escalation_enrichment::{
     collect_enrichment_keys, fetch_org_holders, fetch_org_instance_profiles,
-    fetch_org_trust_principals, fetch_org_user_attributes, EnrichmentKeys, Holder,
+    fetch_org_trust_principals, fetch_org_user_attributes, finalize_kept, EnrichmentKeys, Holder,
     InstanceProfileRef, OrgTerminal, TrustPrincipal, UserAttributes,
 };
 use crate::queries::render_hop_bound;
@@ -116,30 +116,12 @@ pub async fn org_escalation_paths(
         }
     }
 
-    let mut kept: Vec<(String, Candidate, Vec<String>, Vec<String>)> = Vec::new();
-    for (arn, candidate) in by_arn {
-        let risky_actions: Vec<String> = candidate
-            .allowed_actions
-            .iter()
-            .filter(|action| {
-                !candidate
-                    .deny_actions
-                    .iter()
-                    .any(|deny| iam_expander::glob_match(deny, action))
-            })
-            .cloned()
-            .collect();
-
-        // Group AND-matching MUST run on the post-Deny risky_actions computed above,
-        // never on candidate.allowed_actions directly — evaluating groups before Deny
-        // subtraction would let a group falsely "match" on an action an explicit Deny
-        // actually suppresses, a false positive on a security query.
-        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
-            continue;
-        };
-
-        kept.push((arn, candidate, risky_actions, matched_paths));
-    }
+    let kept = finalize_kept(
+        by_arn,
+        groups,
+        |c: &Candidate| c.allowed_actions.as_slice(),
+        |c: &Candidate| c.deny_actions.as_slice(),
+    );
 
     // Org terminals may span different account snapshots, so `OrgTerminal` carries its own
     // `snapshot_id` from the hop rather than a single bound `QueryContext`; the escalating

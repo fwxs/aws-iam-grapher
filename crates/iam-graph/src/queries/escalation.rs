@@ -3,8 +3,8 @@ use crate::queries::col;
 use crate::queries::context::QueryContext;
 use crate::queries::escalation_enrichment::{
     collect_enrichment_keys, fetch_holders, fetch_instance_profiles, fetch_trust_principals,
-    fetch_user_attributes, EnrichmentKeys, Holder, InstanceProfileRef, TrustPrincipal,
-    UserAttributes,
+    fetch_user_attributes, finalize_kept, EnrichmentKeys, Holder, InstanceProfileRef,
+    TrustPrincipal, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
@@ -113,33 +113,12 @@ pub async fn privilege_escalation_paths(
         }
     }
 
-    let mut kept: Vec<(String, Candidate, Vec<String>, Vec<String>)> = Vec::new();
-    for (arn, candidate) in by_arn {
-        // Wildcard- and group-Deny-aware suppression: drop any allowed action covered by
-        // a Deny (exact, wildcard, or full-admin) on the terminal entity's own or a member
-        // group's policies.
-        let risky_actions: Vec<String> = candidate
-            .allowed_actions
-            .iter()
-            .filter(|action| {
-                !candidate
-                    .deny_actions
-                    .iter()
-                    .any(|deny| iam_expander::glob_match(deny, action))
-            })
-            .cloned()
-            .collect();
-
-        // Group AND-matching MUST run on the post-Deny risky_actions computed above,
-        // never on candidate.allowed_actions directly — evaluating groups before Deny
-        // subtraction would let a group falsely "match" on an action an explicit Deny
-        // actually suppresses, a false positive on a security query.
-        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
-            continue;
-        };
-
-        kept.push((arn, candidate, risky_actions, matched_paths));
-    }
+    let kept = finalize_kept(
+        by_arn,
+        groups,
+        |c: &Candidate| c.allowed_actions.as_slice(),
+        |c: &Candidate| c.deny_actions.as_slice(),
+    );
 
     let EnrichmentKeys {
         group_terminals,
