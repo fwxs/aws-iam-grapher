@@ -657,7 +657,10 @@ async fn ingest_writes_user_mfa_login_and_activity_properties() {
             neo4rs::query(
                 "MATCH (u:User {uid: $uid}) RETURN u.has_mfa AS has_mfa, \
                  u.mfa_method AS mfa_method, u.console_login_enabled AS console_login_enabled, \
-                 u.last_activity_date AS last_activity_date",
+                 u.last_activity_date AS last_activity_date, \
+                 u.access_key_count AS access_key_count, \
+                 u.active_access_key_count AS active_access_key_count, \
+                 u.access_key_ids AS access_key_ids",
             )
             .param("uid", carol_uid.as_str()),
         )
@@ -673,6 +676,15 @@ async fn ingest_writes_user_mfa_login_and_activity_properties() {
     let last_activity_date: String = rows[0]
         .get("last_activity_date")
         .expect("last_activity_date must be set");
+    let access_key_count: i64 = rows[0]
+        .get("access_key_count")
+        .expect("access_key_count must be set");
+    let active_access_key_count: i64 = rows[0]
+        .get("active_access_key_count")
+        .expect("active_access_key_count must be set");
+    let access_key_ids: Vec<String> = rows[0]
+        .get("access_key_ids")
+        .expect("access_key_ids must be set");
 
     assert!(has_mfa, "carol must have has_mfa=true");
     assert_eq!(mfa_method, "virtual");
@@ -684,6 +696,18 @@ async fn ingest_writes_user_mfa_login_and_activity_properties() {
         !last_activity_date.is_empty(),
         "carol must have a last_activity_date"
     );
+    assert_eq!(access_key_count, 2, "carol must have 2 access keys");
+    assert_eq!(
+        active_access_key_count, 1,
+        "carol must have 1 active access key"
+    );
+    assert_eq!(
+        access_key_ids.len(),
+        2,
+        "carol's access_key_ids must list both keys"
+    );
+    assert!(access_key_ids.contains(&"AKIACAROLACTIVE".to_string()));
+    assert!(access_key_ids.contains(&"AKIACAROLINACTIVE".to_string()));
 
     let dave_uid = format!("{snapshot_id}|arn:aws:iam::{account_id}:user/dave");
     let rows = ingester

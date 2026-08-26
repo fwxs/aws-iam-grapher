@@ -13,8 +13,8 @@ the full caveat/limitation list this file only summarizes.
 
 ## Hard rules
 
-1. **Always pass `--output json`** and parse stdout as `{"results": ..., "caveats": [...]}`.
-   Never rely on the table-formatted output for anything but showing the user something readable.
+1. **Parse stdout as `{"results": ..., "caveats": [...]}`.** JSON is the CLI's only output
+   format (`--output graphviz` is the sole exception, for graph-shaped queries).
 2. **Never pass a password on the command line.** There is no `--neo4j-pass` flag — only
    `--neo4j-pass-file <path>`. In normal use, don't pass any credential flag at all: the binary
    reads `NEO4J_PASSWORD` from the environment on its own. Never print, echo, or repeat the value
@@ -45,8 +45,8 @@ aws-iam-grapher query [--account-id <id>] [--snapshot-id <id>] --output json <SU
 | `entity-perms <arn>` | entity ARN | — |
 | `associated-entities <arn>` | Policy/Role/Group ARN | — |
 | `instance-profiles-with <action>` | IAM action | — |
-| `privilege-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config) |
-| `org-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config), `--org-run-id <id>` (default: most recent org run) |
+| `privilege-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config), `--entity-type <user\|role\|group\|all>` (default: `all`) |
+| `org-escalation` | — | `--max-hops <n>` (default 3, max 10), `--risky-actions <path>` (default: installed config), `--org-run-id <id>` (default: most recent org run), `--entity-type <user\|role\|group\|all>` (default: `all`) |
 | `diff <snapshot_a> <snapshot_b>` | two snapshot ids | — |
 | `list-snapshots` | — | — |
 | `list-accounts` | — | — |
@@ -139,6 +139,15 @@ aws-iam-grapher query --output json list-accounts
 aws-iam-grapher query --account-id 123456789012 --output json \
   privilege-escalation --max-hops 5
 ```
+
+```bash
+aws-iam-grapher query --account-id 123456789012 --output json \
+  privilege-escalation --entity-type user
+```
+
+`--entity-type user` restricts results to User entities, plus any Group path that has at
+least one `holders` entry (a user reachable only via that group's membership) — the case to
+reach for when the question is "which users could be used in this attack", not just roles.
 
 ```bash
 aws-iam-grapher query --account-id 123456789012 --output json \

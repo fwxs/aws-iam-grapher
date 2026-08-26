@@ -143,7 +143,8 @@ impl GraphIngester {
                     "some users' access key activity could not be determined".to_string()
                 }
                 iam_collector::CollectorWarning::UserSecurityAttributesNotCollected => {
-                    "offline collection does not populate user MFA/login/activity attributes"
+                    "offline collection does not populate user MFA/login/activity/access-key \
+                     attributes"
                         .to_string()
                 }
                 iam_collector::CollectorWarning::PartialData(msg) => msg.clone(),

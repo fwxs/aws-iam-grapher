@@ -17,7 +17,7 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     /// Output format. Global so the error path (exit-code JSON envelope on stderr) and
     /// every subcommand's success-path output agree on the same format.
-    #[arg(long, value_enum, global = true, default_value = "table")]
+    #[arg(long, value_enum, global = true, default_value = "json")]
     pub output: OutputFormat,
 
     #[command(subcommand)]

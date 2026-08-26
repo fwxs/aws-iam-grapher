@@ -12,7 +12,7 @@
 use iam_graph::queries::{
     AccountRecord, AssociatedEntity, Caveat, EntityRef, EscalationPath, Holder, Hop,
     InstanceProfileRef, OrgEscalationPath, OrgHop, PermissionDiff, PermissionRecord, PermissionRow,
-    SnapshotRecord, TrustPrincipal,
+    SnapshotRecord, TrustPrincipal, UserAttributes,
 };
 
 #[test]
@@ -78,6 +78,19 @@ fn escalation_path_json_shape() {
             principal_type: "AWS".to_string(),
             conditional: false,
         }],
+        user_attributes: Some(UserAttributes {
+            user_id: "AIDAEXAMPLEATTACKER".to_string(),
+            has_mfa: false,
+            mfa_method: None,
+            console_login_enabled: true,
+            password_last_used: Some("2026-01-01T00:00:00+00:00".to_string()),
+            last_activity_date: Some("2026-01-15T00:00:00+00:00".to_string()),
+            create_date: "2025-01-01T00:00:00+00:00".to_string(),
+            access_key_count: 2,
+            active_access_key_count: 1,
+            oldest_active_key_date: Some("2025-06-01T00:00:00+00:00".to_string()),
+            access_key_ids: vec!["AKIAEXAMPLE1".to_string(), "AKIAEXAMPLE2".to_string()],
+        }),
     };
 
     insta::assert_json_snapshot!(value);
@@ -103,9 +116,35 @@ fn org_escalation_path_json_shape() {
             arn: "arn:aws:iam::210987654321:user/Member".to_string(),
             name: "Member".to_string(),
             entity_type: "User".to_string(),
+            attributes: UserAttributes {
+                user_id: "AIDAEXAMPLEMEMBER".to_string(),
+                has_mfa: true,
+                mfa_method: Some("virtual".to_string()),
+                console_login_enabled: true,
+                password_last_used: Some("2026-01-10T00:00:00+00:00".to_string()),
+                last_activity_date: Some("2026-01-10T00:00:00+00:00".to_string()),
+                create_date: "2024-06-01T00:00:00+00:00".to_string(),
+                access_key_count: 0,
+                active_access_key_count: 0,
+                oldest_active_key_date: None,
+                access_key_ids: vec![],
+            },
         }],
         instance_profiles: vec![],
         trust_principals: vec![],
+        user_attributes: Some(UserAttributes {
+            user_id: "AIDAEXAMPLEATTACKER".to_string(),
+            has_mfa: false,
+            mfa_method: None,
+            console_login_enabled: false,
+            password_last_used: None,
+            last_activity_date: Some("2026-01-20T00:00:00+00:00".to_string()),
+            create_date: "2025-03-01T00:00:00+00:00".to_string(),
+            access_key_count: 1,
+            active_access_key_count: 1,
+            oldest_active_key_date: Some("2025-03-01T00:00:00+00:00".to_string()),
+            access_key_ids: vec!["AKIAEXAMPLE3".to_string()],
+        }),
     };
 
     insta::assert_json_snapshot!(value);

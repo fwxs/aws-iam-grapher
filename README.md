@@ -497,9 +497,9 @@ before). When it's **omitted**, `query` resolves every distinct account with at 
 snapshot in the graph and runs the query once per account, each correctly scoped to its own
 `(account_id, snapshot_id)` — never merging results across accounts. This applies to
 `who-can`, `instance-profiles-with`, `privilege-escalation`, and `list-snapshots`. Output
-(table and JSON) groups results under an `=== Account: ... ===` header (table) or an
-`account_id`/`snapshot_id`/`results` envelope per account, nested inside the outer `results`
-array of the top-level `{results, caveats}` JSON envelope (see below). A graph with only one
+groups results under an `account_id`/`snapshot_id`/`results` envelope per account, nested
+inside the outer `results` array of the top-level `{results, caveats}` JSON envelope (see
+below). A graph with only one
 account degrades to a single group. `--snapshot-id` cannot be combined with multi-account mode
 (more than one account resolved) since a snapshot id would be ambiguous across accounts —
 pass `--account-id` to target one account instead.
@@ -515,10 +515,9 @@ errors if the two snapshots belong to different accounts.
 `list-accounts` is inherently cross-account and never requires (or uses) `--account-id` — use
 it to discover which accounts exist in the graph before targeting one with `--account-id`.
 
-Add `--output-file <path>` to write the result as JSON to a file. With `--output table`
-(the default), the table still prints to stdout in addition to the file; with `--output json`,
-stdout is suppressed once the file is written — useful for downstream tooling that wants a
-clean JSON artifact without scraping stdout/stderr:
+Add `--output-file <path>` to write the result as JSON to a file. Once the file is written,
+stdout is suppressed — useful for downstream tooling that wants a clean JSON artifact without
+scraping stdout/stderr:
 
 ```bash
 aws-iam-grapher query \

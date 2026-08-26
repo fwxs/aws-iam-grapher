@@ -2,13 +2,14 @@ use crate::errors::GraphError;
 use crate::queries::col;
 use crate::queries::context::QueryContext;
 use crate::queries::escalation_enrichment::{
-    fetch_holders, fetch_instance_profiles, fetch_trust_principals, Holder, InstanceProfileRef,
-    TrustPrincipal,
+    collect_enrichment_keys, fetch_holders, fetch_instance_profiles, fetch_trust_principals,
+    fetch_user_attributes, finalize_kept, EnrichmentKeys, Holder, InstanceProfileRef,
+    TrustPrincipal, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
 use neo4rs::Graph;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// One hop in an escalation path — the ARN and entity-type label of a node on the chain.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -43,6 +44,9 @@ pub struct EscalationPath {
     /// Trust-policy principals that can assume this entity via `CAN_ASSUME`, populated only
     /// when `entity_type == "Role"`.
     pub trust_principals: Vec<TrustPrincipal>,
+    /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_attributes: Option<UserAttributes>,
 }
 
 const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
@@ -109,63 +113,31 @@ pub async fn privilege_escalation_paths(
         }
     }
 
-    let mut kept: Vec<(String, Candidate, Vec<String>, Vec<String>)> = Vec::new();
-    for (arn, candidate) in by_arn {
-        // Wildcard- and group-Deny-aware suppression: drop any allowed action covered by
-        // a Deny (exact, wildcard, or full-admin) on the terminal entity's own or a member
-        // group's policies.
-        let risky_actions: Vec<String> = candidate
-            .allowed_actions
-            .iter()
-            .filter(|action| {
-                !candidate
-                    .deny_actions
-                    .iter()
-                    .any(|deny| iam_expander::glob_match(deny, action))
-            })
-            .cloned()
-            .collect();
+    let kept = finalize_kept(
+        by_arn,
+        groups,
+        |c: &Candidate| c.allowed_actions.as_slice(),
+        |c: &Candidate| c.deny_actions.as_slice(),
+    );
 
-        // Group AND-matching MUST run on the post-Deny risky_actions computed above,
-        // never on candidate.allowed_actions directly — evaluating groups before Deny
-        // subtraction would let a group falsely "match" on an action an explicit Deny
-        // actually suppresses, a false positive on a security query.
-        let Some((risky_actions, matched_paths)) = groups.finalize_actions(&risky_actions) else {
-            continue;
-        };
+    let EnrichmentKeys {
+        group_terminals,
+        role_terminals,
+        user_arns,
+    } = collect_enrichment_keys(
+        &kept,
+        |c: &Candidate| c.path.as_slice(),
+        |c: &Candidate| c.entity_type.as_str(),
+        |h: &Hop| h.arn.clone(),
+        |h: &Hop| h.entity_type.as_str(),
+        |arn: &str, _c: &Candidate| Some(arn.to_string()),
+    );
 
-        kept.push((arn, candidate, risky_actions, matched_paths));
-    }
-
-    // Enrichment is keyed on the terminal entity (the actual permission holder, the last
-    // hop of `path`), not `arn` — for transitive chains `arn` is the assumer that can
-    // *reach* the risky action, while `path.last()` is the entity that holds it directly.
-    // Multiple distinct start entities can share the same terminal via different chains, so
-    // dedupe via HashSet before UNWINDing — otherwise the enrichment query re-executes its
-    // MATCH once per duplicate and every path sharing that terminal reports doubled results.
-    let terminal_hops: Vec<&Hop> = kept
-        .iter()
-        .filter_map(|(_, c, _, _)| c.path.last())
-        .collect();
-    let group_terminals: Vec<String> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Group")
-        .map(|h| h.arn.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let role_terminals: Vec<String> = terminal_hops
-        .iter()
-        .filter(|h| h.entity_type == "Role")
-        .map(|h| h.arn.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal) = tokio::try_join!(
+    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
         fetch_holders(graph, ctx, &group_terminals),
         fetch_instance_profiles(graph, ctx, &role_terminals),
         fetch_trust_principals(graph, ctx, &role_terminals),
+        fetch_user_attributes(graph, ctx, &user_arns),
     )?;
 
     let results = kept
@@ -188,6 +160,7 @@ pub async fn privilege_escalation_paths(
                 .get(terminal_arn)
                 .cloned()
                 .unwrap_or_default();
+            let user_attributes = user_attrs_by_arn.get(&arn).cloned();
             EscalationPath {
                 arn,
                 name: candidate.name,
@@ -199,6 +172,7 @@ pub async fn privilege_escalation_paths(
                 holders,
                 instance_profiles,
                 trust_principals,
+                user_attributes,
             }
         })
         .collect();

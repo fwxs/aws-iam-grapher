@@ -3,7 +3,7 @@
 //! Only a subset of query results are graph-shaped enough to be worth rendering as DOT;
 //! see `cli/query.rs` for which subcommands wire this in.
 
-use iam_graph::{EntityRef, EscalationPath, OrgEscalationPath};
+use iam_graph::{EntityRef, EscalationPath, OrgEscalationPath, UserAttributes};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -11,6 +11,10 @@ const RISK_FILL: &str = "#f8d7da";
 const CONDITIONAL_FILL: &str = "#fff3cd";
 const DEFAULT_FILL: &str = "#e8e8e8";
 const CONDITIONAL_EDGE_COLOR: &str = "#d9822b";
+/// Fill for a risky terminal User with no MFA — a strictly worse posture than an
+/// ordinary risky terminal, so it gets a distinct, more alarming color rather than
+/// sharing `RISK_FILL`.
+const RISK_NO_MFA_FILL: &str = "#dc3545";
 
 /// Escape a string for safe use inside a double-quoted DOT identifier or label.
 fn escape(s: &str) -> String {
@@ -37,6 +41,9 @@ struct EscalationNode<'a> {
     /// the terminal entity itself, not of any one path, so it's set once rather than merged
     /// like `risky_actions`.
     enrichment: Option<String>,
+    /// Security posture of this node when it's a User — the escalating entity's own
+    /// `user_attributes`, or a Group terminal's holder attributes. `None` for non-User nodes.
+    user_posture: Option<&'a UserAttributes>,
 }
 
 /// Shared renderer behind [`escalation_paths_to_dot`] and [`org_escalation_paths_to_dot`]:
@@ -70,14 +77,25 @@ fn render_escalation_dot(
         }
         let mut attrs = format!("label={}", quoted(&label));
         if let Some(actions) = &node.risky_actions {
-            let tooltip = match &node.enrichment {
-                Some(enrichment) => format!("{actions}\\n{enrichment}"),
-                None => actions.clone(),
+            let mut tooltip = actions.clone();
+            if let Some(enrichment) = &node.enrichment {
+                write!(tooltip, "\\n{enrichment}").unwrap();
+            }
+            let fillcolor = match node.user_posture {
+                Some(posture) if !posture.has_mfa => {
+                    write!(tooltip, "\\n{}", user_posture_summary(posture)).unwrap();
+                    RISK_NO_MFA_FILL
+                }
+                Some(posture) => {
+                    write!(tooltip, "\\n{}", user_posture_summary(posture)).unwrap();
+                    RISK_FILL
+                }
+                None => RISK_FILL,
             };
             write!(
                 attrs,
                 ", fillcolor={}, tooltip={}",
-                quoted(RISK_FILL),
+                quoted(fillcolor),
                 quoted(&tooltip)
             )
             .unwrap();
@@ -108,6 +126,25 @@ fn enrichment_summary(holders: usize, instance_profiles: usize, trust_principals
     )
 }
 
+/// Format a User's security posture for a node tooltip — full detail is available via
+/// `--output json`, this is a glance-level summary.
+fn user_posture_summary(attrs: &UserAttributes) -> String {
+    let mfa = if attrs.has_mfa { "yes" } else { "no" };
+    let console = if attrs.console_login_enabled {
+        "yes"
+    } else {
+        "no"
+    };
+    let mut summary = format!(
+        "mfa: {mfa}, console: {console}, active keys: {}",
+        attrs.active_access_key_count
+    );
+    if let Some(oldest) = &attrs.oldest_active_key_date {
+        write!(summary, " (oldest {oldest})").unwrap();
+    }
+    summary
+}
+
 /// Render privilege-escalation paths as a DOT digraph. See [`render_escalation_dot`].
 pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> String {
     let mut nodes: BTreeMap<&str, EscalationNode> = BTreeMap::new();
@@ -121,6 +158,7 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
                 account_id: None,
                 risky_actions: None,
                 enrichment: None,
+                user_posture: None,
             });
             if hop.arn == terminal_arn {
                 node.risky_actions =
@@ -132,6 +170,9 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
                         p.trust_principals.len(),
                     )
                 });
+                if hop.arn == p.arn {
+                    node.user_posture = p.user_attributes.as_ref();
+                }
             }
         }
         for window in p.path.windows(2) {
@@ -157,6 +198,7 @@ pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]
                 account_id: Some(&hop.account_id),
                 risky_actions: None,
                 enrichment: None,
+                user_posture: None,
             });
             if hop.arn == terminal_arn {
                 node.risky_actions =
@@ -168,6 +210,9 @@ pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]
                         p.trust_principals.len(),
                     )
                 });
+                if hop.arn == p.arn {
+                    node.user_posture = p.user_attributes.as_ref();
+                }
             }
         }
         for window in p.path.windows(2) {
@@ -289,6 +334,7 @@ mod tests {
             holders: vec![],
             instance_profiles: vec![],
             trust_principals: vec![],
+            user_attributes: None,
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -315,6 +361,7 @@ mod tests {
             holders: vec![],
             instance_profiles: vec![],
             trust_principals: vec![],
+            user_attributes: None,
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -343,6 +390,7 @@ mod tests {
                 holders: vec![],
                 instance_profiles: vec![],
                 trust_principals: vec![],
+                user_attributes: None,
             },
             EscalationPath {
                 arn: "arn:aws:iam::111111111111:role/B".to_string(),
@@ -358,6 +406,7 @@ mod tests {
                 holders: vec![],
                 instance_profiles: vec![],
                 trust_principals: vec![],
+                user_attributes: None,
             },
         ];
 
@@ -452,6 +501,7 @@ mod tests {
             holders: vec![],
             instance_profiles: vec![],
             trust_principals: vec![],
+            user_attributes: None,
         }];
 
         let dot = org_escalation_paths_to_dot("org_escalation", &paths);
