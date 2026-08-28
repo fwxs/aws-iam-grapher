@@ -120,9 +120,14 @@ fn merge_risky_actions(existing: Option<String>, actions: String) -> Option<Stri
 
 /// Format the enrichment count summary appended to a terminal node's tooltip — counts only
 /// (holders/instance_profiles/trust_principals), full detail is available via `--output json`.
-fn enrichment_summary(holders: usize, instance_profiles: usize, trust_principals: usize) -> String {
+fn enrichment_summary(
+    holders: usize,
+    instance_profiles: usize,
+    trust_principals: usize,
+    associations: usize,
+) -> String {
     format!(
-        "holders: {holders}, instance_profiles: {instance_profiles}, trust_principals: {trust_principals}"
+        "holders: {holders}, instance_profiles: {instance_profiles}, trust_principals: {trust_principals}, associations: {associations}"
     )
 }
 
@@ -168,6 +173,7 @@ pub fn escalation_paths_to_dot(graph_name: &str, paths: &[EscalationPath]) -> St
                         p.holders.len(),
                         p.instance_profiles.len(),
                         p.trust_principals.len(),
+                        p.associations.len(),
                     )
                 });
                 if hop.arn == p.arn {
@@ -208,6 +214,7 @@ pub fn org_escalation_paths_to_dot(graph_name: &str, paths: &[OrgEscalationPath]
                         p.holders.len(),
                         p.instance_profiles.len(),
                         p.trust_principals.len(),
+                        p.associations.len(),
                     )
                 });
                 if hop.arn == p.arn {
@@ -335,6 +342,7 @@ mod tests {
             instance_profiles: vec![],
             trust_principals: vec![],
             user_attributes: None,
+            associations: vec![],
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -362,6 +370,7 @@ mod tests {
             instance_profiles: vec![],
             trust_principals: vec![],
             user_attributes: None,
+            associations: vec![],
         }];
 
         let dot = escalation_paths_to_dot("privilege_escalation", &paths);
@@ -391,6 +400,7 @@ mod tests {
                 instance_profiles: vec![],
                 trust_principals: vec![],
                 user_attributes: None,
+                associations: vec![],
             },
             EscalationPath {
                 arn: "arn:aws:iam::111111111111:role/B".to_string(),
@@ -407,6 +417,7 @@ mod tests {
                 instance_profiles: vec![],
                 trust_principals: vec![],
                 user_attributes: None,
+                associations: vec![],
             },
         ];
 
@@ -502,6 +513,7 @@ mod tests {
             instance_profiles: vec![],
             trust_principals: vec![],
             user_attributes: None,
+            associations: vec![],
         }];
 
         let dot = org_escalation_paths_to_dot("org_escalation", &paths);

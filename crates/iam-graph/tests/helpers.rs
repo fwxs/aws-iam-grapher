@@ -1603,3 +1603,234 @@ pub fn data_with_escalation_service_trust_principal(account_id: &str) -> (Collec
     };
     (data, role_arn)
 }
+
+/// Build an escalating User (`mallory`) with a risky inline permission
+/// (`iam:PutUserPolicy`) plus every kind of structural association `associations`
+/// enrichment should surface: an attached policy, a group membership, and three roles whose
+/// trust policies name her — but only two of which she also holds a matching `sts:AssumeRole`
+/// grant for. Used to verify `privilege_escalation_paths`'s `associations` enrichment is
+/// permission-verified, not merely trust-derived (issue #209).
+///
+/// - `TrustedAndGranted`: trusts mallory AND she holds an exact-ARN `sts:AssumeRole` grant for
+///   it (via her attached policy) — must appear, `conditional: false`.
+/// - `TrustedNoGrant`: trusts mallory but she holds no matching `sts:AssumeRole` grant at all —
+///   must be absent.
+/// - `TrustedWildcardGrant`: trusts mallory; she only holds a `resource: '*'` `sts:AssumeRole`
+///   grant (via her group's attached policy, exercising the group-inherited path) — must
+///   appear, `conditional: true`.
+pub fn data_with_escalation_user_associations(account_id: &str) -> (CollectedData, String, String) {
+    use iam_models::{
+        Effect, IamGroup, IamInlinePolicy, IamPolicy, IamUser, PolicyDocument, PolicyRef,
+        PolicyStatement,
+    };
+    use std::collections::HashMap;
+
+    let mallory_arn = format!("arn:aws:iam::{}:user/mallory", account_id);
+    let trudy_arn = format!("arn:aws:iam::{}:user/trudy", account_id);
+
+    let granted_role = role_with_trust(account_id, "TrustedAndGranted", &mallory_arn, vec![]);
+    let granted_role_arn = granted_role.arn.clone();
+    let no_grant_role = role_with_trust(account_id, "TrustedNoGrant", &mallory_arn, vec![]);
+    // Trusts trudy, not mallory: a resource='*' sts grant covers every role it's checked
+    // against, so it can't coexist with TrustedNoGrant's true-negative on the same
+    // principal. A second, ungrouped user isolates the wildcard-grant case instead.
+    let wildcard_role = role_with_trust(account_id, "TrustedWildcardGrant", &trudy_arn, vec![]);
+
+    let attached_policy_arn = format!("arn:aws:iam::{}:policy/MalloryAssumePolicy", account_id);
+    let attached_policy = IamPolicy {
+        arn: attached_policy_arn.clone(),
+        policy_id: "ANPAMALLORYASSUME".to_string(),
+        policy_name: "MalloryAssumePolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 1,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["sts:AssumeRole".to_string()],
+                not_action: vec![],
+                resource: vec![granted_role_arn.clone()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        }),
+        tags: HashMap::new(),
+    };
+
+    let trudy_policy_arn = format!("arn:aws:iam::{}:policy/TrudyAssumePolicy", account_id);
+    let trudy_policy = IamPolicy {
+        arn: trudy_policy_arn.clone(),
+        policy_id: "ANPATRUDYASSUME".to_string(),
+        policy_name: "TrudyAssumePolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 1,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["sts:AssumeRole".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        }),
+        tags: HashMap::new(),
+    };
+    let trudy_risky_inline = IamInlinePolicy {
+        policy_name: "TrudyRiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PutUserPolicy".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let trudy = IamUser {
+        arn: trudy_arn.clone(),
+        user_id: "AIDATRUDY".to_string(),
+        user_name: "trudy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![PolicyRef {
+            policy_arn: trudy_policy_arn.clone(),
+            policy_name: "TrudyAssumePolicy".to_string(),
+        }],
+        inline_policies: vec![trudy_risky_inline],
+        group_list: vec![],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
+    };
+
+    // Group grants a non-sts action: MEMBER_OF/HAS_ATTACHED_POLICY_OR_INLINE structural
+    // coverage without leaking a group-inherited sts:AssumeRole wildcard onto every role.
+    let group_arn = format!("arn:aws:iam::{}:group/MalloryGroup", account_id);
+    let group_policy_arn = format!("arn:aws:iam::{}:policy/MalloryGroupPolicy", account_id);
+    let group_policy = IamPolicy {
+        arn: group_policy_arn.clone(),
+        policy_id: "ANPAMALLORYGROUP".to_string(),
+        policy_name: "MalloryGroupPolicy".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        update_date: Utc::now(),
+        attachment_count: 1,
+        is_attachable: true,
+        default_version_id: "v1".to_string(),
+        description: None,
+        is_aws_managed: false,
+        document: Some(PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["s3:GetObject".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        }),
+        tags: HashMap::new(),
+    };
+    let group = IamGroup {
+        arn: group_arn.clone(),
+        group_id: "AGPAMALLORYGROUP".to_string(),
+        group_name: "MalloryGroup".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![PolicyRef {
+            policy_arn: group_policy_arn.clone(),
+            policy_name: "MalloryGroupPolicy".to_string(),
+        }],
+        inline_policies: vec![],
+    };
+
+    let risky_inline = IamInlinePolicy {
+        policy_name: "MalloryRiskyPolicy".to_string(),
+        policy_document: PolicyDocument {
+            version: Some("2012-10-17".to_string()),
+            statement: vec![PolicyStatement {
+                sid: None,
+                effect: Effect::Allow,
+                action: vec!["iam:PutUserPolicy".to_string()],
+                not_action: vec![],
+                resource: vec!["*".to_string()],
+                not_resource: vec![],
+                principal: None,
+                not_principal: None,
+                condition: None,
+            }],
+        },
+    };
+
+    let mallory = IamUser {
+        arn: mallory_arn.clone(),
+        user_id: "AIDAMALLORY".to_string(),
+        user_name: "mallory".to_string(),
+        path: "/".to_string(),
+        create_date: Utc::now(),
+        attached_managed_policies: vec![PolicyRef {
+            policy_arn: attached_policy_arn.clone(),
+            policy_name: "MalloryAssumePolicy".to_string(),
+        }],
+        inline_policies: vec![risky_inline],
+        group_list: vec!["MalloryGroup".to_string()],
+        permissions_boundary: None,
+        password_last_used: None,
+        access_keys: vec![],
+        is_aws_managed: false,
+        tags: HashMap::new(),
+        has_mfa: false,
+        mfa_method: None,
+        console_login_enabled: false,
+        last_activity_date: None,
+    };
+
+    let data = CollectedData {
+        source: CollectorMode::Offline,
+        account_id: Some(account_id.to_string()),
+        collection_timestamp: Utc::now(),
+        roles: vec![granted_role, no_grant_role, wildcard_role],
+        policies: vec![attached_policy, group_policy, trudy_policy],
+        groups: vec![group],
+        users: vec![mallory, trudy],
+        ..Default::default()
+    };
+    (data, mallory_arn, trudy_arn)
+}

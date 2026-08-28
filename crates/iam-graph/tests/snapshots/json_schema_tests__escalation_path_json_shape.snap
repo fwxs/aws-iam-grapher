@@ -1,6 +1,5 @@
 ---
 source: crates/iam-graph/tests/json_schema_tests.rs
-assertion_line: 96
 expression: value
 ---
 {
@@ -48,5 +47,21 @@ expression: value
       "AKIAEXAMPLE1",
       "AKIAEXAMPLE2"
     ]
-  }
+  },
+  "associations": [
+    {
+      "arn": "arn:aws:iam::123456789012:role/Victim",
+      "name": "Victim",
+      "entity_type": "Role",
+      "relationship": "CAN_ASSUME_ROLE",
+      "conditional": false
+    },
+    {
+      "arn": "arn:aws:iam::123456789012:group/Attackers",
+      "name": "Attackers",
+      "entity_type": "Group",
+      "relationship": "MEMBER_OF",
+      "conditional": false
+    }
+  ]
 }

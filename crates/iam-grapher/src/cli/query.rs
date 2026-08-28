@@ -892,6 +892,7 @@ mod tests {
             instance_profiles: vec![],
             trust_principals: vec![],
             user_attributes: None,
+            associations: vec![],
         }
     }
 

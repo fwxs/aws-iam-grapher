@@ -118,6 +118,26 @@ RETURN pair.arn AS entity_arn, u.user_id AS user_id, u.has_mfa AS has_mfa,
        u.active_access_key_count AS active_access_key_count,
        u.oldest_active_key_date AS oldest_active_key_date,
        u.access_key_ids AS access_key_ids
+
+-- org_escalation_user_associations.cypher (User entities only) — keyed on the escalating
+-- entity's own (arn, snapshot_id), NOT the terminal. Same three UNION arms and
+-- permission-verified CAN_ASSUME_ROLE predicate as escalation_user_associations.cypher — see
+-- privilege-escalation-paths.md — with snapshot_id taken from pair.snapshot_id and no
+-- account_id filter, since org terminals can belong to a different account snapshot.
+UNWIND $pairs AS pair
+MATCH (u:User {arn: pair.arn, snapshot_id: pair.snapshot_id})
+MATCH (u)-[car:CAN_ASSUME_ROLE]->(role:Role)
+WHERE (
+    EXISTS { ... sts:AssumeRole grant on own policies, resource = role.arn OR '*' ... }
+    OR EXISTS { ... same, via MEMBER_OF group policies ... }
+  )
+RETURN pair.arn AS entity_arn, role.arn AS arn, role.name AS name, labels(role)[0] AS entity_type,
+       'CAN_ASSUME_ROLE' AS relationship, /* conditional, see stitch_cross_account.cypher */ ...
+
+UNION
+-- ...HAS_ATTACHED_POLICY_OR_INLINE arm (own attached/inline policies, conditional=false)
+UNION
+-- ...MEMBER_OF arm (own group memberships, conditional=false)
 ```
 
 Each is skipped entirely (no round trip) when its terminal batch is empty.
@@ -129,19 +149,21 @@ Each is skipped entirely (no round trip) when its terminal batch is empty.
 Uses `render_hop_bound(ORG_ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}`; bound
 parameters are `$org_run_id` and `$risky_actions` (`groups.all_actions()`). Enrichment queries
 live in `crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_org_holders`,
-`fetch_org_instance_profiles`, `fetch_org_trust_principals`, `fetch_org_user_attributes`),
-shared with `escalation.rs`. `iam-grapher`'s `query org-escalation` subcommand applies an
+`fetch_org_instance_profiles`, `fetch_org_trust_principals`, `fetch_org_user_attributes`,
+`fetch_org_user_associations`), shared with `escalation.rs`. `iam-grapher`'s
+`query org-escalation` subcommand applies an
 additional `--entity-type <user|role|group|all>` filter in Rust, after this query returns —
 see `crates/iam-grapher/src/cli/query.rs::filter_by_entity_type`.
 
 ## Returns
 
 `Vec<OrgEscalationPath>` where
-`OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, matched_paths, path: Vec<OrgHop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes> }`
+`OrgEscalationPath { arn, name, entity_type, account_id, risky_actions, matched_paths, path: Vec<OrgHop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes>, associations: Vec<UserAssociation> }`
 and `OrgHop { arn, entity_type, account_id, snapshot_id }` — `OrgHop` carries `account_id` and
 `snapshot_id` per node so a caller can render the cross-account path and enrichment queries
-can resolve each hop against its own snapshot. `Holder`/`UserAttributes` are the same shape
-used by `escalation.rs` — see `privilege-escalation-paths.md`. Rust post-processing dedupes by
+can resolve each hop against its own snapshot. `Holder`/`UserAttributes`/`UserAssociation` are
+the same shapes used by `escalation.rs` — see `privilege-escalation-paths.md`. Rust
+post-processing dedupes by
 arn keeping the shortest path, applies wildcard Deny suppression via
 `iam_expander::glob_match`, then evaluates AND-within-group/OR-across-group matching via
 `RiskyActionGroups::finalize_actions` on the post-Deny action set — this must happen after
@@ -152,9 +174,12 @@ queries then run against the surviving terminal set.
 
 `holders` is populated only when the terminal's `entity_type == "Group"`;
 `instance_profiles`/`trust_principals` only when `entity_type == "Role"`; `user_attributes`
-only when `arn`'s own `entity_type == "User"`. All are empty/absent otherwise. These, and
-`matched_paths`, are exact graph traversals/exact-match evaluations, not glob-match
-approximations, so no new `CaveatCode` variant applies to them.
+and `associations` only when `arn`'s own `entity_type == "User"`. All are empty/absent
+otherwise. These, and `matched_paths`, are exact graph traversals/exact-match evaluations, not
+glob-match approximations, so no new `CaveatCode` variant applies to them. See
+[`privilege_escalation_paths`](privilege-escalation-paths.md) for the `associations`
+permission-verified `CAN_ASSUME_ROLE` semantics — identical here, scoped by
+`pair.snapshot_id` instead of a single bound snapshot.
 
 ## Notes
 
