@@ -71,6 +71,18 @@ a raw structural diff — same restriction. `list-snapshots`/`list-accounts` nev
   `active_access_key_count`, `oldest_active_key_date` (oldest *active* key's create date, absent
   if none active), `access_key_ids` (both active and inactive). Use `--entity-type user`
   (below) to surface only these.
+- **A result whose own `entity_type` is `"User"` also carries `associations`** — what that user
+  itself holds and can reach, for attacker-context triage: roles it can assume
+  (`relationship: "CAN_ASSUME_ROLE"`), its attached/inline policies
+  (`"HAS_ATTACHED_POLICY_OR_INLINE"`), and its group memberships (`"MEMBER_OF"`). Empty/absent
+  for Role and Group results. `CAN_ASSUME_ROLE` entries are permission-verified, not just
+  trust-policy: the user (or a group it belongs to) must also hold an Allow
+  `sts:AssumeRole`/`*` grant whose resource matches the role's ARN or is `*` — a role that only
+  trusts the user, with no matching sts grant, does not appear. Each entry's `conditional` is
+  `true` for a `CAN_ASSUME_ROLE` hop when the trust edge itself is conditional or only a
+  `resource = '*'` sts grant exists (no specific-ARN grant); always `false` for the other two
+  relationship kinds. sts resource matching is exact-ARN or `*` only, not resource-glob — see
+  `docs/limitations.md`.
 - **`--entity-type <user|role|group|all>`** filters `privilege-escalation`/`org-escalation` results
   after the query runs (default `all`). `user` keeps every result whose `entity_type` is `"User"`
   **and** every Group result that has a non-empty `holders` list — a user reachable only through

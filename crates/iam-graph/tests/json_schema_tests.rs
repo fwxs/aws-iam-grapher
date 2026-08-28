@@ -12,7 +12,7 @@
 use iam_graph::queries::{
     AccountRecord, AssociatedEntity, Caveat, EntityRef, EscalationPath, Holder, Hop,
     InstanceProfileRef, OrgEscalationPath, OrgHop, PermissionDiff, PermissionRecord, PermissionRow,
-    SnapshotRecord, TrustPrincipal, UserAttributes,
+    SnapshotRecord, TrustPrincipal, UserAssociation, UserAttributes,
 };
 
 #[test]
@@ -91,6 +91,22 @@ fn escalation_path_json_shape() {
             oldest_active_key_date: Some("2025-06-01T00:00:00+00:00".to_string()),
             access_key_ids: vec!["AKIAEXAMPLE1".to_string(), "AKIAEXAMPLE2".to_string()],
         }),
+        associations: vec![
+            UserAssociation {
+                arn: "arn:aws:iam::123456789012:role/Victim".to_string(),
+                name: "Victim".to_string(),
+                entity_type: "Role".to_string(),
+                relationship: "CAN_ASSUME_ROLE".to_string(),
+                conditional: false,
+            },
+            UserAssociation {
+                arn: "arn:aws:iam::123456789012:group/Attackers".to_string(),
+                name: "Attackers".to_string(),
+                entity_type: "Group".to_string(),
+                relationship: "MEMBER_OF".to_string(),
+                conditional: false,
+            },
+        ],
     };
 
     insta::assert_json_snapshot!(value);
@@ -145,6 +161,13 @@ fn org_escalation_path_json_shape() {
             oldest_active_key_date: Some("2025-03-01T00:00:00+00:00".to_string()),
             access_key_ids: vec!["AKIAEXAMPLE3".to_string()],
         }),
+        associations: vec![UserAssociation {
+            arn: "arn:aws:iam::210987654321:role/Victim".to_string(),
+            name: "Victim".to_string(),
+            entity_type: "Role".to_string(),
+            relationship: "CAN_ASSUME_ROLE".to_string(),
+            conditional: true,
+        }],
     };
 
     insta::assert_json_snapshot!(value);

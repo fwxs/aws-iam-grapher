@@ -104,6 +104,28 @@ See [`docs/caveats.md`](caveats.md) for approximations surfaced in `query --outp
 `caveats` array (`NotAction` allow-all-except, Deny scope, partial snapshots, wildcard expansion
 degradation, and the `Caveat codes` table).
 
+### Escalation `associations`: exact-ARN/`*` sts resource matching only, no groups-as-Allow
+
+`privilege-escalation`/`org-escalation` attach an `associations` list to each escalating
+**User** row — roles it can assume, its attached/inline policies, and its group memberships
+(see `docs/queries/privilege-escalation-paths.md`). The `CAN_ASSUME_ROLE` entries are
+permission-verified: the trust-policy edge alone doesn't produce an entry, the user (or a
+group it belongs to) must also hold an Allow `sts:AssumeRole`/`*` grant. Two inherited
+approximations, both reused verbatim from `stitch_cross_account.cypher`:
+
+- **Resource matching is exact-ARN or `*` only**, not IAM resource-glob semantics
+  (`iam_expander::glob_match`). An sts grant scoped to `arn:aws:iam::111111111111:role/Prod*`
+  will not match a specific role ARN even though IAM itself would allow it — the association is
+  under-reported, not over-reported, in this case.
+- **Group-inherited sts grants are checked, but group-inherited *Allow* on the risky action
+  itself is not surfaced as a `User` row at all** — this is a pre-existing, deliberately
+  unchanged gap in the escalation queries themselves (see "Risky-action groups" note below and
+  `crates/iam-graph/queries/privilege_escalation_paths.cypher`): `MEMBER_OF` is traversed for
+  Deny suppression but never for Allow, so a user who only inherits risky permissions via a
+  group still surfaces as a `Group` row with the user under `holders`, never as a `User` row
+  with populated `associations`. `--entity-type user` keeps such `Group` rows (since they carry
+  holders), so the user is still visible, just not as a first-class `User` result.
+
 ### Risky-action groups are user-configurable, exact-match only, and don't cover full-admin
 
 `privilege-escalation`/`org-escalation` detect entities holding permissions from a named

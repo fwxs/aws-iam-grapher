@@ -1,6 +1,5 @@
 ---
 source: crates/iam-graph/tests/json_schema_tests.rs
-assertion_line: 150
 expression: value
 ---
 {
@@ -56,5 +55,14 @@ expression: value
     "access_key_ids": [
       "AKIAEXAMPLE3"
     ]
-  }
+  },
+  "associations": [
+    {
+      "arn": "arn:aws:iam::210987654321:role/Victim",
+      "name": "Victim",
+      "entity_type": "Role",
+      "relationship": "CAN_ASSUME_ROLE",
+      "conditional": true
+    }
+  ]
 }

@@ -3,8 +3,9 @@ use crate::queries::col;
 use crate::queries::context::OrgQueryContext;
 use crate::queries::escalation_enrichment::{
     collect_enrichment_keys, fetch_org_holders, fetch_org_instance_profiles,
-    fetch_org_trust_principals, fetch_org_user_attributes, finalize_kept, EnrichmentKeys, Holder,
-    InstanceProfileRef, OrgTerminal, TrustPrincipal, UserAttributes,
+    fetch_org_trust_principals, fetch_org_user_associations, fetch_org_user_attributes,
+    finalize_kept, EnrichmentKeys, Holder, InstanceProfileRef, OrgTerminal, TrustPrincipal,
+    UserAssociation, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
@@ -50,6 +51,11 @@ pub struct OrgEscalationPath {
     /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_attributes: Option<UserAttributes>,
+    /// Roles this entity can assume, its attached/inline policies, and its group
+    /// memberships — populated only when `entity_type == "User"`. Empty (and omitted from
+    /// JSON) otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub associations: Vec<UserAssociation>,
 }
 
 const ORG_ESCALATION_QUERY: &str = include_str!("../../queries/org_escalation_paths.cypher");
@@ -149,11 +155,18 @@ pub async fn org_escalation_paths(
         },
     );
 
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
+    let (
+        holders_by_terminal,
+        profiles_by_terminal,
+        trust_by_terminal,
+        user_attrs_by_arn,
+        associations_by_arn,
+    ) = tokio::try_join!(
         fetch_org_holders(graph, &group_terminals),
         fetch_org_instance_profiles(graph, &role_terminals),
         fetch_org_trust_principals(graph, &role_terminals),
         fetch_org_user_attributes(graph, &user_arns),
+        fetch_org_user_associations(graph, &user_arns),
     )?;
 
     let results = kept
@@ -177,6 +190,7 @@ pub async fn org_escalation_paths(
                 .cloned()
                 .unwrap_or_default();
             let user_attributes = user_attrs_by_arn.get(&arn).cloned();
+            let associations = associations_by_arn.get(&arn).cloned().unwrap_or_default();
             OrgEscalationPath {
                 arn,
                 name: candidate.name,
@@ -190,6 +204,7 @@ pub async fn org_escalation_paths(
                 instance_profiles,
                 trust_principals,
                 user_attributes,
+                associations,
             }
         })
         .collect();

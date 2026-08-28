@@ -145,6 +145,40 @@ RETURN entity_arn, u.user_id AS user_id, u.has_mfa AS has_mfa, u.mfa_method AS m
        u.active_access_key_count AS active_access_key_count,
        u.oldest_active_key_date AS oldest_active_key_date,
        u.access_key_ids AS access_key_ids
+
+-- escalation_user_associations.cypher (User entities only) — keyed on the escalating
+-- entity's own arn, same rationale as escalation_user_attributes.cypher above. Three UNION
+-- arms: assumable roles, attached/inline policies, group memberships. The CAN_ASSUME_ROLE
+-- arm is permission-verified — the trust edge alone is not enough, the user must also hold
+-- an Allow for sts:AssumeRole (or *) whose resource matches the target role or covers '*',
+-- checked on the user's own policies and group-inherited ones (same predicate as
+-- stitch_cross_account.cypher). conditional is true when the trust edge is conditional OR
+-- only a resource='*' sts grant exists; always false for the other two arms.
+UNWIND $arns AS entity_arn
+MATCH (u:User {arn: entity_arn, account_id: $account_id, snapshot_id: $snapshot_id})
+MATCH (u)-[car:CAN_ASSUME_ROLE]->(role:Role)
+WHERE (
+    EXISTS {
+      MATCH (u)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
+            -[:GRANTS]->(sp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+      WHERE sp.action IN ['sts:AssumeRole', '*']
+        AND (sp.resource = role.arn OR sp.resource = '*')
+    }
+    OR EXISTS {
+      MATCH (u)-[:MEMBER_OF]->(:Group)
+            -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol)
+            -[:GRANTS]->(gsp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+      WHERE gsp.action IN ['sts:AssumeRole', '*']
+        AND (gsp.resource = role.arn OR gsp.resource = '*')
+    }
+  )
+RETURN entity_arn, role.arn AS arn, role.name AS name, labels(role)[0] AS entity_type,
+       'CAN_ASSUME_ROLE' AS relationship, /* conditional, see stitch_cross_account.cypher */ ...
+
+UNION
+-- ...HAS_ATTACHED_POLICY_OR_INLINE arm (own attached/inline policies, conditional=false)
+UNION
+-- ...MEMBER_OF arm (own group memberships, conditional=false)
 ```
 
 Each is skipped entirely (no round trip) when its ARN batch is empty.
@@ -157,17 +191,19 @@ Uses `render_hop_bound(ESCALATION_QUERY, max_hops)` to interpolate `{max_hops}` 
 execution; `$risky_actions` (`groups.all_actions()`) is bound alongside `$account_id`/
 `$snapshot_id`. Enrichment queries live in
 `crates/iam-graph/src/queries/escalation_enrichment.rs` (`fetch_holders`,
-`fetch_instance_profiles`, `fetch_trust_principals`, `fetch_user_attributes`), shared with
-`org_escalation.rs`. `iam-grapher`'s `query privilege-escalation`/`org-escalation` subcommands
+`fetch_instance_profiles`, `fetch_trust_principals`, `fetch_user_attributes`,
+`fetch_user_associations`), shared with `org_escalation.rs`. `iam-grapher`'s
+`query privilege-escalation`/`org-escalation` subcommands
 apply an additional `--entity-type <user|role|group|all>` filter in Rust, after this query
 returns — see `crates/iam-grapher/src/cli/query.rs::filter_by_entity_type`.
 
 ## Returns
 
 `Vec<EscalationPath>` where
-`EscalationPath { arn, name, entity_type, risky_actions, matched_paths, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes> }`,
+`EscalationPath { arn, name, entity_type, risky_actions, matched_paths, path: Vec<Hop>, conditional, holders: Vec<Holder>, instance_profiles: Vec<InstanceProfileRef>, trust_principals: Vec<TrustPrincipal>, user_attributes: Option<UserAttributes>, associations: Vec<UserAssociation> }`,
 `Hop { arn, entity_type }`, `Holder { arn, name, entity_type, attributes: UserAttributes }`,
-`InstanceProfileRef { arn, name }`, `TrustPrincipal { id, principal_type, conditional }`, and
+`InstanceProfileRef { arn, name }`, `TrustPrincipal { id, principal_type, conditional }`,
+`UserAssociation { arn, name, entity_type, relationship, conditional }`, and
 `UserAttributes { user_id, has_mfa, mfa_method: Option<String>, console_login_enabled, password_last_used: Option<String>, last_activity_date: Option<String>, create_date, access_key_count, active_access_key_count, oldest_active_key_date: Option<String>, access_key_ids: Vec<String> }`.
 Rust post-processing dedupes by arn (shortest path wins), applies wildcard-aware Deny
 suppression via `iam_expander::glob_match`, then evaluates AND-within-group/OR-across-group
@@ -182,9 +218,21 @@ surviving terminal set.
 `holders` is populated only when the terminal's `entity_type == "Group"` (member Users via
 `MEMBER_OF`); `instance_profiles` and `trust_principals` only when the terminal's
 `entity_type == "Role"` (via `CONTAINS_ROLE` and `CAN_ASSUME` respectively); `user_attributes`
-only when `arn`'s own `entity_type == "User"`. All are empty/absent otherwise. These, and
-`matched_paths`, are exact graph traversals/exact-match evaluations, not glob-match
-approximations, so no new `CaveatCode` variant applies to them.
+and `associations` only when `arn`'s own `entity_type == "User"`. All are empty/absent
+otherwise. These, and `matched_paths`, are exact graph traversals/exact-match evaluations, not
+glob-match approximations, so no new `CaveatCode` variant applies to them.
+
+`associations` lists what an escalating User itself holds and can reach: roles it can assume
+(`relationship = "CAN_ASSUME_ROLE"`), its attached/inline policies
+(`"HAS_ATTACHED_POLICY_OR_INLINE"`), and its group memberships (`"MEMBER_OF"`). The
+`CAN_ASSUME_ROLE` entries are permission-verified: the `CAN_ASSUME_ROLE` edge (trust policy)
+alone does not produce an entry — the user (or a group it belongs to) must also hold an Allow
+`sts:AssumeRole`/`*` grant whose resource matches the role's ARN or is `*`. A role that trusts
+the user but for which the user holds no such grant does not appear. `conditional` on a
+`CAN_ASSUME_ROLE` entry is `true` when the trust edge itself is conditional, or when only a
+`resource = '*'` sts grant exists (no specific-ARN grant) — mirroring `edge_conditional` in
+`stitch_cross_account.cypher`. `conditional` is always `false` for the other two relationship
+kinds, which are exact structural traversals.
 
 ## Notes
 

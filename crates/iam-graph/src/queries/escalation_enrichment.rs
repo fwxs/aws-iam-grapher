@@ -54,12 +54,29 @@ pub struct TrustPrincipal {
     pub conditional: bool,
 }
 
+/// One entity structurally linked to an escalating `User` — a role it can assume, a policy
+/// attached to or inlined on it, or a group it belongs to. `relationship` discriminates
+/// which, mirroring `associated_entities.cypher`'s `relationship` column.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UserAssociation {
+    pub arn: String,
+    pub name: String,
+    pub entity_type: String,
+    /// One of `CAN_ASSUME_ROLE`, `HAS_ATTACHED_POLICY_OR_INLINE`, `MEMBER_OF`.
+    pub relationship: String,
+    /// Only meaningful for `CAN_ASSUME_ROLE`: the trust edge or the sts grant carries an
+    /// unevaluated runtime condition, or the sts grant only covers `resource = '*'`.
+    pub conditional: bool,
+}
+
 const HOLDERS_QUERY: &str = include_str!("../../queries/escalation_holders.cypher");
 const INSTANCE_PROFILES_QUERY: &str =
     include_str!("../../queries/escalation_instance_profiles.cypher");
 const TRUST_PRINCIPALS_QUERY: &str =
     include_str!("../../queries/escalation_trust_principals.cypher");
 const USER_ATTRIBUTES_QUERY: &str = include_str!("../../queries/escalation_user_attributes.cypher");
+const USER_ASSOCIATIONS_QUERY: &str =
+    include_str!("../../queries/escalation_user_associations.cypher");
 
 const ORG_HOLDERS_QUERY: &str = include_str!("../../queries/org_escalation_holders.cypher");
 const ORG_INSTANCE_PROFILES_QUERY: &str =
@@ -68,6 +85,8 @@ const ORG_TRUST_PRINCIPALS_QUERY: &str =
     include_str!("../../queries/org_escalation_trust_principals.cypher");
 const ORG_USER_ATTRIBUTES_QUERY: &str =
     include_str!("../../queries/org_escalation_user_attributes.cypher");
+const ORG_USER_ASSOCIATIONS_QUERY: &str =
+    include_str!("../../queries/org_escalation_user_associations.cypher");
 
 /// Run `query`, decoding each row via `row_mapper` into a `(terminal_arn, value)` pair and
 /// accumulating values per terminal ARN. Shared by every `fetch_*`/`fetch_org_*` function
@@ -192,6 +211,25 @@ fn decode_trust_principal(row: &neo4rs::Row) -> Result<(String, TrustPrincipal),
     ))
 }
 
+fn decode_user_association(row: &neo4rs::Row) -> Result<(String, UserAssociation), GraphError> {
+    let entity_arn: String = col(row, "entity_arn")?;
+    let arn: String = col(row, "arn")?;
+    let name: String = col(row, "name")?;
+    let entity_type: String = col(row, "entity_type")?;
+    let relationship: String = col(row, "relationship")?;
+    let conditional: bool = col(row, "conditional")?;
+    Ok((
+        entity_arn,
+        UserAssociation {
+            arn,
+            name,
+            entity_type,
+            relationship,
+            conditional,
+        },
+    ))
+}
+
 /// Fetch `Holder`s (Group member Users) for a batch of terminal Group ARNs.
 ///
 /// Returns an empty map without a round trip when `arns` is empty.
@@ -263,6 +301,26 @@ pub(crate) async fn fetch_user_attributes(
         .param("account_id", ctx.account_id.as_str())
         .param("snapshot_id", ctx.snapshot_id.as_str());
     fetch_row(graph, query, decode_entity_user_attributes).await
+}
+
+/// Fetch `UserAssociation`s (assumable roles, attached/inline policies, group memberships)
+/// for a batch of escalating-entity ARNs that are Users.
+///
+/// Returns an empty map without a round trip when `arns` is empty. An ARN that isn't a
+/// User in this scope simply produces no rows and is absent from the result map.
+pub(crate) async fn fetch_user_associations(
+    graph: &Graph,
+    ctx: &QueryContext,
+    arns: &[String],
+) -> Result<HashMap<String, Vec<UserAssociation>>, GraphError> {
+    if arns.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = neo4rs::query(USER_ASSOCIATIONS_QUERY)
+        .param("arns", arns.to_vec())
+        .param("account_id", ctx.account_id.as_str())
+        .param("snapshot_id", ctx.snapshot_id.as_str());
+    fetch_rows(graph, query, decode_user_association).await
 }
 
 /// `(arn, snapshot_id)` pair identifying one org-escalation terminal — org terminals may
@@ -439,4 +497,16 @@ pub(crate) async fn fetch_org_user_attributes(
     }
     let query = neo4rs::query(ORG_USER_ATTRIBUTES_QUERY).param("pairs", org_pairs(terminals));
     fetch_row(graph, query, decode_entity_user_attributes).await
+}
+
+/// Org-scoped variant of [`fetch_user_associations`] — see [`OrgTerminal`].
+pub(crate) async fn fetch_org_user_associations(
+    graph: &Graph,
+    terminals: &[OrgTerminal],
+) -> Result<HashMap<String, Vec<UserAssociation>>, GraphError> {
+    if terminals.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let query = neo4rs::query(ORG_USER_ASSOCIATIONS_QUERY).param("pairs", org_pairs(terminals));
+    fetch_rows(graph, query, decode_user_association).await
 }

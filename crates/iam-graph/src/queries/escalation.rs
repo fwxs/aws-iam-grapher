@@ -3,8 +3,8 @@ use crate::queries::col;
 use crate::queries::context::QueryContext;
 use crate::queries::escalation_enrichment::{
     collect_enrichment_keys, fetch_holders, fetch_instance_profiles, fetch_trust_principals,
-    fetch_user_attributes, finalize_kept, EnrichmentKeys, Holder, InstanceProfileRef,
-    TrustPrincipal, UserAttributes,
+    fetch_user_associations, fetch_user_attributes, finalize_kept, EnrichmentKeys, Holder,
+    InstanceProfileRef, TrustPrincipal, UserAssociation, UserAttributes,
 };
 use crate::queries::render_hop_bound;
 use crate::queries::risky_actions::RiskyActionGroups;
@@ -47,6 +47,11 @@ pub struct EscalationPath {
     /// Security posture of `arn` itself, populated only when `entity_type == "User"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_attributes: Option<UserAttributes>,
+    /// Roles this entity can assume, its attached/inline policies, and its group
+    /// memberships — populated only when `entity_type == "User"`. Empty (and omitted from
+    /// JSON) otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub associations: Vec<UserAssociation>,
 }
 
 const ESCALATION_QUERY: &str = include_str!("../../queries/privilege_escalation_paths.cypher");
@@ -133,11 +138,18 @@ pub async fn privilege_escalation_paths(
         |arn: &str, _c: &Candidate| Some(arn.to_string()),
     );
 
-    let (holders_by_terminal, profiles_by_terminal, trust_by_terminal, user_attrs_by_arn) = tokio::try_join!(
+    let (
+        holders_by_terminal,
+        profiles_by_terminal,
+        trust_by_terminal,
+        user_attrs_by_arn,
+        associations_by_arn,
+    ) = tokio::try_join!(
         fetch_holders(graph, ctx, &group_terminals),
         fetch_instance_profiles(graph, ctx, &role_terminals),
         fetch_trust_principals(graph, ctx, &role_terminals),
         fetch_user_attributes(graph, ctx, &user_arns),
+        fetch_user_associations(graph, ctx, &user_arns),
     )?;
 
     let results = kept
@@ -161,6 +173,7 @@ pub async fn privilege_escalation_paths(
                 .cloned()
                 .unwrap_or_default();
             let user_attributes = user_attrs_by_arn.get(&arn).cloned();
+            let associations = associations_by_arn.get(&arn).cloned().unwrap_or_default();
             EscalationPath {
                 arn,
                 name: candidate.name,
@@ -173,6 +186,7 @@ pub async fn privilege_escalation_paths(
                 instance_profiles,
                 trust_principals,
                 user_attributes,
+                associations,
             }
         })
         .collect();

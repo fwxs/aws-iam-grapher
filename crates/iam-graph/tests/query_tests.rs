@@ -223,6 +223,119 @@ async fn privilege_escalation_enriches_group_terminal_with_holders() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
+async fn privilege_escalation_enriches_user_with_permission_verified_associations() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445562";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, mallory_arn, trudy_arn) =
+        helpers::data_with_escalation_user_associations(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
+        .await
+        .expect("escalation query must succeed");
+
+    let mallory_path = paths
+        .iter()
+        .find(|p| p.arn == mallory_arn)
+        .expect("mallory must be reported as an escalation path");
+
+    assert_eq!(mallory_path.entity_type, "User");
+
+    let granted = mallory_path
+        .associations
+        .iter()
+        .find(|a| a.name == "TrustedAndGranted");
+    assert!(
+        matches!(
+            granted,
+            Some(a) if a.relationship == "CAN_ASSUME_ROLE" && !a.conditional
+        ),
+        "TrustedAndGranted must appear, unconditional (exact-ARN sts grant): {:?}",
+        mallory_path.associations
+    );
+
+    assert!(
+        !mallory_path
+            .associations
+            .iter()
+            .any(|a| a.name == "TrustedNoGrant"),
+        "TrustedNoGrant must be absent — trust alone is not enough: {:?}",
+        mallory_path.associations
+    );
+
+    let trudy_path = paths
+        .iter()
+        .find(|p| p.arn == trudy_arn)
+        .expect("trudy must be reported as an escalation path");
+    let wildcard = trudy_path
+        .associations
+        .iter()
+        .find(|a| a.name == "TrustedWildcardGrant");
+    assert!(
+        matches!(
+            wildcard,
+            Some(a) if a.relationship == "CAN_ASSUME_ROLE" && a.conditional
+        ),
+        "TrustedWildcardGrant must appear for trudy, conditional (only a resource='*' sts grant): {:?}",
+        trudy_path.associations
+    );
+
+    assert!(
+        mallory_path
+            .associations
+            .iter()
+            .any(|a| a.name == "MalloryAssumePolicy"
+                && a.relationship == "HAS_ATTACHED_POLICY_OR_INLINE"),
+        "attached policy must appear: {:?}",
+        mallory_path.associations
+    );
+    assert!(
+        mallory_path
+            .associations
+            .iter()
+            .any(|a| a.name == "MalloryGroup" && a.relationship == "MEMBER_OF"),
+        "group membership must appear: {:?}",
+        mallory_path.associations
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn privilege_escalation_associations_empty_for_role_terminal() {
+    let client = helpers::shared_client().await;
+    let account_id = "333344445563";
+    let config = helpers::test_config(account_id);
+    let snapshot_id = config.snapshot_id.clone();
+
+    let ingester = GraphIngester::new(client, config);
+    let (data, role_arn) = helpers::data_with_escalation_instance_profile(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let ctx = QueryContext::new(&snapshot_id, account_id);
+    let groups = helpers::test_risky_action_groups();
+    let paths = privilege_escalation_paths(ingester.client().inner(), &ctx, 3, &groups)
+        .await
+        .expect("escalation query must succeed");
+
+    let role_path = paths
+        .iter()
+        .find(|p| p.arn == role_arn)
+        .expect("RiskyProfileRole must be reported as an escalation path");
+
+    assert!(
+        role_path.associations.is_empty(),
+        "associations must be empty for a Role-typed escalating entity"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
 async fn privilege_escalation_enriches_role_terminal_with_instance_profiles() {
     let client = helpers::shared_client().await;
     let account_id = "333344445561";
