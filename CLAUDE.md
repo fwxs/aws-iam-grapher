@@ -69,9 +69,9 @@ All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before re
 1. `AwsAccount` + `AwsService` nodes
 2. `Snapshot` node (carries `is_partial`, `partial_reasons` derived from `data.warnings`)
 3. Entity nodes (Policy, Role, User, Group, InstanceProfile + their inline policies)
-4. Permission nodes + `ON_SERVICE` relationships
+4. `Permission` nodes (global, action-keyed vocabulary — the distinct action set seen this run) + `ON_SERVICE` relationships
 5. `Snapshot -[:INCLUDES]→` entity relationships
-6. Entity relationships: `HAS_ATTACHED_POLICY`, `HAS_INLINE_POLICY`, `GRANTS`, `MEMBER_OF`, `CONTAINS_ROLE`, `CAN_ASSUME`, `BOUNDED_BY`
+6. Entity relationships: `HAS_ATTACHED_POLICY`, `HAS_INLINE_POLICY`, `GRANTS` (carries `effect`/`resource`/`condition`/`excluded_actions`/`snapshot_id`/`account_id` — the per-grant fan-out over every policy statement), `MEMBER_OF`, `CONTAINS_ROLE`, `CAN_ASSUME`, `BOUNDED_BY`
 
 *Queries* (`src/queries/`): All queries require `QueryContext` (snapshot_id + account_id) for tenant isolation. Key queries:
 - `who_can(action, resource)` — returns entities with Allow for the action, excluding those with an explicit Deny; also matches entities holding `Action: "*"` (flagged `is_full_admin: true`). Optional `resource` intersects wildcard (`Action: "*"`) grants against the queried resource via IAM resource-glob semantics
@@ -85,7 +85,7 @@ All three call `expand_collected_data(&mut data)` (in `src/expand.rs`) before re
 
 ## Neo4j Graph Model
 
-Every entity node carries `uid` (`"snapshot_id|arn"`), `snapshot_id`, and `account_id` — all three are required for queries to be correctly scoped. `Permission` nodes carry `action`, `effect` (`"Allow"` or `"Deny"`), `resource`, `snapshot_id`, and `account_id`. The schema (constraints + indexes) is defined in `src/schema.rs` and must be initialized via `GraphClient::initialize_schema()` before ingestion.
+Every entity node carries `uid` (`"snapshot_id|arn"`), `snapshot_id`, and `account_id` — all three are required for queries to be correctly scoped. **`Permission` is the one exception**: it is a global, action-keyed vocabulary node (same class as `AwsService`) carrying only `action`, with no `uid`, `snapshot_id`, or `account_id` — the same action is shared by every snapshot and account that grants it. `effect`, `resource`, `condition`, and `excluded_actions` live on the `GRANTS` relationship instead (`(Policy|InlinePolicy)-[:GRANTS {effect, resource, condition, excluded_actions, snapshot_id, account_id}]->(Permission)`), which is where scope for a given grant is enforced. The schema (constraints + indexes) is defined in `src/schema.rs` and must be initialized via `GraphClient::initialize_schema()` before ingestion.
 
 ## Integration Test Pattern
 
@@ -93,8 +93,8 @@ Tests in `crates/iam-graph/tests/` share one Neo4j container per test binary (fo
 
 ## Key Constraints
 
-- `account_id` scope: every analysis query filters on both `account_id` and `snapshot_id`. Omitting either causes cross-tenant data leaks. Neo4j Community has one database; isolation is logical only.
-- `Action: "*"` (unqualified full-admin) is stored as a literal `Permission` node with `action = "*"`. The `who_can` query has an explicit UNION arm to match it.
+- `account_id` scope: every analysis query filters on both `account_id` and `snapshot_id`. For most node types this is a node-property filter; for `Permission` (global, no `account_id`/`snapshot_id` of its own) scope comes from the `GRANTS` edge connecting it to a `Policy`/`InlinePolicy` instead. Omitting either causes cross-tenant data leaks. Neo4j Community has one database; isolation is logical only.
+- `Action: "*"` (unqualified full-admin) is the single global `Permission` node with `action = "*"` — every full-admin Allow/Deny and every `NotAction` (allow/deny-all-except) grant across every snapshot/account shares this one node, distinguished only by their own `GRANTS` edge's `excluded_actions` (`IS NULL` = true full-admin, else allow/deny-all-except). The `who_can` query has an explicit UNION arm to match it.
 - Explicit Deny evaluation subtracts exact-action, wildcard-action (via `iam_expander::glob_match`), and `action = "*"` Denies, including group-inherited Denies and `Deny NotAction` (deny-all-except). The remaining approximation is wildcard-vs-wildcard literal glob comparison (not semantic set containment), and Denies on a group's member users don't suppress a `Group` returned directly. See `docs/limitations.md`.
 - `NotAction` statements are fully evaluated via a sentinel + query-time exclusion model (not merely parsed) — an entity with `Allow NotAction: [...]` correctly appears/is absent from `who_can` results. Remaining approximations: the grant's resource scope isn't intersected with `--resource`, and conditions on `NotAction` statements aren't evaluated. See `docs/limitations.md`.
 - `query ... --output json` attaches a `caveats` array (closed `CaveatCode` enum: `approximate-deny`, `notaction-not-expanded`, `partial-snapshot`, `expansion-degraded`) to every response, describing which of the above approximations apply to that query and snapshot. Always present, empty when none apply. See `docs/caveats.md`.

@@ -13,11 +13,11 @@ Boundary policy, if attached, in this snapshot.
 ## Cypher
 
 ```cypher
-MATCH (e {uid: $uid})-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(perm:Permission {
+MATCH (e {uid: $uid})-[:BOUNDED_BY]->(:Policy)-[g:GRANTS {
     effect: 'Allow',
     snapshot_id: $snapshot_id
-})
-RETURN perm.action AS action, perm.excluded_actions AS excluded_actions
+}]->(perm:Permission)
+RETURN perm.action AS action, g.excluded_actions AS excluded_actions
 ```
 
 ## Rust binding
@@ -31,7 +31,8 @@ inside [`entity_permissions`](entity-permissions.md) (not a standalone public fu
 
 ## Notes
 
-Used by `entity_permissions()` to compute each permission row's `effective` flag via
+`Permission` is a global, action-keyed node; `effect` and `excluded_actions` live on the `GRANTS`
+relationship. Used by `entity_permissions()` to compute each permission row's `effective` flag via
 `iam_expander::glob_match` against each boundary action — matching exact/wildcard actions, a
-full-admin boundary (`action = '*'`, `excluded_actions IS NULL`), or an allow-all-except
-boundary (`action = '*'`, `excluded_actions IS NOT NULL`).
+full-admin boundary (`action = '*'`, `GRANTS.excluded_actions IS NULL`), or an allow-all-except
+boundary (`action = '*'`, `GRANTS.excluded_actions IS NOT NULL`).

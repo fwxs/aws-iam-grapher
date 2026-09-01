@@ -28,28 +28,28 @@
 
 MATCH (e {account_id: $account_id, snapshot_id: $snapshot_id})
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+      -[:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(perm:Permission)
 WHERE perm.action IN $risky_actions
 WITH e, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-               -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE deny.excluded_actions IS NULL
+               -[dg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(deny:Permission)
+WHERE dg.excluded_actions IS NULL
 WITH e, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
-               -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE gdeny.excluded_actions IS NULL
+               -[gdg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(gdeny:Permission)
+WHERE gdg.excluded_actions IS NULL
 WITH e, direct_allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
 WITH e,
      [a IN direct_allowed_actions WHERE
         NOT EXISTS {
             MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
-                  -[:GRANTS]->(deny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE deny_not.excluded_actions IS NOT NULL AND NOT a IN deny_not.excluded_actions
+                  -[dng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE dng.excluded_actions IS NOT NULL AND NOT a IN dng.excluded_actions
         }
         AND NOT EXISTS {
             MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
-                  -[:GRANTS]->(gdeny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE gdeny_not.excluded_actions IS NOT NULL AND NOT a IN gdeny_not.excluded_actions
+                  -[gdng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE gdng.excluded_actions IS NOT NULL AND NOT a IN gdng.excluded_actions
         }
      ] AS allowed_actions,
      own_deny_actions, group_deny_actions
@@ -68,30 +68,30 @@ WITH start, terminal, p
 ORDER BY length(p) ASC
 WITH start, terminal, collect(p)[0] AS p
 MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-                -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+                -[:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(perm:Permission)
 WHERE perm.action IN $risky_actions
 WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-               -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE deny.excluded_actions IS NULL
+               -[dg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(deny:Permission)
+WHERE dg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (terminal)-[:MEMBER_OF]->(:Group)
                -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
-               -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE gdeny.excluded_actions IS NULL
+               -[gdg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(gdeny:Permission)
+WHERE gdg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, own_deny_actions,
      collect(DISTINCT gdeny.action) AS group_deny_actions
 WITH start, p,
      [a IN direct_allowed_actions WHERE
         NOT EXISTS {
             MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
-                  -[:GRANTS]->(deny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE deny_not.excluded_actions IS NOT NULL AND NOT a IN deny_not.excluded_actions
+                  -[dng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE dng.excluded_actions IS NOT NULL AND NOT a IN dng.excluded_actions
         }
         AND NOT EXISTS {
             MATCH (terminal)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
-                  -[:GRANTS]->(gdeny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE gdeny_not.excluded_actions IS NOT NULL AND NOT a IN gdeny_not.excluded_actions
+                  -[gdng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE gdng.excluded_actions IS NOT NULL AND NOT a IN gdng.excluded_actions
         }
      ] AS allowed_actions,
      own_deny_actions, group_deny_actions

@@ -11,8 +11,8 @@ reachable either directly (own attached/inline policy) or transitively via 1..N
 - `$account_id` — account scope for tenant isolation
 - `$snapshot_id` — snapshot scope
 - `$risky_actions` — flat, deduplicated union of every action across every configured
-  risky-action group (`RiskyActionGroups::all_actions`). Filters which `Permission` nodes are
-  pulled back as `allowed_actions`; it does **not** by itself express the
+  risky-action group (`RiskyActionGroups::all_actions`). Filters which `Permission` actions are
+  pulled back (via the `GRANTS` edge) as `allowed_actions`; it does **not** by itself express the
   AND-within-group/OR-across-group semantics — that evaluation happens in Rust afterward,
   post-Deny-subtraction, via `RiskyActionGroups::finalize_actions`. See
   `crates/iam-graph/src/queries/risky_actions.rs`.
@@ -25,28 +25,28 @@ reachable either directly (own attached/inline policy) or transitively via 1..N
 ```cypher
 MATCH (e {account_id: $account_id, snapshot_id: $snapshot_id})
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+      -[:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(perm:Permission)
 WHERE perm.action IN $risky_actions
 WITH e, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-               -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE deny.excluded_actions IS NULL
+               -[dg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(deny:Permission)
+WHERE dg.excluded_actions IS NULL
 WITH e, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
-               -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE gdeny.excluded_actions IS NULL
+               -[gdg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(gdeny:Permission)
+WHERE gdg.excluded_actions IS NULL
 WITH e, direct_allowed_actions, own_deny_actions, collect(DISTINCT gdeny.action) AS group_deny_actions
 WITH e,
      [a IN direct_allowed_actions WHERE
         NOT EXISTS {
             MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
-                  -[:GRANTS]->(deny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE deny_not.excluded_actions IS NOT NULL AND NOT a IN deny_not.excluded_actions
+                  -[dng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE dng.excluded_actions IS NOT NULL AND NOT a IN dng.excluded_actions
         }
         AND NOT EXISTS {
             MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
-                  -[:GRANTS]->(gdeny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE gdeny_not.excluded_actions IS NOT NULL AND NOT a IN gdeny_not.excluded_actions
+                  -[gdng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE gdng.excluded_actions IS NOT NULL AND NOT a IN gdng.excluded_actions
         }
      ] AS allowed_actions,
      own_deny_actions, group_deny_actions
@@ -65,30 +65,30 @@ WITH start, terminal, p
 ORDER BY length(p) ASC
 WITH start, terminal, collect(p)[0] AS p
 MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-                -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+                -[:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(perm:Permission)
 WHERE perm.action IN $risky_actions
 WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-               -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE deny.excluded_actions IS NULL
+               -[dg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(deny:Permission)
+WHERE dg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (terminal)-[:MEMBER_OF]->(:Group)
                -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
-               -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: $snapshot_id})
-WHERE gdeny.excluded_actions IS NULL
+               -[gdg:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(gdeny:Permission)
+WHERE gdg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, own_deny_actions,
      collect(DISTINCT gdeny.action) AS group_deny_actions
 WITH start, p,
      [a IN direct_allowed_actions WHERE
         NOT EXISTS {
             MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
-                  -[:GRANTS]->(deny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE deny_not.excluded_actions IS NOT NULL AND NOT a IN deny_not.excluded_actions
+                  -[dng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE dng.excluded_actions IS NOT NULL AND NOT a IN dng.excluded_actions
         }
         AND NOT EXISTS {
             MATCH (terminal)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
-                  -[:GRANTS]->(gdeny_not:Permission {action: '*', effect: 'Deny', snapshot_id: $snapshot_id})
-            WHERE gdeny_not.excluded_actions IS NOT NULL AND NOT a IN gdeny_not.excluded_actions
+                  -[gdng:GRANTS {effect: 'Deny', snapshot_id: $snapshot_id}]->(:Permission {action: '*'})
+            WHERE gdng.excluded_actions IS NOT NULL AND NOT a IN gdng.excluded_actions
         }
      ] AS allowed_actions,
      own_deny_actions, group_deny_actions
@@ -160,16 +160,16 @@ MATCH (u)-[car:CAN_ASSUME_ROLE]->(role:Role)
 WHERE (
     EXISTS {
       MATCH (u)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-            -[:GRANTS]->(sp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+            -[sg:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(sp:Permission)
       WHERE sp.action IN ['sts:AssumeRole', '*']
-        AND (sp.resource = role.arn OR sp.resource = '*')
+        AND (sg.resource = role.arn OR sg.resource = '*')
     }
     OR EXISTS {
       MATCH (u)-[:MEMBER_OF]->(:Group)
             -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol)
-            -[:GRANTS]->(gsp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+            -[gsg:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(gsp:Permission)
       WHERE gsp.action IN ['sts:AssumeRole', '*']
-        AND (gsp.resource = role.arn OR gsp.resource = '*')
+        AND (gsg.resource = role.arn OR gsg.resource = '*')
     }
   )
 RETURN entity_arn, role.arn AS arn, role.name AS name, labels(role)[0] AS entity_type,
@@ -242,10 +242,12 @@ before computing risky actions. Allow/Deny suppression mirrors the single-entity
 evaluated at the terminal entity — own policies plus every group the terminal is `MEMBER_OF`.
 Per-action, wildcard-aware Deny suppression (e.g. a Deny on `iam:Put*` covering
 `iam:PutRolePolicy`) is applied in Rust against `deny_actions`, since Cypher has no glob
-matching. Deny-all-except (Deny NotAction) sentinel nodes are evaluated here via `NOT EXISTS`
+matching. Deny-all-except (Deny NotAction) grants are evaluated here via `NOT EXISTS`
 subqueries instead, since the rule is plain set membership: an allowed action is dropped if a
-reachable deny-all-except node (own policies or a member group's) does *not* list it in
-`excluded_actions`.
+reachable deny-all-except grant (own policies or a member group's) does *not* list it in its
+`GRANTS` edge's `excluded_actions`. `Permission` itself is a global, action-keyed node — every
+`effect`/`excluded_actions`/`snapshot_id` filter above binds to the `GRANTS` relationship, not
+the node.
 
 `conditional` is true when any `CAN_ASSUME_ROLE` hop on the path carries `conditional = true`
 (a runtime-evaluated or unresolved trust condition) — it flags the path as uncertain rather

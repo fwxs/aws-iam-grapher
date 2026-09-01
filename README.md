@@ -199,8 +199,10 @@ scripts/neo4j-restore.sh -f ./backups/neo4j-backup-<timestamp>.tar.gz
 `--batch-size` (default 500, every `collect` subcommand) controls how many
 writes Neo4j commits per transaction during ingestion. See
 [`docs/limitations.md` § Validated scale ceiling](docs/limitations.md#validated-scale-ceiling)
-for tuning guidance and the account-sharding strategy for accounts that
-approach the ~10,000-permission-node practical ceiling.
+for tuning guidance and the account-sharding strategy for accounts with high
+`GRANTS` edge volume — `Permission` nodes themselves are now a global,
+action-keyed vocabulary bounded by the AWS IAM action count, not by
+snapshots or accounts.
 
 ---
 

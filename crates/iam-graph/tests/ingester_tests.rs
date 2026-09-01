@@ -88,7 +88,7 @@ async fn ingest_creates_permission_nodes_without_wildcards() {
         .client()
         .fetch_all(
             neo4rs::query(
-                "MATCH (perm:Permission {snapshot_id: $snap})
+                "MATCH (:Policy|InlinePolicy)-[g:GRANTS {snapshot_id: $snap}]->(perm:Permission)
                  WHERE perm.action CONTAINS '*'
                  RETURN count(perm) AS cnt",
             )
@@ -98,6 +98,115 @@ async fn ingest_creates_permission_nodes_without_wildcards() {
         .expect("wildcard query must succeed");
     let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
     assert_eq!(cnt, 0, "No permission node should have wildcard in action");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_same_action_across_two_snapshots_creates_one_permission_node() {
+    let client = helpers::shared_client().await;
+    let account_id = "111122223344";
+
+    // Same account, same policy shape, two separate snapshots (test_config generates a
+    // fresh random snapshot_id each call). Permission is global/action-keyed, so ingesting
+    // the same action twice must not double the Permission node count for that action.
+    let config_a = helpers::test_config(account_id);
+    let ingester_a = GraphIngester::new(client, config_a);
+    let (data_a, _) = helpers::data_with_policy(account_id);
+    ingester_a
+        .ingest(&data_a)
+        .await
+        .expect("ingest A must succeed");
+
+    let client_b = helpers::shared_client().await;
+    let config_b = helpers::test_config(account_id);
+    let ingester_b = GraphIngester::new(client_b, config_b);
+    let (data_b, _) = helpers::data_with_policy(account_id);
+    ingester_b
+        .ingest(&data_b)
+        .await
+        .expect("ingest B must succeed");
+
+    let rows = ingester_b
+        .client()
+        .fetch_all(neo4rs::query(
+            "MATCH (perm:Permission {action: 's3:GetObject'}) RETURN count(perm) AS cnt",
+        ))
+        .await
+        .expect("count query must succeed");
+    let cnt: i64 = rows[0].get("cnt").expect("cnt field must exist");
+    assert_eq!(
+        cnt, 1,
+        "the same action ingested under two snapshots must produce exactly one Permission node"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn ingest_full_admin_and_not_action_share_one_wildcard_node_but_distinct_grants() {
+    let client = helpers::shared_client().await;
+    let account_id = "111122223355";
+    let snapshot_id = uuid::Uuid::new_v4().to_string();
+
+    // Full-admin (Allow Action: "*") and allow-all-except (Allow NotAction: [...]) both
+    // collapse onto the single global action='*' Permission node, but must remain
+    // distinguishable via their own GRANTS edge's excluded_actions.
+    let mut full_admin = helpers::data_with_full_admin_role(account_id);
+    let not_action = helpers::data_with_allow_not_action(account_id, "s3:DeleteObject");
+    full_admin.roles.extend(not_action.roles);
+
+    let config = IngestConfig {
+        snapshot_id: snapshot_id.clone(),
+        ..helpers::test_config(account_id)
+    };
+    let ingester = GraphIngester::new(client, config);
+    ingester
+        .ingest(&full_admin)
+        .await
+        .expect("ingest must succeed");
+
+    let wildcard_nodes = ingester
+        .client()
+        .fetch_all(neo4rs::query(
+            "MATCH (perm:Permission {action: '*'}) RETURN count(perm) AS cnt",
+        ))
+        .await
+        .expect("node count query must succeed");
+    let node_cnt: i64 = wildcard_nodes[0].get("cnt").expect("cnt field must exist");
+    assert_eq!(
+        node_cnt, 1,
+        "full-admin and NotAction grants must share one action='*' Permission node"
+    );
+
+    let grants = ingester
+        .client()
+        .fetch_all(
+            neo4rs::query(
+                "MATCH (:InlinePolicy)-[g:GRANTS {snapshot_id: $snap}]->(:Permission {action: '*'})
+                 RETURN g.excluded_actions AS excluded_actions",
+            )
+            .param("snap", snapshot_id.as_str()),
+        )
+        .await
+        .expect("grants query must succeed");
+    assert_eq!(
+        grants.len(),
+        2,
+        "full-admin and NotAction must produce two distinct GRANTS edges, not one merge collision"
+    );
+    let mut has_full_admin = false;
+    let mut has_not_action = false;
+    for row in &grants {
+        let excluded: Option<Vec<String>> = row.get("excluded_actions").ok();
+        match excluded {
+            None => has_full_admin = true,
+            Some(_) => has_not_action = true,
+        }
+    }
+    assert!(
+        has_full_admin && has_not_action,
+        "must be able to distinguish full-admin (excluded_actions IS NULL) from \
+         allow-all-except (excluded_actions IS NOT NULL) via the edge alone"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

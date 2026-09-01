@@ -13,8 +13,8 @@ boundaries. Only transitive paths (1..N hops) are returned; run
 
 - `$org_run_id` — org collection run id shared across all per-account snapshots
 - `$risky_actions` — flat, deduplicated union of every action across every configured
-  risky-action group. Filters which `Permission` nodes are pulled back; AND/OR group semantics
-  are evaluated in Rust afterward, post-Deny-subtraction. See
+  risky-action group. Filters which `Permission` actions are pulled back (via the `GRANTS`
+  edge); AND/OR group semantics are evaluated in Rust afterward, post-Deny-subtraction. See
   [`privilege_escalation_paths`](privilege-escalation-paths.md) for the full explanation.
 - `{max_hops}` — **not a real Cypher parameter.** A validated literal integer interpolated
   into the query text at build time via `render_hop_bound()`, clamped to `[1, 10]`
@@ -33,34 +33,34 @@ WITH start, terminal, p
 ORDER BY length(p) ASC
 WITH start, terminal, collect(p)[0] AS p
 MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-                -[:GRANTS]->(perm:Permission {effect: 'Allow', snapshot_id: terminal.snapshot_id})
+                -[:GRANTS {effect: 'Allow', snapshot_id: terminal.snapshot_id}]->(perm:Permission)
 WHERE perm.action IN $risky_actions
 WITH start, p, terminal, collect(DISTINCT perm.action) AS direct_allowed_actions
 OPTIONAL MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-               -[:GRANTS]->(deny:Permission {effect: 'Deny', snapshot_id: terminal.snapshot_id})
-WHERE deny.excluded_actions IS NULL
+               -[dg:GRANTS {effect: 'Deny', snapshot_id: terminal.snapshot_id}]->(deny:Permission)
+WHERE dg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, collect(DISTINCT deny.action) AS own_deny_actions
 OPTIONAL MATCH (terminal)-[:MEMBER_OF]->(:Group)
                -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdpol)
-               -[:GRANTS]->(gdeny:Permission {effect: 'Deny', snapshot_id: terminal.snapshot_id})
-WHERE gdeny.excluded_actions IS NULL
+               -[gdg:GRANTS {effect: 'Deny', snapshot_id: terminal.snapshot_id}]->(gdeny:Permission)
+WHERE gdg.excluded_actions IS NULL
 WITH start, p, terminal, direct_allowed_actions, own_deny_actions,
      collect(DISTINCT gdeny.action) AS group_deny_actions
 WITH start, p, terminal,
      [a IN direct_allowed_actions WHERE
         NOT EXISTS {
             MATCH (terminal)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dnpol)
-                  -[:GRANTS]->(deny_not:Permission {action: '*', effect: 'Deny',
-                               snapshot_id: terminal.snapshot_id})
-            WHERE deny_not.excluded_actions IS NOT NULL AND NOT a IN deny_not.excluded_actions
+                  -[dng:GRANTS {effect: 'Deny', snapshot_id: terminal.snapshot_id}]
+                    ->(:Permission {action: '*'})
+            WHERE dng.excluded_actions IS NOT NULL AND NOT a IN dng.excluded_actions
         }
         AND NOT EXISTS {
             MATCH (terminal)-[:MEMBER_OF]->(:Group)
                   -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gdnpol)
-                  -[:GRANTS]->(gdeny_not:Permission {action: '*', effect: 'Deny',
-                               snapshot_id: terminal.snapshot_id})
-            WHERE gdeny_not.excluded_actions IS NOT NULL
-              AND NOT a IN gdeny_not.excluded_actions
+                  -[gdng:GRANTS {effect: 'Deny', snapshot_id: terminal.snapshot_id}]
+                    ->(:Permission {action: '*'})
+            WHERE gdng.excluded_actions IS NOT NULL
+              AND NOT a IN gdng.excluded_actions
         }
      ] AS allowed_actions,
      own_deny_actions, group_deny_actions
@@ -186,4 +186,6 @@ permission-verified `CAN_ASSUME_ROLE` semantics — identical here, scoped by
 Terminal risky-action filtering, Deny suppression, and deny-all-except evaluation mirror the
 single-account [`privilege_escalation_paths`](privilege-escalation-paths.md) query, but here
 `snapshot_id` is taken from `terminal.snapshot_id` rather than a parameter, since a path can
-cross snapshots belonging to different accounts within the same org run.
+cross snapshots belonging to different accounts within the same org run. `Permission` is a
+global, action-keyed node — every `effect`/`excluded_actions`/`snapshot_id` filter above binds
+to the `GRANTS` relationship, not the node.

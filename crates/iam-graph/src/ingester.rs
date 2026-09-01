@@ -244,42 +244,19 @@ impl GraphIngester {
         stats.groups_merged = data.groups.len() as u64;
         stats.instance_profiles_merged = data.instance_profiles.len() as u64;
 
-        // Phase 4 — permission nodes + ON_SERVICE relationships
+        // Phase 4 — permission nodes (global, action-keyed) + ON_SERVICE relationships.
+        // Permission is a vocabulary node shared across every snapshot/account, so this
+        // phase only needs the distinct action set seen in this collection, not one row
+        // per (policy × statement × action × resource) — that per-grant fan-out is Phase
+        // 6's job now (GRANTS edges carry effect/resource/condition/excluded_actions).
         info!(phase = 4, "ingesting permission nodes");
-        let mut permission_rows: Vec<Row> = Vec::new();
-        let mut on_service_rows: Vec<Row> = Vec::new();
-        let mut excluded_permission_rows: Vec<Row> = Vec::new();
-        let mut perm_count = 0u64;
+        let mut distinct_actions: HashSet<String> = HashSet::new();
         for p in &data.policies {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
-                    let effect_str = effect_str(&stmt.effect);
-                    let resources = statement_resources(stmt);
-                    let condition = stmt.condition.as_ref();
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            permission_rows.push(permission::permission_row(
-                                snap_id, acct_id, effect_str, action, resource, condition,
-                            ));
-                            let prefix = permission::service_prefix(action).to_string();
-                            on_service_rows.push(permission::permission_on_service_row(
-                                snap_id, effect_str, action, resource, &prefix, condition,
-                            ));
-                            perm_count += 1;
-                        }
-                    }
+                    distinct_actions.extend(stmt.action.iter().cloned());
                     if !stmt.not_action.is_empty() {
-                        for resource in &resources {
-                            excluded_permission_rows.push(permission::excluded_permission_row(
-                                snap_id,
-                                acct_id,
-                                effect_str,
-                                resource,
-                                &stmt.not_action,
-                                condition,
-                            ));
-                            perm_count += 1;
-                        }
+                        distinct_actions.insert("*".to_string());
                     }
                 }
             }
@@ -287,46 +264,29 @@ impl GraphIngester {
         for inlines in role_user_group_inline_sources(data) {
             for inline in inlines {
                 for stmt in &inline.policy_document.statement {
-                    let effect_str = effect_str(&stmt.effect);
-                    let resources = statement_resources(stmt);
-                    let condition = stmt.condition.as_ref();
-                    for action in &stmt.action {
-                        for resource in &resources {
-                            permission_rows.push(permission::permission_row(
-                                snap_id, acct_id, effect_str, action, resource, condition,
-                            ));
-                            let prefix = permission::service_prefix(action).to_string();
-                            on_service_rows.push(permission::permission_on_service_row(
-                                snap_id, effect_str, action, resource, &prefix, condition,
-                            ));
-                            perm_count += 1;
-                        }
-                    }
+                    distinct_actions.extend(stmt.action.iter().cloned());
                     if !stmt.not_action.is_empty() {
-                        for resource in &resources {
-                            excluded_permission_rows.push(permission::excluded_permission_row(
-                                snap_id,
-                                acct_id,
-                                effect_str,
-                                resource,
-                                &stmt.not_action,
-                                condition,
-                            ));
-                            perm_count += 1;
-                        }
+                        distinct_actions.insert("*".to_string());
                     }
                 }
             }
         }
+        let permission_rows: Vec<Row> = distinct_actions
+            .iter()
+            .map(|action| permission::permission_row(action))
+            .collect();
+        let on_service_rows: Vec<Row> = distinct_actions
+            .iter()
+            .filter(|action| action.as_str() != "*")
+            .map(|action| {
+                let prefix = permission::service_prefix(action).to_string();
+                permission::permission_on_service_row(action, &prefix)
+            })
+            .collect();
+        let perm_count = distinct_actions.len() as u64;
         // Permission nodes must exist before ON_SERVICE can MATCH them.
         self.execute_rows(4, permission::MERGE_PERMISSION, permission_rows)
             .await?;
-        self.execute_rows(
-            4,
-            permission::MERGE_EXCLUDED_PERMISSION,
-            excluded_permission_rows,
-        )
-        .await?;
         self.execute_rows(4, permission::PERMISSION_ON_SERVICE, on_service_rows)
             .await?;
         stats.permissions_merged = perm_count;
@@ -474,6 +434,7 @@ impl GraphIngester {
                         &mut inline_grants_rows,
                         &mut rel_count,
                         snap_id,
+                        acct_id,
                         &r.arn,
                         &inline.policy_name,
                         stmt,
@@ -515,6 +476,7 @@ impl GraphIngester {
                         &mut inline_grants_rows,
                         &mut rel_count,
                         snap_id,
+                        acct_id,
                         &u.arn,
                         &inline.policy_name,
                         stmt,
@@ -552,6 +514,7 @@ impl GraphIngester {
                         &mut inline_grants_rows,
                         &mut rel_count,
                         snap_id,
+                        acct_id,
                         &g.arn,
                         &inline.policy_name,
                         stmt,
@@ -568,6 +531,7 @@ impl GraphIngester {
         }
 
         // GRANTS from managed policies
+        const NO_EXCLUDED: &[String] = &[];
         for p in &data.policies {
             if let Some(doc) = &p.document {
                 for stmt in &doc.statement {
@@ -577,17 +541,26 @@ impl GraphIngester {
                     for action in &stmt.action {
                         for resource in &resources {
                             policy_grants_rows.push(relationships::policy_grants_row(
-                                snap_id, &p.arn, eff, action, resource, condition,
+                                snap_id,
+                                acct_id,
+                                &p.arn,
+                                eff,
+                                action,
+                                resource,
+                                NO_EXCLUDED,
+                                condition,
                             ));
                             rel_count += 1;
                         }
                     }
                     if !stmt.not_action.is_empty() {
                         for resource in &resources {
-                            policy_grants_rows.push(relationships::policy_grants_excluded_row(
+                            policy_grants_rows.push(relationships::policy_grants_row(
                                 snap_id,
+                                acct_id,
                                 &p.arn,
                                 eff,
+                                "*",
                                 resource,
                                 &stmt.not_action,
                                 condition,
@@ -753,14 +726,17 @@ fn statement_resources(stmt: &PolicyStatement) -> Vec<String> {
 }
 
 /// Push GRANTS queries (action + NotAction-excluded) for one inline-policy statement.
+#[allow(clippy::too_many_arguments)]
 fn push_inline_statement_grants(
     rows: &mut Vec<Row>,
     rel_count: &mut u64,
     snap_id: &str,
+    acct_id: &str,
     owner_arn: &str,
     inline_name: &str,
     stmt: &PolicyStatement,
 ) {
+    const NO_EXCLUDED: &[String] = &[];
     let eff = effect_str(&stmt.effect);
     let resources = statement_resources(stmt);
     let condition = stmt.condition.as_ref();
@@ -768,11 +744,13 @@ fn push_inline_statement_grants(
         for resource in &resources {
             rows.push(relationships::inline_grants_row(
                 snap_id,
+                acct_id,
                 owner_arn,
                 inline_name,
                 eff,
                 action,
                 resource,
+                NO_EXCLUDED,
                 condition,
             ));
             *rel_count += 1;
@@ -780,11 +758,13 @@ fn push_inline_statement_grants(
     }
     if !stmt.not_action.is_empty() {
         for resource in &resources {
-            rows.push(relationships::inline_grants_excluded_row(
+            rows.push(relationships::inline_grants_row(
                 snap_id,
+                acct_id,
                 owner_arn,
                 inline_name,
                 eff,
+                "*",
                 resource,
                 &stmt.not_action,
                 condition,

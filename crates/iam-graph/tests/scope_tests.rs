@@ -1,6 +1,10 @@
 mod helpers;
 
-use iam_graph::{resolve_org_context, resolve_scopes, GraphError, GraphIngester, ScopeSelector};
+use iam_graph::{
+    resolve_org_context, resolve_scopes, who_can, GraphError, GraphIngester, QueryContext,
+    ScopeSelector,
+};
+use iam_models::condition::ConditionContext;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
@@ -241,4 +245,51 @@ async fn resolve_org_context_falls_back_to_latest_org_run() {
         .expect("resolve_org_context must succeed");
 
     assert_eq!(ctx.org_run_id, org_run_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn candidate_deny_actions_does_not_leak_across_accounts() {
+    // Permission is now a global, action-keyed node with no account_id — Deny scoping lives
+    // entirely on the GRANTS edge. This proves candidate_deny_actions (exercised inside
+    // who_can) still isolates per account: account A's Deny on an action must not suppress
+    // an unrelated account B's Allow for the very same action.
+    let client = helpers::shared_client().await;
+    let account_a = "920000000007";
+    let account_b = "920000000008";
+    let action = "s3:DeleteObject";
+
+    let config_a = helpers::test_config(account_a);
+    let ingester_a = GraphIngester::new(client, config_a);
+    ingester_a
+        .ingest(&helpers::data_with_allow_and_deny(account_a, action))
+        .await
+        .expect("ingest A must succeed");
+
+    let client_b = helpers::shared_client().await;
+    let config_b = helpers::test_config(account_b);
+    let snapshot_b = config_b.snapshot_id.clone();
+    let ingester_b = GraphIngester::new(client_b, config_b);
+    ingester_b
+        .ingest(&helpers::data_with_role_action(account_b, action, true))
+        .await
+        .expect("ingest B must succeed");
+
+    let ctx_b = QueryContext::new(&snapshot_b, account_b);
+    let entities = who_can(
+        ingester_b.client().inner(),
+        &ctx_b,
+        action,
+        None,
+        &ConditionContext::default(),
+    )
+    .await
+    .expect("who_can must succeed");
+
+    assert!(
+        entities.iter().any(|e| e.name == "ActionRole"),
+        "account B's Allow must not be suppressed by account A's unrelated Deny — \
+         candidate_deny_actions must not leak across accounts now that Permission carries no \
+         account_id"
+    );
 }

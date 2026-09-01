@@ -8,10 +8,10 @@
 // param $snapshot_id: snapshot scope
 // param $account_id: account scope for tenant isolation
 
-MATCH (deny:Permission {
+MATCH (:Policy|InlinePolicy)-[g:GRANTS {
     effect: 'Deny',
     snapshot_id: $snapshot_id,
     account_id: $account_id
-})
-WHERE deny.excluded_actions IS NULL
+}]->(deny:Permission)
+WHERE g.excluded_actions IS NULL
 RETURN DISTINCT deny.action AS action

@@ -16,11 +16,10 @@ Instance profiles whose associated roles have an Allow permission for `$action`.
 MATCH (ip:InstanceProfile {account_id: $account_id, snapshot_id: $snapshot_id})
       -[:CONTAINS_ROLE]->(r:Role)
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {
-          action: $action,
+      -[:GRANTS {
           effect: 'Allow',
           snapshot_id: $snapshot_id
-      })
+      }]->(perm:Permission {action: $action})
 RETURN DISTINCT ip.arn AS arn, ip.name AS name
 ```
 

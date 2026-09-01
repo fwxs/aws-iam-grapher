@@ -24,16 +24,16 @@ WHERE (assumer:Role OR assumer:User)
   AND (
     EXISTS {
       MATCH (assumer)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-            -[:GRANTS]->(sp:Permission {effect: 'Allow', snapshot_id: assumer.snapshot_id})
+            -[sg:GRANTS {effect: 'Allow', snapshot_id: assumer.snapshot_id}]->(sp:Permission)
       WHERE sp.action IN ['sts:AssumeRole', '*']
-        AND (sp.resource = target.arn OR sp.resource = '*')
+        AND (sg.resource = target.arn OR sg.resource = '*')
     }
     OR EXISTS {
       MATCH (assumer)-[:MEMBER_OF]->(:Group)
             -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol)
-            -[:GRANTS]->(gsp:Permission {effect: 'Allow', snapshot_id: assumer.snapshot_id})
+            -[gsg:GRANTS {effect: 'Allow', snapshot_id: assumer.snapshot_id}]->(gsp:Permission)
       WHERE gsp.action IN ['sts:AssumeRole', '*']
-        AND (gsp.resource = target.arn OR gsp.resource = '*')
+        AND (gsg.resource = target.arn OR gsg.resource = '*')
     }
   )
 WITH assumer, target, ca,
@@ -41,14 +41,14 @@ WITH assumer, target, ca,
       OR (
         NOT EXISTS {
           MATCH (assumer)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol2)
-                -[:GRANTS]->(sp2:Permission {effect: 'Allow', snapshot_id: assumer.snapshot_id})
-          WHERE sp2.action IN ['sts:AssumeRole', '*'] AND sp2.resource = target.arn
+                -[sg2:GRANTS {effect: 'Allow', snapshot_id: assumer.snapshot_id}]->(sp2:Permission)
+          WHERE sp2.action IN ['sts:AssumeRole', '*'] AND sg2.resource = target.arn
         }
         AND NOT EXISTS {
           MATCH (assumer)-[:MEMBER_OF]->(:Group)
                 -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol2)
-                -[:GRANTS]->(gsp2:Permission {effect: 'Allow', snapshot_id: assumer.snapshot_id})
-          WHERE gsp2.action IN ['sts:AssumeRole', '*'] AND gsp2.resource = target.arn
+                -[gsg2:GRANTS {effect: 'Allow', snapshot_id: assumer.snapshot_id}]->(gsp2:Permission)
+          WHERE gsp2.action IN ['sts:AssumeRole', '*'] AND gsg2.resource = target.arn
         }
       )
      ) AS edge_conditional

@@ -14,7 +14,7 @@ Neo4j Community supports exactly one database per instance. All accounts, all co
 
 **Consequence:** Queries that omit `account_id` and `snapshot_id` filters silently operate across all collected data. The CLI always injects these filters automatically; manual Cypher written in Neo4j Browser must include them explicitly. See CLAUDE.md "Key Constraints" below.
 
-**Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
+**Mitigation (logical isolation):** every entity node carries `uid`, `snapshot_id`, and `account_id` (constraints defined in `crates/iam-graph/src/schema.rs`), and every analysis query requires a `QueryContext` (`crates/iam-graph/src/queries/`) that scopes on both. `Permission` is the one exception: it is a global, action-keyed vocabulary node shared across every snapshot/account (see "Validated scale ceiling" below), and scope for a given grant lives on the `GRANTS` relationship connecting it to a `Policy`/`InlinePolicy` instead of on the node itself. See CLAUDE.md "Key Constraints" for the full guarantee. This is logical isolation only — it does not substitute for physical multi-database separation, so untrusted or adversarial tenants still should not share an instance.
 
 ### No role-based access control (RBAC)
 
@@ -60,7 +60,7 @@ AWS Organizations SCPs restrict what IAM entities in member accounts can do, eve
 
 IAM policy statements may include `Condition` keys (e.g., `aws:RequestedRegion`, `aws:MultiFactorAuthPresent`, `s3:prefix`, `aws:PrincipalTag/*`). Conditions restrict when a permission applies. Full evaluation is undecidable without runtime request context, so only a fixed, documented subset is evaluated.
 
-**V1 behavior:** The `Condition` block is stored as a JSON string on `Permission.condition` (`iam-graph/src/nodes/permission.rs`). `who-can` evaluates it via `iam_models::condition::evaluate` (`crates/iam-models/src/condition.rs`) against an optional `ConditionContext` built from CLI flags:
+**V1 behavior:** The `Condition` block is stored as a JSON string on the `GRANTS` relationship's `condition` property (`GRANTS.condition`, built in `iam-graph/src/nodes/relationships.rs` — `Permission` itself is a global, action-keyed node and carries no condition). `who-can` evaluates it via `iam_models::condition::evaluate` (`crates/iam-models/src/condition.rs`) against an optional `ConditionContext` built from CLI flags:
 
 | Condition key | Operators evaluated | CLI flag |
 |---|---|---|
@@ -201,19 +201,40 @@ account-wide `CollectorWarning` (`MfaDevicesMissing`, `LoginProfileMissing`,
 
 ### Validated scale ceiling
 
+`Permission` is a global, action-keyed vocabulary node (`crates/iam-graph/src/nodes/permission.rs`)
+— it carries only `action`, shared across every snapshot and every account that grants it.
+`effect`, `resource`, `condition`, and `excluded_actions` live on the `GRANTS` relationship
+instead, so the per-grant fan-out (what used to inflate the node count) now lands on edges, which
+don't have a uniqueness-constraint ceiling the way nodes do.
+
 The ingestion pipeline has been load-tested against a synthetic account of:
 
-- **200 managed policies** × 10 statements × 8 concrete actions × 2 resources
+- **200 managed policies** × 10 statements, drawn from a small pool of concrete actions
 - **50 roles** each with one inline policy of the same shape
-- **~16 unique permission nodes** after uid-based deduplication (all policies share the same 8 actions × 2 resources)
+- **8 unique `Permission` nodes** after action-based deduplication (`stats.permissions_merged`),
+  against **160 possible (policy × statement) triples** before dedup
 
-The UNWIND bulk-merge strategy (500-row batches, Phase 4) processes this load in **under 30 seconds** on a local Neo4j container (single-core colima VM, 2 GB RAM).
+The UNWIND bulk-merge strategy (500-row batches, Phase 4 for nodes, Phase 6 for `GRANTS` edges)
+processes this load in **~36 seconds** on a local Neo4j container (single-core colima VM, 2 GB
+RAM).
 
-**Practical ceiling for a single snapshot:** ~10,000 unique permission nodes ingested comfortably in under 2 minutes. Beyond this, Neo4j Community write latency dominates; consider sharding by account or increasing `batch_size` in `IngestConfig`.
+**Practical ceiling:** because `Permission` node count is now bounded by the AWS IAM action
+vocabulary (low tens of thousands total, across every service) rather than by
+snapshots × accounts × statements, the old "~10,000 unique permission nodes per snapshot" ceiling
+no longer applies — a graph re-collecting the same accounts daily for months adds `GRANTS` edges,
+not new `Permission` nodes, for actions it has already seen. The scaling concern shifts to `GRANTS`
+edge volume (one edge per (policy, statement, action, resource, condition, excluded_actions)
+combination, per snapshot) and to `Permission` write contention: every snapshot ingest that grants
+a common action (e.g. `s3:GetObject`) merges onto the *same* node, so concurrent ingests across
+accounts can contend on that node's uniqueness-constraint index. This didn't happen under the old
+per-snapshot-keyed model. `Permission` write contention is bounded by IAM's action vocabulary
+either way — the number of distinct nodes concurrent ingests can possibly serialize on is small
+and fixed. Beyond typical volumes, Neo4j Community write latency dominates; consider tuning
+`batch_size` in `IngestConfig`.
 
 **Tuning `--batch-size`:** every `collect` subcommand exposes `--batch-size` (default 500), which sets `IngestConfig.batch_size` and controls how many Cypher rows are UNWOUND per transaction in `GraphIngester::execute_batch`. Larger batches reduce transaction overhead but hold more of the write in memory and in a single commit; smaller batches trade throughput for finer-grained failure recovery. Start from the default and increase in steps (e.g. 1000, 2000) while watching ingest wall-clock time — gains flatten once Neo4j's write path, not batching, is the bottleneck.
 
-**Sharding by account:** since every node and query is already scoped by `account_id` + `snapshot_id`, an account whose permission-node count approaches the ceiling can be collected into a **separate Neo4j instance** (its own `docker compose` project / data volume) rather than sharing one instance with other accounts. This keeps any single instance under the validated ceiling without code changes — `iam-grapher` already takes `--neo4j-uri` per invocation, so pointing different accounts at different instances is a deployment choice, not a schema change.
+**Sharding by account:** every entity node and query is still scoped by `account_id` + `snapshot_id`, so an account whose `GRANTS` edge volume approaches practical limits can still be collected into a **separate Neo4j instance** (its own `docker compose` project / data volume) rather than sharing one instance with other accounts — this remains a valid mitigation for edge volume, even though `Permission` node count itself is no longer the bottleneck it once was. `iam-grapher` already takes `--neo4j-uri` per invocation, so pointing different accounts at different instances is a deployment choice, not a schema change.
 
 To reproduce the benchmark: run the Docker-gated benchmark test:
 ```bash
