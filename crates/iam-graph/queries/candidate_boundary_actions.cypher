@@ -9,10 +9,10 @@
 // param $snapshot_id: snapshot scope
 // param $account_id: account scope for tenant isolation
 
-MATCH (e)-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(perm:Permission {
+MATCH (e)-[:BOUNDED_BY]->(:Policy)-[g:GRANTS {
     effect: 'Allow',
     snapshot_id: $snapshot_id
-})
+}]->(perm:Permission)
 WHERE e.account_id = $account_id
-  AND perm.excluded_actions IS NULL
+  AND g.excluded_actions IS NULL
 RETURN DISTINCT perm.action AS action

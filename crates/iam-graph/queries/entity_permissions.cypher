@@ -8,5 +8,5 @@
 // param $snapshot_id: snapshot scope
 
 MATCH (e {uid: $uid})-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {snapshot_id: $snapshot_id})
-RETURN perm.action AS action, perm.effect AS effect, perm.resource AS resource
+      -[g:GRANTS {snapshot_id: $snapshot_id}]->(perm:Permission)
+RETURN perm.action AS action, g.effect AS effect, g.resource AS resource

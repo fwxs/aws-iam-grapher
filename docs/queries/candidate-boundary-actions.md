@@ -3,8 +3,8 @@
 ## Purpose
 
 Every distinct Allow action string granted by a Permission Boundary policy (reached via
-`BOUNDED_BY`) in this snapshot/account scope, excluding allow-all-except sentinel nodes
-(`action = '*'` with `excluded_actions` set — those are matched inline in Cypher instead,
+`BOUNDED_BY`) in this snapshot/account scope, excluding allow-all-except grants (`action = '*'`
+with the `GRANTS` edge's `excluded_actions` set — those are matched inline in Cypher instead,
 see [`who_can`](who-can.md) / [`entity_permissions`](entity-permissions.md)).
 
 ## Parameters
@@ -15,12 +15,12 @@ see [`who_can`](who-can.md) / [`entity_permissions`](entity-permissions.md)).
 ## Cypher
 
 ```cypher
-MATCH (e)-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(perm:Permission {
+MATCH (e)-[:BOUNDED_BY]->(:Policy)-[g:GRANTS {
     effect: 'Allow',
     snapshot_id: $snapshot_id
-})
+}]->(perm:Permission)
 WHERE e.account_id = $account_id
-  AND perm.excluded_actions IS NULL
+  AND g.excluded_actions IS NULL
 RETURN DISTINCT perm.action AS action
 ```
 

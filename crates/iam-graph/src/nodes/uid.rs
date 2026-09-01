@@ -10,40 +10,13 @@ pub fn inline_policy_uid(snapshot_id: &str, owner_arn: &str, name: &str) -> Stri
     format!("{snapshot_id}|{owner_arn}|{name}")
 }
 
-/// UID for Permission nodes.
-///
-/// `condition` is folded into the UID (via [`canonical_condition`]) so two statements
-/// with the same action/resource/effect but *different* `Condition` blocks produce
-/// distinct nodes — otherwise a MERGE collision would silently drop one statement's
-/// condition, mis-flagging a conditional grant as unconditional.
-pub fn permission_uid(
-    snapshot_id: &str,
-    effect: &str,
-    action: &str,
-    resource: &str,
-    condition: Option<&Condition>,
-) -> String {
-    let cond = canonical_condition(condition);
-    format!("{snapshot_id}|{effect}|{action}|{resource}|{cond}")
-}
-
-/// UID for allow-all-except (NotAction) Permission nodes.
-///
-/// Encodes the sorted excluded-action list so two NotAction grants on the same
-/// resource but with different excluded sets get distinct nodes, and so the UID
-/// never collides with a true full-admin `action='*'` node.
-pub fn excluded_permission_uid(
-    snapshot_id: &str,
-    effect: &str,
-    resource: &str,
-    excluded: &[String],
-    condition: Option<&Condition>,
-) -> String {
+/// Deterministic, sorted encoding of an excluded-action list (`NotAction`), for folding
+/// into `GRANTS` edge merge keys so two NotAction grants on the same policy/resource/effect
+/// with different excluded sets don't collide.
+pub fn excluded_actions_key(excluded: &[String]) -> String {
     let mut sorted = excluded.to_vec();
     sorted.sort();
-    let joined = sorted.join(",");
-    let cond = canonical_condition(condition);
-    format!("{snapshot_id}|{effect}|*|{resource}|EXCEPT:{joined}|{cond}")
+    sorted.join(",")
 }
 
 /// Deterministic string encoding of a `Condition` block, independent of `HashMap`
@@ -99,64 +72,15 @@ mod tests {
     }
 
     #[test]
-    fn permission_uid_encodes_all_parts() {
-        assert_eq!(
-            permission_uid("snap-001", "Allow", "s3:GetObject", "*", None),
-            "snap-001|Allow|s3:GetObject|*|"
-        );
+    fn excluded_actions_key_is_deterministic_regardless_of_order() {
+        let a = excluded_actions_key(&["s3:DeleteObject".to_string(), "s3:GetObject".to_string()]);
+        let b = excluded_actions_key(&["s3:GetObject".to_string(), "s3:DeleteObject".to_string()]);
+        assert_eq!(a, b, "order of excluded list must not affect the key");
     }
 
     #[test]
-    fn excluded_permission_uid_is_deterministic_and_sorts_excluded() {
-        let a = excluded_permission_uid(
-            "snap-001",
-            "Allow",
-            "*",
-            &["s3:DeleteObject".to_string(), "s3:GetObject".to_string()],
-            None,
-        );
-        let b = excluded_permission_uid(
-            "snap-001",
-            "Allow",
-            "*",
-            &["s3:GetObject".to_string(), "s3:DeleteObject".to_string()],
-            None,
-        );
-        assert_eq!(a, b, "order of excluded list must not affect uid");
-        assert!(a.contains("EXCEPT:"), "uid must encode exclusion marker");
-    }
-
-    #[test]
-    fn excluded_permission_uid_differs_from_full_admin_uid() {
-        let full_admin = permission_uid("snap-001", "Allow", "*", "*", None);
-        let not_action = excluded_permission_uid(
-            "snap-001",
-            "Allow",
-            "*",
-            &["s3:GetObject".to_string()],
-            None,
-        );
-        assert_ne!(full_admin, not_action);
-    }
-
-    #[test]
-    fn permission_uid_differs_by_condition() {
-        use iam_models::ConditionValues;
-        use std::collections::HashMap;
-
-        let mut inner = HashMap::new();
-        inner.insert(
-            "aws:MultiFactorAuthPresent".to_string(),
-            ConditionValues(vec!["true".to_string()]),
-        );
-        let mut condition: Condition = HashMap::new();
-        condition.insert("Bool".to_string(), inner);
-
-        let unconditional = permission_uid("snap-001", "Allow", "s3:GetObject", "*", None);
-        let conditional =
-            permission_uid("snap-001", "Allow", "s3:GetObject", "*", Some(&condition));
-
-        assert_ne!(unconditional, conditional);
+    fn excluded_actions_key_empty_for_empty_list() {
+        assert_eq!(excluded_actions_key(&[]), "");
     }
 
     #[test]

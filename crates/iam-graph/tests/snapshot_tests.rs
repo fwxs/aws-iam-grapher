@@ -93,6 +93,52 @@ async fn delete_snapshot_preserves_aws_service_nodes() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker"]
+async fn delete_snapshot_preserves_permission_nodes() {
+    let client = helpers::shared_client().await;
+    let account_id = "666677778889";
+
+    let config = helpers::test_config(account_id);
+    let snap_id = config.snapshot_id.clone();
+    let ingester = GraphIngester::new(client, config);
+    let (data, _) = helpers::data_with_policy(account_id);
+    ingester.ingest(&data).await.expect("ingest must succeed");
+
+    let graph = ingester.client().inner();
+
+    // Record Permission node count before delete — Permission is a global, action-keyed
+    // vocabulary node (no snapshot_id), so deleting a snapshot must not delete it, mirroring
+    // delete_snapshot_preserves_aws_service_nodes above.
+    let rows_before = ingester
+        .client()
+        .fetch_all(neo4rs::query(
+            "MATCH (perm:Permission) RETURN count(perm) AS cnt",
+        ))
+        .await
+        .expect("count query must succeed");
+    let cnt_before: i64 = rows_before[0].get("cnt").expect("cnt field must exist");
+    assert!(cnt_before > 0, "ingest must have created Permission nodes");
+
+    delete_snapshot(graph, &snap_id)
+        .await
+        .expect("delete must succeed");
+
+    let rows_after = ingester
+        .client()
+        .fetch_all(neo4rs::query(
+            "MATCH (perm:Permission) RETURN count(perm) AS cnt",
+        ))
+        .await
+        .expect("count query must succeed");
+    let cnt_after: i64 = rows_after[0].get("cnt").expect("cnt field must exist");
+
+    assert_eq!(
+        cnt_before, cnt_after,
+        "Permission nodes must not be deleted with snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
 async fn ingest_with_warning_marks_snapshot_partial() {
     let client = helpers::shared_client().await;
     let account_id = "900000000003";

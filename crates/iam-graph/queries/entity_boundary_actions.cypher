@@ -7,8 +7,8 @@
 // param $uid: entity uid ("snapshot_id|arn")
 // param $snapshot_id: snapshot scope
 
-MATCH (e {uid: $uid})-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(perm:Permission {
+MATCH (e {uid: $uid})-[:BOUNDED_BY]->(:Policy)-[g:GRANTS {
     effect: 'Allow',
     snapshot_id: $snapshot_id
-})
-RETURN perm.action AS action, perm.excluded_actions AS excluded_actions
+}]->(perm:Permission)
+RETURN perm.action AS action, g.excluded_actions AS excluded_actions

@@ -20,16 +20,16 @@ MATCH (u)-[car:CAN_ASSUME_ROLE]->(role:Role)
 WHERE (
     EXISTS {
       MATCH (u)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-            -[:GRANTS]->(sp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+            -[sg:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(sp:Permission)
       WHERE sp.action IN ['sts:AssumeRole', '*']
-        AND (sp.resource = role.arn OR sp.resource = '*')
+        AND (sg.resource = role.arn OR sg.resource = '*')
     }
     OR EXISTS {
       MATCH (u)-[:MEMBER_OF]->(:Group)
             -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol)
-            -[:GRANTS]->(gsp:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
+            -[gsg:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(gsp:Permission)
       WHERE gsp.action IN ['sts:AssumeRole', '*']
-        AND (gsp.resource = role.arn OR gsp.resource = '*')
+        AND (gsg.resource = role.arn OR gsg.resource = '*')
     }
   )
 RETURN entity_arn, role.arn AS arn, role.name AS name, labels(role)[0] AS entity_type,
@@ -38,14 +38,14 @@ RETURN entity_arn, role.arn AS arn, role.name AS name, labels(role)[0] AS entity
         OR (
           NOT EXISTS {
             MATCH (u)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol2)
-                  -[:GRANTS]->(sp2:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-            WHERE sp2.action IN ['sts:AssumeRole', '*'] AND sp2.resource = role.arn
+                  -[sg2:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(sp2:Permission)
+            WHERE sp2.action IN ['sts:AssumeRole', '*'] AND sg2.resource = role.arn
           }
           AND NOT EXISTS {
             MATCH (u)-[:MEMBER_OF]->(:Group)
                   -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(gpol2)
-                  -[:GRANTS]->(gsp2:Permission {effect: 'Allow', snapshot_id: $snapshot_id})
-            WHERE gsp2.action IN ['sts:AssumeRole', '*'] AND gsp2.resource = role.arn
+                  -[gsg2:GRANTS {effect: 'Allow', snapshot_id: $snapshot_id}]->(gsp2:Permission)
+            WHERE gsp2.action IN ['sts:AssumeRole', '*'] AND gsg2.resource = role.arn
           }
         )
        ) AS conditional

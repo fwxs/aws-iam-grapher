@@ -22,7 +22,7 @@
 //   (action='*' AND excluded_actions IS NOT NULL AND $action NOT IN excluded_actions). Entities
 //   with no BOUNDED_BY edge are unaffected. is_bounded reports whether a boundary is attached,
 //   regardless of whether it capped anything.
-//   Every arm also returns perm.resource and a grant_kind ('exact' for arms 1/2, 'wildcard' for
+//   Every arm also returns g.resource and a grant_kind ('exact' for arms 1/2, 'wildcard' for
 //   arm 3) so the Rust caller can intersect arm-3's resource against an optional queried
 //   resource via iam_expander::glob_match (no glob logic in Cypher) — see who_can() in
 //   src/queries/analysis.rs. See limitations.md.
@@ -31,144 +31,143 @@
 // param $account_id: account scope for tenant isolation
 // param $deny_actions: concrete Deny action strings (exact/wildcard-matched/full-admin) that cover $action
 // param $boundary_allow_actions: concrete boundary Allow action strings (exact/wildcard-matched) that cover $action
-// Each arm also returns perm.condition (raw JSON string, or null) so the Rust caller can
-// evaluate the fixed condition subset (iam_models::condition::evaluate) against optional
-// query context and flag/exclude gated grants — see who_can() in src/queries/analysis.rs.
+// Permission is a global, action-keyed node — effect/resource/condition/excluded_actions and
+// snapshot/account scope live on the GRANTS edge. Each arm also returns g.condition (raw JSON
+// string, or null) so the Rust caller can evaluate the fixed condition subset
+// (iam_models::condition::evaluate) against optional query context and flag/exclude gated
+// grants — see who_can() in src/queries/analysis.rs.
 
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {
-          action: $action,
+      -[g:GRANTS {
           effect: 'Allow',
           snapshot_id: $snapshot_id
-      })
+      }]->(perm:Permission {action: $action})
 WHERE e.account_id = $account_id
   AND NOT EXISTS {
       MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND NOT EXISTS {
       MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND (
       NOT EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) }
       OR EXISTS {
-          MATCH (e)-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(b:Permission {
+          MATCH (e)-[:BOUNDED_BY]->(:Policy)-[bg:GRANTS {
               effect: 'Allow',
               snapshot_id: $snapshot_id
-          })
+          }]->(b:Permission)
           WHERE b.action IN $boundary_allow_actions
-             OR (b.action = '*' AND b.excluded_actions IS NULL)
-             OR (b.action = '*' AND b.excluded_actions IS NOT NULL
-                 AND NOT $action IN b.excluded_actions)
+             OR (b.action = '*' AND bg.excluded_actions IS NULL)
+             OR (b.action = '*' AND bg.excluded_actions IS NOT NULL
+                 AND NOT $action IN bg.excluded_actions)
       }
   )
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type, false AS is_full_admin,
-       perm.resource AS resource, 'exact' AS grant_kind,
+       g.resource AS resource, 'exact' AS grant_kind,
        EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
-       perm.condition AS condition
+       g.condition AS condition
 UNION
-MATCH (u:User)-[:MEMBER_OF]->(g:Group)
+MATCH (u:User)-[:MEMBER_OF]->(g_:Group)
       -[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {
-          action: $action,
+      -[g:GRANTS {
           effect: 'Allow',
           snapshot_id: $snapshot_id
-      })
+      }]->(perm:Permission {action: $action})
 WHERE u.account_id = $account_id
   AND NOT EXISTS {
       MATCH (u)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND NOT EXISTS {
       MATCH (u)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND (
       NOT EXISTS { MATCH (u)-[:BOUNDED_BY]->(:Policy) }
       OR EXISTS {
-          MATCH (u)-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(b:Permission {
+          MATCH (u)-[:BOUNDED_BY]->(:Policy)-[bg:GRANTS {
               effect: 'Allow',
               snapshot_id: $snapshot_id
-          })
+          }]->(b:Permission)
           WHERE b.action IN $boundary_allow_actions
-             OR (b.action = '*' AND b.excluded_actions IS NULL)
-             OR (b.action = '*' AND b.excluded_actions IS NOT NULL
-                 AND NOT $action IN b.excluded_actions)
+             OR (b.action = '*' AND bg.excluded_actions IS NULL)
+             OR (b.action = '*' AND bg.excluded_actions IS NOT NULL
+                 AND NOT $action IN bg.excluded_actions)
       }
   )
 RETURN u.arn AS arn, u.name AS name, labels(u)[0] AS entity_type, false AS is_full_admin,
-       perm.resource AS resource, 'exact' AS grant_kind,
+       g.resource AS resource, 'exact' AS grant_kind,
        EXISTS { MATCH (u)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
-       perm.condition AS condition
+       g.condition AS condition
 UNION
 MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(pol)
-      -[:GRANTS]->(perm:Permission {
-          action: '*',
+      -[g:GRANTS {
           effect: 'Allow',
           snapshot_id: $snapshot_id
-      })
+      }]->(perm:Permission {action: '*'})
 WHERE e.account_id = $account_id
-  AND NOT $action IN coalesce(perm.excluded_actions, [])
+  AND NOT $action IN coalesce(g.excluded_actions, [])
   AND NOT EXISTS {
       MATCH (e)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND NOT EXISTS {
       MATCH (e)-[:MEMBER_OF]->(:Group)-[:HAS_ATTACHED_POLICY|HAS_INLINE_POLICY*1..2]->(dpol)
-            -[:GRANTS]->(deny:Permission {
+            -[dg:GRANTS {
                 effect: 'Deny',
                 snapshot_id: $snapshot_id
-            })
+            }]->(deny:Permission)
       WHERE deny.action IN $deny_actions
-         OR (deny.action = '*' AND deny.excluded_actions IS NOT NULL
-             AND NOT $action IN deny.excluded_actions)
+         OR (deny.action = '*' AND dg.excluded_actions IS NOT NULL
+             AND NOT $action IN dg.excluded_actions)
   }
   AND (
       NOT EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) }
       OR EXISTS {
-          MATCH (e)-[:BOUNDED_BY]->(:Policy)-[:GRANTS]->(b:Permission {
+          MATCH (e)-[:BOUNDED_BY]->(:Policy)-[bg:GRANTS {
               effect: 'Allow',
               snapshot_id: $snapshot_id
-          })
+          }]->(b:Permission)
           WHERE b.action IN $boundary_allow_actions
-             OR (b.action = '*' AND b.excluded_actions IS NULL)
-             OR (b.action = '*' AND b.excluded_actions IS NOT NULL
-                 AND NOT $action IN b.excluded_actions)
+             OR (b.action = '*' AND bg.excluded_actions IS NULL)
+             OR (b.action = '*' AND bg.excluded_actions IS NOT NULL
+                 AND NOT $action IN bg.excluded_actions)
       }
   )
 RETURN e.arn AS arn, e.name AS name, labels(e)[0] AS entity_type,
-       perm.excluded_actions IS NULL AS is_full_admin,
-       perm.resource AS resource, 'wildcard' AS grant_kind,
+       g.excluded_actions IS NULL AS is_full_admin,
+       g.resource AS resource, 'wildcard' AS grant_kind,
        EXISTS { MATCH (e)-[:BOUNDED_BY]->(:Policy) } AS is_bounded,
-       perm.condition AS condition
+       g.condition AS condition

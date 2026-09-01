@@ -1,4 +1,5 @@
-use crate::nodes::uid::{entity_uid, excluded_permission_uid, inline_policy_uid, permission_uid};
+use crate::nodes::permission::condition_json;
+use crate::nodes::uid::{canonical_condition, entity_uid, excluded_actions_key, inline_policy_uid};
 use crate::nodes::Row;
 use iam_models::Condition;
 use neo4rs::{query, Query};
@@ -36,19 +37,42 @@ pub const MEMBER_OF: &str = "
 ";
 
 /// UNWIND-batched: GRANTS from managed policy to permission, per row.
+///
+/// `effect`/`resource`/`snapshot_id`/`condition_key`/`excluded_key` form the MERGE identity
+/// (so distinct conditions and distinct NotAction exclusion sets never collide onto the same
+/// edge); `condition`/`excluded_actions`/`account_id` are payload, set afterward.
 pub const POLICY_GRANTS: &str = "
     UNWIND $rows AS row
     MATCH (p:Policy {uid: row.policy_uid})
-    MATCH (perm:Permission {uid: row.perm_uid})
-    MERGE (p)-[:GRANTS]->(perm)
+    MATCH (perm:Permission {action: row.action})
+    MERGE (p)-[g:GRANTS {
+        effect: row.effect,
+        resource: row.resource,
+        snapshot_id: row.snapshot_id,
+        condition_key: row.condition_key,
+        excluded_key: row.excluded_key
+    }]->(perm)
+    SET g.condition = row.condition,
+        g.excluded_actions = row.excluded_actions,
+        g.account_id = row.account_id
 ";
 
-/// UNWIND-batched: GRANTS from inline policy to permission, per row.
+/// UNWIND-batched: GRANTS from inline policy to permission, per row. Same MERGE-identity
+/// shape as `POLICY_GRANTS`.
 pub const INLINE_GRANTS: &str = "
     UNWIND $rows AS row
     MATCH (ip:InlinePolicy {uid: row.inline_uid})
-    MATCH (perm:Permission {uid: row.perm_uid})
-    MERGE (ip)-[:GRANTS]->(perm)
+    MATCH (perm:Permission {action: row.action})
+    MERGE (ip)-[g:GRANTS {
+        effect: row.effect,
+        resource: row.resource,
+        snapshot_id: row.snapshot_id,
+        condition_key: row.condition_key,
+        excluded_key: row.excluded_key
+    }]->(perm)
+    SET g.condition = row.condition,
+        g.excluded_actions = row.excluded_actions,
+        g.account_id = row.account_id
 ";
 
 /// UNWIND-batched: CAN_ASSUME from a principal to a role (trust policy), per row.
@@ -139,12 +163,18 @@ pub fn member_of_row(snapshot_id: &str, user_arn: &str, group_arn: &str) -> Row 
 }
 
 /// Build a row for the `POLICY_GRANTS` UNWIND statement.
+///
+/// `excluded` is empty for a normal `Action` grant, or the sorted `NotAction` list for an
+/// allow/deny-all-except grant (in which case `action` is always `"*"`).
+#[allow(clippy::too_many_arguments)]
 pub fn policy_grants_row(
     snapshot_id: &str,
+    account_id: &str,
     policy_arn: &str,
     effect: &str,
     action: &str,
     resource: &str,
+    excluded: &[String],
     condition: Option<&Condition>,
 ) -> Row {
     Row::from([
@@ -152,65 +182,43 @@ pub fn policy_grants_row(
             "policy_uid".to_string(),
             entity_uid(snapshot_id, policy_arn).into(),
         ),
+        ("action".to_string(), action.into()),
+        ("effect".to_string(), effect.into()),
+        ("resource".to_string(), resource.into()),
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        ("account_id".to_string(), account_id.into()),
         (
-            "perm_uid".to_string(),
-            permission_uid(snapshot_id, effect, action, resource, condition).into(),
+            "condition_key".to_string(),
+            canonical_condition(condition).into(),
         ),
+        (
+            "excluded_key".to_string(),
+            excluded_actions_key(excluded).into(),
+        ),
+        (
+            "excluded_actions".to_string(),
+            if excluded.is_empty() {
+                None
+            } else {
+                Some(excluded.to_vec())
+            }
+            .into(),
+        ),
+        ("condition".to_string(), condition_json(condition).into()),
     ])
 }
 
-/// Build a row for the `INLINE_GRANTS` UNWIND statement.
+/// Build a row for the `INLINE_GRANTS` UNWIND statement. See `policy_grants_row` for the
+/// `excluded` convention.
+#[allow(clippy::too_many_arguments)]
 pub fn inline_grants_row(
     snapshot_id: &str,
+    account_id: &str,
     owner_arn: &str,
     inline_name: &str,
     effect: &str,
     action: &str,
     resource: &str,
-    condition: Option<&Condition>,
-) -> Row {
-    Row::from([
-        (
-            "inline_uid".to_string(),
-            inline_policy_uid(snapshot_id, owner_arn, inline_name).into(),
-        ),
-        (
-            "perm_uid".to_string(),
-            permission_uid(snapshot_id, effect, action, resource, condition).into(),
-        ),
-    ])
-}
-
-/// Build a row for the `POLICY_GRANTS` UNWIND statement targeting an
-/// allow-all-except Permission node.
-pub fn policy_grants_excluded_row(
-    snapshot_id: &str,
-    policy_arn: &str,
-    effect: &str,
-    resource: &str,
-    excluded: &[String],
-    condition: Option<&Condition>,
-) -> Row {
-    Row::from([
-        (
-            "policy_uid".to_string(),
-            entity_uid(snapshot_id, policy_arn).into(),
-        ),
-        (
-            "perm_uid".to_string(),
-            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition).into(),
-        ),
-    ])
-}
-
-/// Build a row for the `INLINE_GRANTS` UNWIND statement targeting an
-/// allow-all-except Permission node.
-pub fn inline_grants_excluded_row(
-    snapshot_id: &str,
-    owner_arn: &str,
-    inline_name: &str,
-    effect: &str,
-    resource: &str,
     excluded: &[String],
     condition: Option<&Condition>,
 ) -> Row {
@@ -219,10 +227,29 @@ pub fn inline_grants_excluded_row(
             "inline_uid".to_string(),
             inline_policy_uid(snapshot_id, owner_arn, inline_name).into(),
         ),
+        ("action".to_string(), action.into()),
+        ("effect".to_string(), effect.into()),
+        ("resource".to_string(), resource.into()),
+        ("snapshot_id".to_string(), snapshot_id.into()),
+        ("account_id".to_string(), account_id.into()),
         (
-            "perm_uid".to_string(),
-            excluded_permission_uid(snapshot_id, effect, resource, excluded, condition).into(),
+            "condition_key".to_string(),
+            canonical_condition(condition).into(),
         ),
+        (
+            "excluded_key".to_string(),
+            excluded_actions_key(excluded).into(),
+        ),
+        (
+            "excluded_actions".to_string(),
+            if excluded.is_empty() {
+                None
+            } else {
+                Some(excluded.to_vec())
+            }
+            .into(),
+        ),
+        ("condition".to_string(), condition_json(condition).into()),
     ])
 }
 

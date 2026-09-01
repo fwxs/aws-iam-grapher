@@ -1,18 +1,20 @@
 // name: diff_removed
 // description: Permissions present in snapshot A but absent from snapshot B (removed).
+//   Permission is a global, action-keyed node — the (action, resource, effect) tuple
+//   comparison runs over GRANTS edges scoped by snapshot_id/account_id, not node properties.
 // param $snapshot_a: baseline snapshot id
 // param $snapshot_b: comparison snapshot id
 // param $account_id: account scope for tenant isolation
 
-MATCH (perm:Permission {snapshot_id: $snapshot_a, account_id: $account_id})
+MATCH (:Policy|InlinePolicy)-[g:GRANTS {snapshot_id: $snapshot_a, account_id: $account_id}]
+        ->(perm:Permission)
 WHERE NOT EXISTS {
-    MATCH (:Permission {
-        action: perm.action,
-        resource: perm.resource,
-        effect: perm.effect,
+    MATCH (:Policy|InlinePolicy)-[gb:GRANTS {
         snapshot_id: $snapshot_b,
-        account_id: $account_id
-    })
+        account_id: $account_id,
+        effect: g.effect,
+        resource: g.resource
+    }]->(:Permission {action: perm.action})
 }
-RETURN perm.action AS action, perm.resource AS resource, perm.effect AS effect
+RETURN DISTINCT perm.action AS action, g.resource AS resource, g.effect AS effect
 ORDER BY perm.action

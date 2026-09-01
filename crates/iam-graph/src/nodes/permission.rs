@@ -1,4 +1,3 @@
-use crate::nodes::uid::{excluded_permission_uid, permission_uid};
 use crate::nodes::Row;
 use iam_models::Condition;
 
@@ -9,37 +8,20 @@ pub const MERGE_AWS_SERVICE: &str = "
     ON CREATE SET svc.name = row.name
 ";
 
-/// UNWIND-batched: MERGE a Permission node per row.
+/// UNWIND-batched: MERGE a Permission node per row. Global, action-keyed vocabulary node —
+/// no snapshot_id/account_id/effect/resource/condition; those live on the `GRANTS` edge.
 pub const MERGE_PERMISSION: &str = "
     UNWIND $rows AS row
-    MERGE (perm:Permission {uid: row.uid})
-    SET perm.action = row.action,
-        perm.resource = row.resource,
-        perm.effect = row.effect,
-        perm.account_id = row.account_id,
-        perm.snapshot_id = row.snapshot_id,
-        perm.condition = row.condition
+    MERGE (perm:Permission {action: row.action})
 ";
 
-/// UNWIND-batched: link a Permission to its AwsService per row.
+/// UNWIND-batched: link a Permission to its AwsService per row. One-time-per-action —
+/// no longer recomputed per snapshot/statement.
 pub const PERMISSION_ON_SERVICE: &str = "
     UNWIND $rows AS row
-    MATCH (perm:Permission {uid: row.uid})
+    MATCH (perm:Permission {action: row.action})
     MATCH (svc:AwsService {prefix: row.prefix})
     MERGE (perm)-[:ON_SERVICE]->(svc)
-";
-
-/// UNWIND-batched: MERGE an allow-all-except Permission node per row.
-pub const MERGE_EXCLUDED_PERMISSION: &str = "
-    UNWIND $rows AS row
-    MERGE (perm:Permission {uid: row.uid})
-    SET perm.action = '*',
-        perm.resource = row.resource,
-        perm.effect = row.effect,
-        perm.account_id = row.account_id,
-        perm.snapshot_id = row.snapshot_id,
-        perm.excluded_actions = row.excluded_actions,
-        perm.condition = row.condition
 ";
 
 /// Build a row for the `MERGE_AWS_SERVICE` UNWIND statement.
@@ -52,74 +34,23 @@ pub fn aws_service_row(prefix: &str) -> Row {
 }
 
 /// Build a row for the `MERGE_PERMISSION` UNWIND statement.
-///
-/// `condition` (if present and non-empty) is stored as a JSON string on `perm.condition`
-/// so query-time evaluators (see `iam_models::condition`) can read it back and flag
-/// gated grants instead of treating them as unconditional.
-pub fn permission_row(
-    snapshot_id: &str,
-    account_id: &str,
-    effect: &str,
-    action: &str,
-    resource: &str,
-    condition: Option<&Condition>,
-) -> Row {
-    let uid = permission_uid(snapshot_id, effect, action, resource, condition);
-    Row::from([
-        ("uid".to_string(), uid.into()),
-        ("action".to_string(), action.into()),
-        ("resource".to_string(), resource.into()),
-        ("effect".to_string(), effect.into()),
-        ("account_id".to_string(), account_id.into()),
-        ("snapshot_id".to_string(), snapshot_id.into()),
-        ("condition".to_string(), condition_json(condition).into()),
-    ])
-}
-
-/// Build a row for the `MERGE_EXCLUDED_PERMISSION` UNWIND statement (from a
-/// `NotAction` statement).
-///
-/// The node stores `action = '*'` with an `excluded_actions` list. `who_can` matches it for
-/// any queried action that is NOT in `excluded_actions`. No `ON_SERVICE` edge — the `*`
-/// action belongs to no single service prefix.
-pub fn excluded_permission_row(
-    snapshot_id: &str,
-    account_id: &str,
-    effect: &str,
-    resource: &str,
-    excluded: &[String],
-    condition: Option<&Condition>,
-) -> Row {
-    let uid = excluded_permission_uid(snapshot_id, effect, resource, excluded, condition);
-    Row::from([
-        ("uid".to_string(), uid.into()),
-        ("resource".to_string(), resource.into()),
-        ("effect".to_string(), effect.into()),
-        ("account_id".to_string(), account_id.into()),
-        ("snapshot_id".to_string(), snapshot_id.into()),
-        ("excluded_actions".to_string(), excluded.to_vec().into()),
-        ("condition".to_string(), condition_json(condition).into()),
-    ])
+pub fn permission_row(action: &str) -> Row {
+    Row::from([("action".to_string(), action.into())])
 }
 
 /// Build a row for the `PERMISSION_ON_SERVICE` UNWIND statement.
-pub fn permission_on_service_row(
-    snapshot_id: &str,
-    effect: &str,
-    action: &str,
-    resource: &str,
-    prefix: &str,
-    condition: Option<&Condition>,
-) -> Row {
-    let uid = permission_uid(snapshot_id, effect, action, resource, condition);
+pub fn permission_on_service_row(action: &str, prefix: &str) -> Row {
     Row::from([
-        ("uid".to_string(), uid.into()),
+        ("action".to_string(), action.into()),
         ("prefix".to_string(), prefix.into()),
     ])
 }
 
 /// Serialize a `Condition` block to a JSON string for storage, or `None` if absent/empty.
-fn condition_json(condition: Option<&Condition>) -> Option<String> {
+///
+/// Used by `relationships.rs`'s `GRANTS`-edge row builders now that `condition` lives on
+/// the edge rather than the `Permission` node.
+pub(crate) fn condition_json(condition: Option<&Condition>) -> Option<String> {
     condition
         .filter(|c| !c.is_empty())
         .map(|c| serde_json::to_string(c).expect("Condition serializes to JSON"))
